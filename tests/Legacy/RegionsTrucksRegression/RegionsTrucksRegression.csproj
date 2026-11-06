@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckDifficulty.cs" Link="MissionTruckDifficulty.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckRandomizer.cs" Link="MissionTruckRandomizer.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/TruckMassCatalog.cs" Link="TruckMassCatalog.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/RegionsTrucksHover.cs" Link="RegionsTrucksHover.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TruckCellHoverPreview.cs" Link="TruckCellHoverPreview.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TileFlowPanel.cs" Link="TileFlowPanel.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/TierListStore.cs" Link="TierListStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs" Link="RegionTierListStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TruckThumbnailProvider.cs" Link="TruckThumbnailProvider.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/RegionTruckCatalogService.cs" Link="RegionTruckCatalogService.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationEquipment.cs" Link="TruckRandomizationEquipment.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/ObtainableTruckRandomizer.cs" Link="ObtainableTruckRandomizer.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs" Link="RegionProgressionService.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs" Link="RegionProgressionStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs" Link="CustomGroupStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/TruckEquipmentCatalog.cs" Link="TruckEquipmentCatalog.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TruckDetailsFormatter.cs" Link="TruckDetailsFormatter.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/MapArchiveWriter.cs" Link="MapArchiveWriter.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/PendingTruckReplacements.cs" Link="PendingTruckReplacements.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Editors/Experience/RankProgressionChanges.cs" Link="RankProgressionChanges.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Workspace/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Workspace/WorkspaceChangeAudit.cs" Link="WorkspaceChangeAudit.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Workspace/StartChangesPanel.cs" Link="StartChangesPanel.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs" Link="CustomTruck.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/TruckClasses.cs" Link="TruckClasses.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/RegionTruckPlacementOverrides.cs" Link="RegionTruckPlacementOverrides.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/RegionTruckAvailabilityStore.cs" Link="RegionTruckAvailabilityStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Maps/RegionsTrucksTab.cs" Link="RegionsTrucksTab.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/RegionTileAssets.cs" Link="RegionTileAssets.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/RegionTileButton.cs" Link="RegionTileButton.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/SsoDataReader.cs" Link="SsoDataReader.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Workspace/WorkspaceLayout.cs" Link="WorkspaceLayout.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../../src/SnowPakTool.Desktop/Assets/Regions/*.png" LogicalName="SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json" />
+    <EmbeddedResource Include="../../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TableHeaderCell.cs" Link="TableHeaderCell.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TextAreaStyle.cs" Link="TextAreaStyle.cs" />
+  </ItemGroup>
+</Project>

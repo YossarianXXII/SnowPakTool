@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs" Link="RegionProgressionService.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs" Link="RegionProgressionStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionProgressionTab.cs" Link="RegionProgressionTab.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs" Link="CustomTruck.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs" Link="CustomGroupStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/TierListStore.cs" Link="TierListStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs" Link="RegionTierListStore.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/TileFlowPanel.cs" Link="TileFlowPanel.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/RegionTileAssets.cs" Link="RegionTileAssets.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
+    <Compile Include="../../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+    <EmbeddedResource Include="../../../src/SnowPakTool.Desktop/Assets/Regions/*.png">
+      <LogicalName>SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

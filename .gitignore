@@ -3,6 +3,26 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Repository-local tooling, historical scratch space and generated releases.
+/.checks/
+/.dotnet_home/
+/.dotnet/
+/artifacts/
+**/publish*/
+*.lnk
+
+# User/game data belongs outside this source repository.
+/workspace/
+/backups/
+*.pak
+*.snowpreset
+*.dmp
+*.etl
+
+# Local extracted mod XML and an unused thumbnail download are not source inputs.
+/mods/trucks/
+/src/SnowPakTool.Desktop/Assets/aac-58dw.webp
+
 # User-specific files
 *.rsuser
 *.suo
