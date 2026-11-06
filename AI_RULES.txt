@@ -1,0 +1,6 @@
+For each change show diff.
+After each confirmed change build and publish to same folder if possible.
+
+When change is prefaced as 'Small' or 'minor' add it to a pool of changes, but ask to make the changes when there is 10 or more of them.
+
+Keep the UI style (color, sizing, layout, etc.) consistent with already existing elements

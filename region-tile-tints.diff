@@ -1,0 +1,50 @@
+--- src\SnowPakTool.Desktop\RegionTierListStore.cs
++++ src\SnowPakTool.Desktop\RegionTierListStore.cs
+@@ -20,6 +20,15 @@
+         "D" => AppColors.Get("TierS"),
+         _ => Color.FromArgb(215, 220, 225)
+     };
++
++    public static Color BackgroundFor(string name)
++    {
++        var color = ColorFor(name);
++        if (!Names.Contains(name)) return color;
++        var surface = AppColors.Get("Surface");
++        return Color.FromArgb((surface.R * 4 + color.R) / 5,
++            (surface.G * 4 + color.G) / 5, (surface.B * 4 + color.B) / 5);
++    }
+ 
+     private sealed class RegionTierState
+     {
+--- src\SnowPakTool.Desktop\CustomGroupWipTab.cs
++++ src\SnowPakTool.Desktop\CustomGroupWipTab.cs
+@@ -149,7 +149,8 @@
+             {
+                 var c = _regionList ? RegionTierListStore.ColorFor(state.Name) : TierListStore.ColorFor(state.Name);
+                 var b = AppColors.Get("Surface");
+-                section.Panel.BackColor = Color.FromArgb((b.R * 4 + c.R) / 5, (b.G * 4 + c.G) / 5, (b.B * 4 + c.B) / 5);
++                section.Panel.BackColor = _regionList ? RegionTierListStore.BackgroundFor(state.Name) :
++                    Color.FromArgb((b.R * 4 + c.R) / 5, (b.G * 4 + c.G) / 5, (b.B * 4 + c.B) / 5);
+                 tierHeader.BackColor = Color.FromArgb((b.R + c.R * 2) / 3, (b.G + c.G * 2) / 3, (b.B + c.B * 2) / 3);
+                 tierHeader.ForeColor = tierHeader.BackColor.GetBrightness() < 0.45f ? Color.White : Color.Black;
+             }
+@@ -669,7 +670,7 @@
+                 "highway" => "TruckClassHighway",
+                 _ => null
+             };
+-            var tierBackground = RegionTierListStore.ColorFor(regionTier ?? "Unsorted");
++            var tierBackground = RegionTierListStore.BackgroundFor(regionTier ?? "Unsorted");
+             var background = tile.SearchActive ? AppColors.Get("SearchActive") : tile.SearchMatch ? AppColors.Get("EngineMatch") :
+                 region && regionTier is not null ? tierBackground :
+                 key is null ? Color.FromArgb(32, 38, 45) : AppColors.Get(key);
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the Region Difficulty tier palette (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 

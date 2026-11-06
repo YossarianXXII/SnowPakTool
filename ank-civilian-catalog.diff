@@ -1,0 +1,106 @@
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index d82579d..065d1cd 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -509,8 +509,16 @@ internal sealed class OwnedContentTab : UserControl
+         var dlcEntries = File.Exists(dlcLibraryFile)
+             ? ReadDlcEntries(WorkspaceDataCache.ReadAllText(dlcLibraryFile, Encoding.UTF8), localizedNames, truckMetadata)
+             : [];
+-        var baseTruckFiles = WorkspaceOriginals.EnumerateCurrentFiles(workspace, Path.Combine("[media]", "classes", "trucks"), "*.xml", SearchOption.TopDirectoryOnly).ToArray();
+-        return new PreparedWorkspaceData(truckMetadata, dlcEntries, baseTruckFiles);
++        var baseTruckFiles = WorkspaceOriginals.EnumerateCurrentFiles(workspace, Path.Combine("[media]", "classes", "trucks"), "*.xml", SearchOption.TopDirectoryOnly).ToList();
++        // ANK Civilian ships in a DLC folder without a truck entitlement entry.
++        // Include it in the base catalog so ownership/grouping/tier consumers can see it.
++        // Do not infer that every unlisted DLC-folder vehicle is a base-game truck.
++        var civilianFile = WorkspaceOriginals.GetCurrentPath(workspace,
++            Path.Combine("[media]", "_dlc", "dlc_6", "classes", "trucks", "ank_mk38_ht.xml"));
++        if (truckMetadata.ContainsKey("ank_mk38_ht") && File.Exists(civilianFile)
++            && !baseTruckFiles.Any(file => Path.GetFileNameWithoutExtension(file).Equals("ank_mk38_ht", StringComparison.OrdinalIgnoreCase)))
++            baseTruckFiles.Add(civilianFile);
++        return new PreparedWorkspaceData(truckMetadata, dlcEntries, baseTruckFiles.ToArray());
+     }
+ 
+     private sealed record PreparedWorkspaceData(
+diff --git a/README.md b/README.md
+index 4a1db85..4451f30 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,8 @@ All desktop tabs share one double-Shift text search with a three-character minim
+ 
+ The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
++ANK MK38 Civilian (`ank_mk38_ht`) is included in the base truck catalog even though its XML is stored under `_dlc/dlc_6` without a truck entitlement entry. It appears in Tier lists → Truck → Unsorted until ranked, and shares that assignment with Truck properties. Its tier is independent of the regular ANK MK38.
++
+ Run it from the repository root with:
+ 
+ ```powershell
+diff --git a/.checks/AnkCivilian/Program.cs b/.checks/AnkCivilian/Program.cs
+new file mode 100644
+index 0000000..5cee3bd
+--- /dev/null
++++ b/.checks/AnkCivilian/Program.cs
+@@ -0,0 +1,54 @@
++using System.Collections;
++using System.Linq.Expressions;
++using System.Reflection;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    private static object? Call(object obj, string method, params object[] args) => obj.GetType().GetMethod(method, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(obj, args);
++    private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static object Prepare(string workspace) => T("OwnedContentTab").GetMethod("PrepareWorkspaceData", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { workspace, new Dictionary<string, string>() })!;
++    private static string[] BaseFiles(string workspace) { var prepared = Prepare(workspace); return (string[])prepared.GetType().GetProperty("BaseTruckFiles")!.GetValue(prepared)!; }
++    private static void Put(string workspace, string relative, string text)
++    {
++        var path = Path.Combine(workspace, "initial.pak", "original_files", relative);
++        Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, text);
++    }
++    [STAThread] private static void Main(string[] args)
++    {
++        var workspace = Path.Combine(AppContext.BaseDirectory, "fixtures", Guid.NewGuid().ToString("N"));
++        const string civilian = "[media]/_dlc/dlc_6/classes/trucks/ank_mk38_ht.xml";
++        const string xml = "<Truck><TruckData TruckType=\"OFFROAD\"/><GameData><UiDesc UiName=\"TEST_ANK_CIVILIAN\"/></GameData></Truck>";
++        Put(workspace, "[media]/classes/trucks/ank_mk38.xml", xml);
++        Put(workspace, "[media]/_dlc/dlc_6/classes/trucks/unlisted_paid.xml", xml);
++        Check(BaseFiles(workspace).Select(Path.GetFileNameWithoutExtension).SequenceEqual(new[] { "ank_mk38" }), "missing Civilian does not create a phantom tile or unlock unlisted DLC trucks");
++        Put(workspace, civilian, xml);
++        var files = BaseFiles(workspace).Select(Path.GetFileNameWithoutExtension).ToArray();
++        Check(files.Contains("ank_mk38") && files.Contains("ank_mk38_ht") && files.Length == 2, "both ANKs are included independently; unrelated DLC remains excluded");
++        Put(workspace, "[ps]/dlc_library.sso", "");
++        Put(workspace, "[ps]/zone_desc_storage.sso", "");
++        Put(workspace, "[strings]/strings_english.str", "TEST_ANK_CIVILIAN \"ANK MK38 Civilian\"\n");
++        using var owned = (Control)Activator.CreateInstance(T("OwnedContentTab"), new Func<string>(() => workspace), Activator.CreateInstance(T("OwnedRegionState"))!)!;
++        Call(owned, "EnsureLoaded");
++        var trucks = Call(owned, "GetAvailableCustomGroupingTrucks")!;
++        var codes = ((IEnumerable)trucks).Cast<object>().Select(truck => (string)truck.GetType().GetProperty("Code")!.GetValue(truck)!).ToArray();
++        Check(codes.Contains("ank_mk38_ht") && !codes.Contains("unlisted_paid"), "shared grouping catalog exposes Civilian without owning a DLC");
++        Check(((IEnumerable)Call(owned, "GetOwnedTrucks")!).Cast<object>().Any(truck => (string)truck.GetType().GetProperty("Code")!.GetValue(truck)! == "ank_mk38_ht"), "Civilian is also available to consumers of the owned-truck catalog");
++        var resultType = typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck"));
++        var getter = Expression.Lambda(typeof(Func<>).MakeGenericType(resultType), Expression.Constant(trucks, resultType)).Compile();
++        using var tiers = (Control)Activator.CreateInstance(T("CustomGroupWipTab"), getter, true, false)!;
++        var unsorted = (Control)Field(tiers, "_unsortedTiles");
++        Check(unsorted.Controls.Cast<Control>().Any(tile => Convert.ToString(tile.Tag) == "ank_mk38_ht"), "ANK Civilian appears in the actual tier-list Unsorted pane");
++        var duplicateWorkspace = workspace + "-duplicate";
++        Put(duplicateWorkspace, "[media]/classes/trucks/ank_mk38_ht.xml", xml);
++        Put(duplicateWorkspace, civilian, xml);
++        Check(BaseFiles(duplicateWorkspace).Count(path => Path.GetFileNameWithoutExtension(path) == "ank_mk38_ht") == 1, "base-folder Civilian is not duplicated");
++        if (args.Length > 0)
++        {
++            Check(BaseFiles(args[0]).Count(path => Path.GetFileNameWithoutExtension(path) == "ank_mk38_ht") == 1, "real workspace includes exactly one ANK Civilian in its base catalog");
++        }
++        Console.WriteLine("All ANK Civilian checks passed; no user rankings or game data were modified.");
++    }
++}
+diff --git a/.checks/AnkCivilian/AnkCivilian.csproj b/.checks/AnkCivilian/AnkCivilian.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/AnkCivilian/AnkCivilian.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

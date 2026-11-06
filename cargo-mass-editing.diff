@@ -1,0 +1,701 @@
+diff --git a/investigation/cargo-editing/before/CargoCatalogService.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoCatalogService.cs
+index ee7a5e1..d794183 100644
+--- a/investigation/cargo-editing/before/CargoCatalogService.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoCatalogService.cs
+@@ -5,9 +5,10 @@ using System.Xml.Linq;
+ namespace SnowPakTool.Desktop;
+ 
+ internal sealed record CargoProperty(string Source, string Property, string Value);
++internal sealed record CargoMassTarget(string Role, string RelativeFile, string BodyPath, string ModelFrame, string? RawMass, decimal? EffectiveMass, decimal? InheritedMass);
+ internal sealed record CargoEntry(string Name, string Type, string Variant, string Content,
+     decimal? Slots, decimal? LooseMassKg, decimal? PackedMassKg, decimal? LoadValue, string Description,
+-    string TypeFile, string AddonFile, IReadOnlyList<CargoProperty> Properties);
++    string TypeFile, string AddonFile, IReadOnlyList<CargoProperty> Properties, IReadOnlyList<CargoMassTarget> MassTargets);
+ internal sealed record CargoCatalog(IReadOnlyList<CargoEntry> Entries, IReadOnlyList<string> Warnings);
+ 
+ internal static class CargoCatalogService
+@@ -70,8 +71,23 @@ internal static class CargoCatalogService
+             void AddEntry(string? addonPath, XElement? addonXml, XElement? slot)
+             {
+                 var properties = new List<CargoProperty>();
++                var targets = new List<CargoMassTarget>();
++                void AddTargets(string role, string source, XElement xml, IReadOnlyDictionary<string, XElement> templates)
++                {
++                    foreach (var body in xml.Element("PhysicsModel")?.Descendants("Body") ?? [])
++                    {
++                        var path = string.Join("/", body.AncestorsAndSelf().Reverse().Select(element =>
++                            element.Name.LocalName + "[" + (element.ElementsBeforeSelf(element.Name).Count() + 1) + "]"));
++                        var inherited = new XElement(body);
++                        inherited.Attribute("Mass")?.Remove();
++                        targets.Add(new(role, source, path, (string?)body.Attribute("ModelFrame") ?? "",
++                            (string?)body.Attribute("Mass"), ResolveBodyMass(body, templates, new(StringComparer.OrdinalIgnoreCase)),
++                            ResolveBodyMass(inherited, templates, new(StringComparer.OrdinalIgnoreCase))));
++                    }
++                }
+                 if (definition.Xml is not null) CollectProperties(definition.Path, definition.Xml, "", properties);
+                 if (addonXml is not null) CollectProperties(addonPath!, addonXml, "", properties);
++                if (addonXml is not null) AddTargets("Packed", addonPath!, addonXml, new Dictionary<string, XElement>());
+                 var looseUnits = units.Where(unit => string.Equals((string?)unit.Xml.Element("GameData")?.Attribute("LoadType"),
+                     type, StringComparison.OrdinalIgnoreCase)
+                     && (slot is null || Number((string?)unit.Xml.Element("GameData")?.Attribute("PackSlotsNumber"))
+@@ -79,6 +95,7 @@ internal static class CargoCatalogService
+                 foreach (var unit in looseUnits)
+                 {
+                     CollectProperties(unit.Path, unit.Xml, "", properties);
++                    AddTargets("Loose", unit.Path, unit.Xml, unit.Templates);
+                     var visitedTemplates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                     void AddTemplate(string? name)
+                     {
+@@ -104,7 +121,7 @@ internal static class CargoCatalogService
+                 entries.Add(new CargoEntry(name, type, addonPath is null ? "—" : Path.GetFileNameWithoutExtension(addonPath),
+                     dlc >= 0 && dlc + 1 < parts.Length ? parts[dlc + 1] : "Base game",
+                     Number((string?)slot?.Attribute("CargoLength")), looseMass, mass, Number((string?)slot?.Attribute("CargoValue")),
+-                    description, definition.Path ?? "", addonPath ?? "", properties));
++                    description, definition.Path ?? "", addonPath ?? "", properties, targets));
+             }
+         }
+         return new CargoCatalog(entries.OrderBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase)
+@@ -141,20 +158,20 @@ internal static class CargoCatalogService
+ 
+     private static decimal? BodyMass(XElement definition, IReadOnlyDictionary<string, XElement> templates)
+     {
+-        decimal? Resolve(XElement body, HashSet<string> seen)
+-        {
+-            if (body.Attribute("Mass") is { } mass) return Number(mass.Value);
+-            var name = (string?)body.Attribute("_template");
+-            // Complex template hierarchies require full XML merging; leave them unresolved.
+-            return name is not null && seen.Add(name) && templates.TryGetValue(name, out var template)
+-                && !template.Descendants("Body").Any() ? Resolve(template, seen) : null;
+-        }
+         var masses = definition.Element("PhysicsModel")?.Descendants("Body")
+-            .Select(body => Resolve(body, new(StringComparer.OrdinalIgnoreCase))).ToArray() ?? [];
++            .Select(body => ResolveBodyMass(body, templates, new(StringComparer.OrdinalIgnoreCase))).ToArray() ?? [];
+         return masses.Length > 0 && masses.All(mass => mass.HasValue && mass >= 0)
+             ? masses.Sum(mass => mass!.Value) : null;
+     }
+ 
++    private static decimal? ResolveBodyMass(XElement body, IReadOnlyDictionary<string, XElement> templates, HashSet<string> seen)
++    {
++        if (body.Attribute("Mass") is { } mass) return Number(mass.Value);
++        var name = (string?)body.Attribute("_template");
++        return name is not null && seen.Add(name) && templates.TryGetValue(name, out var template)
++            && !template.Descendants("Body").Any() ? ResolveBodyMass(template, templates, seen) : null;
++    }
++
+     private static string Resolve(string? key, string fallback, IReadOnlyDictionary<string, string> names) =>
+         key is null ? fallback : names.TryGetValue(key, out var value) ? value : key;
+ 
+diff --git a/investigation/cargo-editing/before/TrucksCargoTab.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index c05a6c4..6c303b7 100644
+--- a/investigation/cargo-editing/before/TrucksCargoTab.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -2,7 +2,7 @@ using System.Data;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed class TrucksCargoTab : UserControl
++internal sealed partial class TrucksCargoTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
+@@ -26,6 +26,7 @@ internal sealed class TrucksCargoTab : UserControl
+         toolbar.Controls.Add(new Label { Text = "Cargo", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         var reload = new Button { Text = "Reload cargo", AutoSize = true };
+         toolbar.Controls.Add(reload);
++        InitializeMassEditing(toolbar);
+         layout.Controls.Add(toolbar, 0, 0);
+         layout.Controls.Add(_status, 0, 1);
+         layout.Controls.Add(_cargo, 0, 2);
+@@ -61,13 +62,15 @@ internal sealed class TrucksCargoTab : UserControl
+ 
+     public void EnsureLoaded()
+     {
+-        if (!string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) LoadCargo();
++        if (!string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)
++            || _loadedVersion != WorkspaceDataCache.ContentVersion && !_massRows.Values.Any(row => !CargoMassStore.Equal(row.Draft, row.Current))) LoadCargo();
+     }
+ 
+     private void LoadCargo()
+     {
+         var workspace = _getWorkspacePath().Trim();
+         _catalog = null;
++        _massRows.Clear();
+         _loadedWorkspace = null;
+         _cargo.DataSource = null;
+         _properties.Rows.Clear();
+@@ -80,7 +83,10 @@ internal sealed class TrucksCargoTab : UserControl
+         try
+         {
+             _catalog = CargoCatalogService.Load(workspace, WorkspaceDataCache.GetLocalizedNames(workspace));
++            _massRows = CargoMassStore.ReadRows(workspace, _catalog);
+             _loadedWorkspace = workspace;
++            _loadedVersion = WorkspaceDataCache.ContentVersion;
++            RestoreStagedMass();
+             ApplyFilter();
+         }
+         catch (Exception ex) { _status.Text = $"Could not load cargo: {ex.Message}"; }
+@@ -94,22 +100,43 @@ internal sealed class TrucksCargoTab : UserControl
+         foreach (var column in new[] { "Cargo", "Cargo type", "Variant", "Content" }) table.Columns.Add(column);
+         foreach (var column in new[] { "Cargo length (slots)", "Loose weight (kg)", "Packed weight (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
+         table.Columns.Add("Entry", typeof(CargoEntry));
++        AddRawMassColumns(table);
+         foreach (var entry in visible)
+             table.Rows.Add(entry.Name, entry.Type, entry.Variant, entry.Content,
+                 (object?)entry.Slots ?? DBNull.Value, (object?)entry.LooseMassKg ?? DBNull.Value,
+                 (object?)entry.PackedMassKg ?? DBNull.Value, (object?)entry.LoadValue ?? DBNull.Value, entry);
+         _cargo.DataSource = table;
++        _cargo.ReadOnly = false;
++        _cargo.EditMode = DataGridViewEditMode.EditOnEnter;
++        _cargo.SelectionMode = DataGridViewSelectionMode.CellSelect;
+         _cargo.Columns["Entry"]!.Visible = false;
+         foreach (DataGridViewColumn column in _cargo.Columns)
+         {
+             column.Width = column.Index switch { 0 => 200, 1 => 190, 2 => 290, 3 => 90, _ => 125 };
+             if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
++            column.ReadOnly = !IsRawMassColumn(column.Name);
++            if (IsRawMassColumn(column.Name))
++            {
++                column.HeaderText = column.Name.Replace(" raw mass ", " raw ");
++                column.Width = 140;
++                column.DefaultCellStyle.Format = "0.############################";
++            }
+         }
+         _cargo.Columns["Cargo value"]!.DefaultCellStyle.Format = "0.###";
++        foreach (var role in new[] { "Loose", "Packed" })
++        {
++            _cargo.Columns[role + " weight (kg)"]!.DefaultCellStyle.Format = "0.############################";
++            _cargo.Columns[role + " weight (kg)"]!.ToolTipText = "Calculated total. Edit the individual raw mass columns to change XML values.";
++        }
++        var massOrder = new[] { "Cargo", "Loose weight (kg)" }
++            .Concat(_cargo.Columns.Cast<DataGridViewColumn>().Where(column => column.Name.StartsWith("Loose raw mass ")).Select(column => column.Name))
++            .Append("Packed weight (kg)")
++            .Concat(_cargo.Columns.Cast<DataGridViewColumn>().Where(column => column.Name.StartsWith("Packed raw mass ")).Select(column => column.Name)).ToArray();
++        for (var index = 0; index < massOrder.Length; index++) _cargo.Columns[massOrder[index]]!.DisplayIndex = index;
+         _status.Text = $"{visible.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
+             + "Blank = missing, unresolved or differing loose variants. Log cargo length uses carrier slots.";
+         if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} file(s) could not be read (see details).";
+-        ShowProperties();
++        UpdateMassCells();
+     }
+ 
+     private void ShowProperties()
+@@ -119,9 +146,12 @@ internal sealed class TrucksCargoTab : UserControl
+         if (_cargo.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not CargoEntry entry) return;
+         _description.Text = entry.Description + Environment.NewLine
+             + "Loose weight is per loose cargo unit (one individual log for logs). Packed weight sums the cargo addon's physics bodies for the complete load; it can include carrier parts."
+-            + Environment.NewLine + "To increase both, edit Mass on the loose model bodies and on every packed addon body, preserving their proportions. Loose body templates are resolved when supported; differing loose weights remain blank. Sources are listed below."
++            + Environment.NewLine + "Edit Loose/Packed raw mass cells: each targets exactly one body's Mass attribute. Totals are read-only. Blank removes the local attribute and restores inheritance. Stage changes, then Apply pending changes from Start."
+             + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++        foreach (var target in entry.MassTargets)
++            if (_massRows.TryGetValue(CargoMassStore.Key(target), out var mass))
++                _properties.Rows.Add(target.Role + " raw " + target.BodyPath + "/@Mass (preview)", mass.Draft ?? "Inherited / not present", target.RelativeFile);
+         TableHeaderBehavior.Refresh(_properties);
+     }
+ 
+diff --git a/investigation/cargo-editing/before/MainForm.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/MainForm.cs
+index e705a9f..c475a64 100644
+--- a/investigation/cargo-editing/before/MainForm.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/MainForm.cs
+@@ -228,6 +228,7 @@ internal sealed class MainForm : Form
+         }
+         _startChanges.PendingCountChanged += ShowPendingCount;
+         _experienceTab.StagingChanged += RefreshPendingCount;
++        _trucksCargoTab.StagingChanged += RefreshPendingCount;
+         void LoadTierRegions(string workspace)
+         {
+             var regionNames = WorkspaceDataCache.GetLocalizedNames(workspace);
+@@ -433,8 +434,10 @@ internal sealed class MainForm : Form
+                 _experienceTab.ExportPreview(temporary);
+                 _truckEditTab.ExportPreview(temporary);
+                 _truckPropertiesTab.ExportPreview(temporary);
++                _trucksCargoTab.ExportPreview(temporary);
+                 TruckPropertiesStore.Apply(temporary);
+                 FrameAddonFuelStore.Apply(temporary);
++                CargoMassStore.Apply(temporary);
+                 if (upgrades is not null) UpgradeChanges.Stage(upgrades with { Workspace = temporary });
+                 UpgradeChanges.Apply(temporary);
+                 AddonExplorationStore.Apply(temporary);
+@@ -456,6 +459,7 @@ internal sealed class MainForm : Form
+             var preset = SharedPreset.Read(dialog.FileName);
+             var editorChanges = _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
+                 .Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
++                .Concat(CargoMassStore.Pending(workspace)).Concat(_trucksCargoTab.PresetPreviewChanges())
+                 .Concat(AddonExplorationStore.Pending(workspace)).Concat(UpgradeChanges.Pending(workspace))
+                 .Concat(_truckPropertiesTab.PresetPreviewChanges()).Concat(_truckEditTab.PresetPreviewChanges())
+                 .Concat(_experienceTab.PresetPreviewChanges()).ToArray();
+@@ -515,7 +519,7 @@ internal sealed class MainForm : Form
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(CargoMassStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -532,6 +536,7 @@ internal sealed class MainForm : Form
+         if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
+         if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
+         if (FrameAddonFuelStore.Pending(workspace).Any()) _truckEditTab.ApplyFrameAddonFuelChanges(workspace);
++        if (CargoMassStore.Pending(workspace).Any()) { CargoMassStore.Apply(workspace); _trucksCargoTab.InvalidateCatalog(); }
+         if (AddonExplorationStore.Pending(workspace).Any()) _truckEditTab.ApplyAddonExplorationChanges(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+diff --git a/investigation/cargo-editing/before/SharedPreset.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/SharedPreset.cs
+index 407f2e0..264b6e3 100644
+--- a/investigation/cargo-editing/before/SharedPreset.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/SharedPreset.cs
+@@ -169,7 +169,7 @@ internal static class SharedPreset
+     private static string InputStamp(string workspace, string preferences)
+     {
+         var files = Files(WorkspaceOriginals.GetUpdatedRoot(workspace))
+-            .Concat(new[] { "truck-properties", "frame-addon-fuel", "winches", "upgrade-randomization", "region-maps" }
++            .Concat(new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "winches", "upgrade-randomization", "region-maps" }
+                 .SelectMany(p => Files(WorkspaceOriginals.GetMetadataPath(workspace, p))))
+             .Concat(PlanningFiles.Select(p => Path.Combine(preferences, p)))
+             .Append(WorkspaceOriginals.GetMetadataPath(workspace, "progression-settings.json"))
+@@ -195,7 +195,7 @@ internal static class SharedPreset
+         {
+             CopyTree(WorkspaceOriginals.GetOriginalRoot(workspace), Path.Combine(temporary, "initial.pak", "original_files"));
+             CopyTree(WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(temporary, "initial.pak", "updated"));
+-            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "winches", "upgrade-randomization" })
++            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "winches", "upgrade-randomization" })
+                 CopyTree(WorkspaceOriginals.GetMetadataPath(workspace, relative), Path.Combine(temporary, relative));
+             var pending = PendingTruckReplacements.Load(workspace);
+             var savedMaps = TruckReplacementStore.SavedMaps(workspace).ToArray();
+@@ -395,7 +395,7 @@ internal static class SharedPreset
+                 var safe = SafePath(root, Relative(root, file));
+                 if (targets.Add(safe)) Prepare(safe, null);
+             }
+-            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json",
++            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json", "cargo-mass/pending-changes.json",
+                 "winches/pending-changes.json", "upgrade-randomization/staged.json", "upgrade-randomization/draft.json",
+                 "upgrade-randomization/addon-exploration.json" })
+             {
+diff --git a/investigation/cargo-editing/before/PresetBrowseMode.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/PresetBrowseMode.cs
+index df3bad4..ed34ee0 100644
+--- a/investigation/cargo-editing/before/PresetBrowseMode.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/PresetBrowseMode.cs
+@@ -49,12 +49,14 @@ internal sealed class PresetBrowseMode : IDisposable
+                 }
+             }
+         _locked = value;
+-        Refresh();
++        // Restore the captured state once when unlocking. Ordinary unlocked
++        // refreshes must leave editor-owned enabled/read-only settings alone.
++        foreach (var state in _states.Values.ToArray()) Apply(state);
+     }
+ 
+     public void Refresh()
+     {
+-        if (_disposed || _applying) return;
++        if (_disposed || _applying || !_locked) return;
+         foreach (var state in _states.Values.ToArray()) Apply(state);
+     }
+ 
+@@ -95,12 +97,15 @@ internal sealed class PresetBrowseMode : IDisposable
+         if (control is DataGridView grid)
+         {
+             foreach (DataGridViewColumn column in grid.Columns) state.Columns[column] = column.ReadOnly;
+-            grid.ColumnAdded += (_, e) => { state.Columns[e.Column] = e.Column.ReadOnly; Apply(state); };
++            grid.ColumnAdded += (_, e) => { state.Columns[e.Column] = e.Column.ReadOnly; if (_locked) Apply(state); };
+             grid.ColumnRemoved += (_, e) => state.Columns.Remove(e.Column);
+             grid.ColumnStateChanged += (_, e) =>
+             {
+-                if (_disposed || _applying || !_locked || e.StateChanged != DataGridViewElementStates.ReadOnly) return;
+-                state.Columns[e.Column] = e.Column.ReadOnly; Apply(state);
++                if (_disposed || _applying || e.StateChanged != DataGridViewElementStates.ReadOnly) return;
++                // Editors establish per-column editability after binding. Remember those
++                // changes while unlocked so a later Refresh does not restore stale defaults.
++                state.Columns[e.Column] = e.Column.ReadOnly;
++                if (_locked) Apply(state);
+             };
+             grid.CellBeginEdit += (_, e) => { if (_locked && !ViewColumn(grid.Columns[e.ColumnIndex])) e.Cancel = true; };
+             grid.UserDeletingRow += (_, e) => { if (_locked) e.Cancel = true; };
+@@ -110,7 +115,7 @@ internal sealed class PresetBrowseMode : IDisposable
+             { if (_locked && !_applying) { state.DeleteRows = grid.AllowUserToDeleteRows; Apply(state); } };
+         }
+         foreach (Control child in control.Controls) Watch(child);
+-        Apply(state);
++        if (_locked) Apply(state);
+     }
+ 
+     private void Apply(State state)
+diff --git a/investigation/cargo-editing/before/README.md b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+index b006f4c..7734955 100644
+--- a/investigation/cargo-editing/before/README.md
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+@@ -24,7 +24,7 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+-The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, loose weight (per cargo unit), packed weight (sum of addon physics body masses), and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and attributes from the cargo type, packed addon, matching loose models and referenced loose body templates. Loose models are matched by cargo type and slot count; static scenery is excluded. For logs, loose weight is one individual log and packed weight is the complete load. Missing or unresolved weights and differing loose-model weights remain blank. Simple loose body mass templates are resolved; full file inheritance and complex body template hierarchies remain unresolved. To increase both weights, multiply every packed body mass and the matching loose model body masses by the same factor; prefer a local Mass override over changing a shared template. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
++The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, loose weight (per cargo unit), packed weight (sum of addon physics body masses), and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and attributes from the cargo type, packed addon, matching loose models and referenced loose body templates. Loose models are matched by cargo type and slot count; static scenery is excluded. For logs, loose weight is one individual log and packed weight is the complete load. Missing or unresolved weights and differing loose-model weights remain blank. Simple loose body mass templates are resolved; full file inheritance and complex body template hierarchies remain unresolved. To increase both weights, multiply every packed body mass and the matching loose model body masses by the same factor; prefer a local Mass override over changing a shared template. **Reload cargo** refreshes the workspace data after external edits and discards unstaged previews. The Loose/Packed weight totals stay read-only; edit the adjacent Loose/Packed raw mass columns directly. Each editable cell targets one exact XML body and shows its source file and indexed body path in the tooltip. Values accept 0–1,000,000 kg, including decimals; blank removes the local Mass attribute. Template-based cargo receives a local body override, leaving shared templates unchanged. Cargo rows sharing a source body share the same preview. Changed raw cells display new (original) values, amber for preview/staged and green for applied changes. Stage changes persists an explicit snapshot; only Start -> Apply pending changes writes the updated overlay. Revert unstaged edits restores the staged snapshot, Revert staged changes clears it, and Reset selected / Reset to original values previews preserved raw originals, including attribute absence. Global reset and staging include filtered rows. Apply checks every body identity and expected raw value before writing any cargo file and retains staged changes on conflict. Shared presets include cargo previews/staged edits.
+ 
+ The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: at least three characters highlight matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
+diff --git a/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+new file mode 100644
+index 0000000..658d5a9
+--- /dev/null
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+@@ -0,0 +1,182 @@
++using System.Data;
++using System.Globalization;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed partial class TrucksCargoTab
++{
++    private Dictionary<string, CargoMassRow> _massRows = new(StringComparer.OrdinalIgnoreCase);
++    private Dictionary<string, CargoMassEdit> _stagedMass = new(StringComparer.OrdinalIgnoreCase);
++    private bool _bindingMass;
++    private long _loadedVersion;
++    internal event Action? StagingChanged;
++    private static string RawColumn(string role, int index) => $"{role} raw mass {index + 1} (kg)";
++    private static bool IsRawMassColumn(string name) => name.StartsWith("Loose raw mass ") || name.StartsWith("Packed raw mass ");
++    private static IEnumerable<(string Column, CargoMassTarget Target)> RawTargets(CargoEntry entry)
++    {
++        foreach (var role in new[] { "Loose", "Packed" })
++        {
++            var index = 0;
++            foreach (var target in entry.MassTargets.Where(target => target.Role == role)) yield return (RawColumn(role, index++), target);
++        }
++    }
++    private void AddRawMassColumns(DataTable table)
++    {
++        foreach (var role in new[] { "Loose", "Packed" })
++            for (var index = 0; index < (_catalog?.Entries.Select(entry => entry.MassTargets.Count(target => target.Role == role)).DefaultIfEmpty().Max() ?? 0); index++)
++                table.Columns.Add(RawColumn(role, index), typeof(decimal));
++    }
++    private CargoMassRow? CellMassRow(int row, int column)
++    {
++        if (row < 0 || column < 0 || _cargo.Rows[row].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return null;
++        var target = RawTargets(entry).FirstOrDefault(pair => pair.Column == _cargo.Columns[column].Name).Target;
++        return target is null ? null : _massRows.GetValueOrDefault(CargoMassStore.Key(target));
++    }
++    private static bool TryMass(object? input, out string? value)
++    {
++        var text = input is null or DBNull ? "" : Convert.ToString(input, CultureInfo.CurrentCulture)?.Trim() ?? "";
++        value = null;
++        if (text.Length == 0) return true;
++        if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.CurrentCulture, out var number) || number < 0 || number > 1000000) return false;
++        value = number.ToString(CultureInfo.InvariantCulture); return true;
++    }
++    private bool CommitMass()
++    {
++        if (_cargo.IsCurrentCellInEditMode && _cargo.EditingControl is TextBox text && !TryMass(text.Text, out _))
++        { _status.Text = "Enter a mass from 0 to 1,000,000 kg, or leave blank to restore inheritance."; return false; }
++        if (!_cargo.EndEdit()) return false;
++        if (_cargo.DataSource is DataTable table) BindingContext?[table]?.EndCurrentEdit();
++        return true;
++    }
++    private void InitializeMassEditing(FlowLayoutPanel toolbar)
++    {
++        void Button(string text, Action action)
++        {
++            var button = new Button { Text = text, AutoSize = true };
++            button.Click += (_, _) =>
++            {
++                if (_loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim() || PresetBrowseMode.IsReadOnly(this) || !CommitMass()) return;
++                try { action(); }
++                catch (Exception ex) { _status.Text = "Could not update cargo masses: " + ex.Message; }
++            };
++            toolbar.Controls.Add(button);
++        }
++        Button("Stage changes", () =>
++        {
++            var edits = MassEdits();
++            CargoMassStore.Save(_loadedWorkspace!, edits); RestoreStagedMass(); UpdateMassCells(); StagingChanged?.Invoke();
++            _status.Text = $"Staged {edits.Count} raw cargo mass changes. Apply pending changes from Start.";
++        });
++        Button("Revert unstaged edits", () => { RestoreStagedMass(); UpdateMassCells(); });
++        Button("Revert staged changes", () => { CargoMassStore.Save(_loadedWorkspace!, []); RestoreStagedMass(); UpdateMassCells(); StagingChanged?.Invoke(); });
++        Button("Reset selected to original", () =>
++        {
++            if (_cargo.CurrentRow?.DataBoundItem is DataRowView data && data["Entry"] is CargoEntry entry)
++                foreach (var target in entry.MassTargets)
++                    if (_massRows.TryGetValue(CargoMassStore.Key(target), out var row) && row.HasOriginal) row.Draft = row.Original;
++            UpdateMassCells();
++        });
++        Button("Reset to original values", () => { foreach (var row in _massRows.Values.Where(row => row.HasOriginal)) row.Draft = row.Original; UpdateMassCells(); });
++        _cargo.CellBeginEdit += (_, e) => { if (PresetBrowseMode.IsReadOnly(this) || CellMassRow(e.RowIndex, e.ColumnIndex) is null) e.Cancel = true; };
++        _cargo.CellValidating += (_, e) =>
++        {
++            if (CellMassRow(e.RowIndex, e.ColumnIndex) is null) return;
++            if (!TryMass(e.FormattedValue, out var parsed)) { e.Cancel = true; _status.Text = "Enter a mass from 0 to 1,000,000 kg, or blank for inheritance."; }
++        };
++        _cargo.CellParsing += (_, e) =>
++        {
++            if (CellMassRow(e.RowIndex, e.ColumnIndex) is null || !TryMass(e.Value, out var value)) return;
++            e.Value = value is null ? DBNull.Value : decimal.Parse(value, CultureInfo.InvariantCulture); e.ParsingApplied = true;
++        };
++        _cargo.CellValueChanged += (_, e) =>
++        {
++            if (_bindingMass || CellMassRow(e.RowIndex, e.ColumnIndex) is not { } row || !TryMass(_cargo[e.ColumnIndex, e.RowIndex].Value, out var value)) return;
++            row.Draft = value; UpdateMassCells();
++        };
++        _cargo.EditingControlShowing += (_, e) =>
++        {
++            if (_cargo.CurrentCell is not { } cell || CellMassRow(cell.RowIndex, cell.ColumnIndex) is not { } row || e.Control is not TextBox text) return;
++            text.Text = row.Draft is null ? "" : decimal.Parse(row.Draft, CultureInfo.InvariantCulture).ToString(CultureInfo.CurrentCulture); text.SelectAll();
++        };
++        _cargo.CellFormatting += FormatMass;
++        _cargo.DataError += (_, e) => { e.ThrowException = false; _status.Text = "Enter a valid mass in kg."; };
++    }
++    private List<CargoMassEdit> MassEdits() => _massRows.Values.Where(row => !CargoMassStore.Equal(row.Draft, row.Current))
++        .Select(row => new CargoMassEdit(row.Target.RelativeFile, row.Target.BodyPath, row.Target.ModelFrame, row.Structure,
++            row.Target.Role + " cargo mass", row.Current, row.Draft)).ToList();
++    private void RestoreStagedMass()
++    {
++        _stagedMass = CargoMassStore.Load(_loadedWorkspace!).ToDictionary(edit => CargoMassStore.Key(edit.RelativeFile, edit.BodyPath), StringComparer.OrdinalIgnoreCase);
++        foreach (var (key, row) in _massRows)
++            row.Draft = _stagedMass.TryGetValue(key, out var edit) ? edit.After : row.Current;
++    }
++    private decimal? PreviewTotal(CargoEntry entry, string role)
++    {
++        var groups = entry.MassTargets.Where(target => target.Role == role).GroupBy(target => target.RelativeFile).ToArray();
++        var totals = new List<decimal>();
++        foreach (var group in groups)
++        {
++            decimal total = 0;
++            foreach (var target in group)
++            {
++                var row = _massRows[CargoMassStore.Key(target)];
++                if (row.Draft is not null) total += decimal.Parse(row.Draft, CultureInfo.InvariantCulture);
++                else if (target.InheritedMass.HasValue) total += target.InheritedMass.Value;
++                else return null;
++            }
++            totals.Add(total);
++        }
++        return totals.Count > 0 && totals.Distinct().Count() == 1 ? totals[0] : null;
++    }
++    private void UpdateMassCells()
++    {
++        if (_cargo.DataSource is not DataTable table) return;
++        _bindingMass = true;
++        try
++        {
++            foreach (DataRow data in table.Rows)
++            {
++                if (data["Entry"] is not CargoEntry entry) continue;
++                foreach (var (column, target) in RawTargets(entry))
++                {
++                    var row = _massRows[CargoMassStore.Key(target)];
++                    data[column] = row.Draft is null ? DBNull.Value : decimal.Parse(row.Draft, CultureInfo.InvariantCulture);
++                }
++                data["Loose weight (kg)"] = (object?)PreviewTotal(entry, "Loose") ?? DBNull.Value;
++                data["Packed weight (kg)"] = (object?)PreviewTotal(entry, "Packed") ?? DBNull.Value;
++            }
++            foreach (DataGridViewRow gridRow in _cargo.Rows)
++                foreach (DataGridViewColumn column in _cargo.Columns)
++                    if (IsRawMassColumn(column.Name)) gridRow.Cells[column.Index].ReadOnly = CellMassRow(gridRow.Index, column.Index) is null;
++        }
++        finally { _bindingMass = false; }
++        _cargo.Invalidate(); ShowProperties();
++    }
++    private void FormatMass(object? sender, DataGridViewCellFormattingEventArgs e)
++    {
++        if (CellMassRow(e.RowIndex, e.ColumnIndex) is not { } row) return;
++        string Display(string? value) => value is null ? "Inherited" : decimal.Parse(value, CultureInfo.InvariantCulture).ToString("0.############################", CultureInfo.CurrentCulture);
++        var key = CargoMassStore.Key(row.Target);
++        var changed = !CargoMassStore.Equal(row.Draft, row.Current);
++        var staged = _stagedMass.TryGetValue(key, out var edit) && CargoMassStore.Equal(edit.After, row.Draft);
++        e.CellStyle!.BackColor = changed ? Color.LightGoldenrodYellow
++            : row.HasOriginal && !CargoMassStore.Equal(row.Current, row.Original) ? Color.Honeydew : AppColors.Get("Surface");
++        if (!_cargo[e.ColumnIndex, e.RowIndex].IsInEditMode)
++        {
++            e.Value = row.Draft is null ? "" : Display(row.Draft);
++            if (row.HasOriginal && !CargoMassStore.Equal(row.Draft, row.Original)) e.Value = $"{Display(row.Draft)} ({Display(row.Original)})";
++            e.FormattingApplied = true;
++        }
++        _cargo[e.ColumnIndex, e.RowIndex].ToolTipText = $"{row.Target.RelativeFile}\n{row.Target.BodyPath}/@Mass\nModelFrame: {row.Target.ModelFrame}\nOriginal raw: {(row.HasOriginal ? Display(row.Original) : "Unavailable")}\nIn files: {Display(row.Current)}\nPreview: {Display(row.Draft)}\nState: {(changed ? staged ? "Staged" : "Draft" : "In files")}\nBlank removes this local Mass attribute. Other rows sharing this file/body change together.";
++    }
++    internal void InvalidateCatalog() { _loadedWorkspace = null; }
++    internal void ExportPreview(string destination)
++    {
++        if (_loadedWorkspace != _getWorkspacePath().Trim()) return;
++        if (!CommitMass()) throw new InvalidDataException("Finish editing cargo masses before sharing.");
++        CargoMassStore.Save(destination, MassEdits());
++    }
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim() ? [] : MassEdits().Select(edit =>
++        new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(_loadedWorkspace, edit.RelativeFile),
++            edit.Name + " / " + edit.BodyPath + "/@Mass", edit.Before ?? "Not present", edit.After ?? "Not present"));
++}
+diff --git a/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassStore.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassStore.cs
+new file mode 100644
+index 0000000..9b6f942
+--- /dev/null
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassStore.cs
+@@ -0,0 +1,171 @@
++using System.Globalization;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++using System.Xml;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record CargoMassEdit(string RelativeFile, string BodyPath, string ModelFrame, string Structure,
++    string Name, string? Before, string? After);
++internal sealed record CargoRawBody(string Path, string Frame, string Template, string? Mass, int Offset, int Length);
++internal sealed class CargoMassRow(CargoMassTarget target, string structure, bool hasOriginal, string? original)
++{
++    public CargoMassTarget Target { get; } = target;
++    public string Structure { get; } = structure;
++    public bool HasOriginal { get; } = hasOriginal;
++    public string? Original { get; } = original;
++    public string? Current { get; } = target.RawMass;
++    public string? Draft { get; set; } = target.RawMass;
++}
++
++internal static class CargoMassStore
++{
++    private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "cargo-mass", "pending-changes.json");
++    internal static string Key(string file, string body) => file.Replace('\\', '/') + "|" + body;
++    internal static string Key(CargoMassTarget target) => Key(target.RelativeFile, target.BodyPath);
++    internal static bool Equal(string? left, string? right) => left == right || left is not null && right is not null
++        && decimal.TryParse(left, NumberStyles.Float, CultureInfo.InvariantCulture, out var a)
++        && decimal.TryParse(right, NumberStyles.Float, CultureInfo.InvariantCulture, out var b) && a == b;
++    internal static bool Valid(string? value) => value is null || decimal.TryParse(value, NumberStyles.Float,
++        CultureInfo.InvariantCulture, out var number) && number >= 0 && number <= 1000000;
++
++    // XML reader supplies exact opening-tag offsets; only the selected Mass attribute is patched.
++    internal static List<CargoRawBody> Bodies(string text)
++    {
++        var lines = new List<int> { 0 };
++        for (var i = 0; i < text.Length; i++) if (text[i] == '\n') lines.Add(i + 1);
++        var result = new List<CargoRawBody>();
++        var stack = new List<string>();
++        var counters = new List<Dictionary<string, int>> { new(StringComparer.Ordinal) };
++        using var reader = XmlReader.Create(new StringReader(text), new XmlReaderSettings
++        { ConformanceLevel = ConformanceLevel.Fragment, DtdProcessing = DtdProcessing.Prohibit });
++        while (reader.Read())
++        {
++            if (reader.NodeType != XmlNodeType.Element) continue;
++            var depth = reader.Depth;
++            while (stack.Count > depth) stack.RemoveAt(stack.Count - 1);
++            while (counters.Count > depth + 1) counters.RemoveAt(counters.Count - 1);
++            var siblings = counters[depth];
++            siblings.TryGetValue(reader.Name, out var index); siblings[reader.Name] = ++index;
++            var part = reader.Name + "[" + index + "]";
++            var path = string.Join("/", stack.Append(part));
++            if (reader.LocalName == "Body" && stack.Count >= 2
++                && (stack[0] == "TruckAddon[1]" || stack[0] == "ModelBrand[1]") && stack[1] == "PhysicsModel[1]")
++            {
++                var info = (IXmlLineInfo)reader;
++                var offset = lines[info.LineNumber - 1] + info.LinePosition - 2;
++                var end = offset; var quote = '\0';
++                for (; end < text.Length; end++)
++                {
++                    var ch = text[end];
++                    if (quote != '\0') { if (ch == quote) quote = '\0'; }
++                    else if (ch is '\'' or '"') quote = ch;
++                    else if (ch == '>') break;
++                }
++                if (offset < 0 || end == text.Length || text[offset] != '<') throw new InvalidDataException("Could not locate cargo body.");
++                result.Add(new(path, reader.GetAttribute("ModelFrame") ?? "", reader.GetAttribute("_template") ?? "",
++                    reader.GetAttribute("Mass"), offset, end - offset + 1));
++            }
++            if (!reader.IsEmptyElement) { stack.Add(part); counters.Add(new(StringComparer.Ordinal)); }
++        }
++        return result;
++    }
++    internal static string Structure(IReadOnlyList<CargoRawBody> bodies) => Convert.ToHexString(SHA256.HashData(
++        Encoding.UTF8.GetBytes(string.Join("\n", bodies.Select(body => body.Path + "|" + body.Frame + "|" + body.Template)))));
++
++    internal static Dictionary<string, CargoMassRow> ReadRows(string workspace, CargoCatalog catalog)
++    {
++        var result = new Dictionary<string, CargoMassRow>(StringComparer.OrdinalIgnoreCase);
++        foreach (var group in catalog.Entries.SelectMany(entry => entry.MassTargets).GroupBy(target => target.RelativeFile, StringComparer.OrdinalIgnoreCase))
++        {
++            var current = Bodies(WorkspaceDataCache.ReadAllText(WorkspaceOriginals.GetCurrentPath(workspace, group.Key)));
++            var originalPath = WorkspaceOriginals.GetOriginalReadPath(workspace, group.Key);
++            var originals = File.Exists(originalPath) ? Bodies(File.ReadAllText(originalPath)) : [];
++            var originalStructureMatches = Structure(originals) == Structure(current);
++            foreach (var target in group.DistinctBy(Key, StringComparer.OrdinalIgnoreCase))
++            {
++                var original = originalStructureMatches ? originals.SingleOrDefault(body => body.Path == target.BodyPath && body.Frame == target.ModelFrame) : null;
++                result[Key(target)] = new(target, Structure(current), original is not null, original?.Mass);
++            }
++        }
++        return result;
++    }
++
++    private static void Validate(IReadOnlyList<CargoMassEdit> edits)
++    {
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var edit in edits)
++        {
++            var path = edit?.RelativeFile?.Replace('\\', '/');
++            if (edit is null || path is null || Path.IsPathRooted(path) || path.Contains(':')
++                || path.Split('/').Any(part => part is ".." or "." or "")
++                || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
++                || !(path.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase) || path.Contains("/classes/models/", StringComparison.OrdinalIgnoreCase))
++                || !Path.GetFileName(path).StartsWith("cargo_", StringComparison.OrdinalIgnoreCase)
++                || edit.BodyPath is null || !Regex.IsMatch(edit.BodyPath, @"^(TruckAddon|ModelBrand)\[1\]/PhysicsModel\[1\](/Body\[[1-9][0-9]*\])+$")
++                || edit.ModelFrame is null || edit.Name is null || edit.Structure is null || edit.Structure.Length != 64
++                || !Valid(edit.Before) || !Valid(edit.After) || !seen.Add(Key(path, edit.BodyPath)))
++                throw new InvalidDataException("Invalid or duplicate cargo mass target.");
++        }
++    }
++    internal static List<CargoMassEdit> Load(string workspace)
++    {
++        var path = PendingPath(workspace);
++        var edits = File.Exists(path) ? JsonSerializer.Deserialize<List<CargoMassEdit>>(File.ReadAllText(path))
++            ?? throw new InvalidDataException("Missing cargo mass edits.") : [];
++        Validate(edits); return edits;
++    }
++    internal static void Save(string workspace, List<CargoMassEdit> edits)
++    {
++        Validate(edits);
++        TruckPropertiesStore.WriteAtomic(PendingPath(workspace), JsonSerializer.Serialize(edits, new JsonSerializerOptions { WriteIndented = true }));
++    }
++    internal static IEnumerable<WorkspaceChange> Pending(string workspace) => Load(workspace).Select(edit => new WorkspaceChange(
++        WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile), edit.Name + " / " + edit.BodyPath + "/@Mass",
++        edit.Before ?? "Not present", edit.After ?? "Not present"));
++
++    internal static string Patch(string text, IReadOnlyList<CargoMassEdit> edits)
++    {
++        Validate(edits);
++        var bodies = Bodies(text);
++        var structure = Structure(bodies);
++        var patches = new List<(int Offset, int Length, string Text)>();
++        foreach (var edit in edits)
++        {
++            var body = bodies.SingleOrDefault(body => body.Path == edit.BodyPath && body.Frame == edit.ModelFrame);
++            if (body is null || structure != edit.Structure || !Equal(body.Mass, edit.Before) && !Equal(body.Mass, edit.After))
++                throw new InvalidDataException($"{edit.Name}: cargo body or mass changed since staging. Reload and stage again.");
++            if (Equal(body.Mass, edit.After)) continue;
++            var tag = text.Substring(body.Offset, body.Length);
++            var attribute = Regex.Match(tag, "\\s+Mass\\s*=\\s*(?<quote>[\"'])(?<value>[^\"']*)\\k<quote>");
++            if (attribute.Success)
++            {
++                var match = edit.After is null ? (Group)attribute : attribute.Groups["value"];
++                patches.Add((body.Offset + match.Index, match.Length, edit.After ?? ""));
++            }
++            else if (edit.After is not null)
++            {
++                var index = tag.EndsWith("/>", StringComparison.Ordinal) ? tag.Length - 2 : tag.Length - 1;
++                patches.Add((body.Offset + index, 0, " Mass=\"" + edit.After + "\""));
++            }
++        }
++        foreach (var patch in patches.OrderByDescending(patch => patch.Offset)) text = text.Remove(patch.Offset, patch.Length).Insert(patch.Offset, patch.Text);
++        return text;
++    }
++    internal static void Apply(string workspace)
++    {
++        var outputs = Load(workspace).GroupBy(edit => edit.RelativeFile, StringComparer.OrdinalIgnoreCase).Select(group =>
++        {
++            var source = WorkspaceOriginals.GetCurrentPath(workspace, group.Key);
++            return (Source: source, Text: Patch(File.ReadAllText(source), group.ToArray()));
++        }).ToArray(); // Validate every file before writing any output.
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(workspace, output.Source);
++            TruckPropertiesStore.WriteAtomic(path, output.Text); WorkspaceDataCache.InvalidateFile(path);
++        }
++        Save(workspace, []);
++    }
++}

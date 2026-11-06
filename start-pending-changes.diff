@@ -1,0 +1,1030 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 6089e4c..13638ac 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -16,6 +16,7 @@ internal sealed class MainForm : Form
+     private readonly TrucksCargoTab _trucksCargoTab;
+     private readonly RegionsTrucksTab _regionsTrucksTab;
+     private readonly SettingsTab _settingsTab;
++    private StartChangesPanel? _startChanges;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+     private readonly Button _openButton = new() { Text = "Open workspace", AutoSize = true };
+@@ -53,6 +54,7 @@ internal sealed class MainForm : Form
+         });
+         _settingsTab = new SettingsTab();
+         BuildLayout();
++        _workspacePath.TextChanged += (_, _) => _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+         _openButton.Click += (_, _) => OpenWorkspace();
+         _packButton.Click += async (_, _) => await PackAsync();
+@@ -74,7 +76,7 @@ internal sealed class MainForm : Form
+ 
+         var title = new Label
+         {
+-            Text = "Prepare an initial.pak workspace, edit extracted files, then build a new PAK.",
++            Text = "Review file changes and pending edits, then apply PAK or map changes.",
+             AutoSize = true,
+             Font = new Font(Font, FontStyle.Bold),
+             Padding = new Padding(0, 0, 0, 8)
+@@ -101,13 +103,16 @@ internal sealed class MainForm : Form
+         actions.Controls.Add(_unpackButton);
+         actions.Controls.Add(_openButton);
+         actions.Controls.Add(_packButton);
+-        root.Controls.Add(actions, 0, 2);
+-
+-        root.Controls.Add(_log, 0, 3);
++        _startChanges = new StartChangesPanel(() => _workspacePath.Text.Trim(), actions, PendingPakChanges, SavePendingPakChanges,
++            ApplyMapChangesAsync, () => _regionsTrucksTab.RefreshChangesAsync());
++        var startSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1000, 750),
++            SplitterDistance = 640, Panel1MinSize = 180, Panel2MinSize = 40, SplitterWidth = 6 };
++        startSplit.Panel1.Controls.Add(_startChanges); startSplit.Panel2.Controls.Add(_log);
++        root.Controls.Add(startSplit, 0, 3);
+         root.Controls.Add(_loadingBar, 0, 4);
+ 
+         var tabs = new TabControl { Dock = DockStyle.Fill };
+-        var unpackPage = new TabPage("Unpack / Pack");
++        var unpackPage = new TabPage("Start");
+         var experiencePage = new TabPage("Experience / Ranks");
+         var ownedContentPage = new TabPage("Owned content");
+         var customGroupingPage = new TabPage("Custom grouping");
+@@ -168,6 +173,7 @@ internal sealed class MainForm : Form
+                 AppendLog($"Workspace preload failed: {ex.Message}");
+             }
+             if (tabs.SelectedTab != selectedPage) return;
++            if (selectedPage == unpackPage && _startChanges is not null) await _startChanges.RefreshAsync();
+ 
+             if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+             if (selectedPage == gameDataPage)
+@@ -196,13 +202,13 @@ internal sealed class MainForm : Form
+         {
+             try { await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim()); }
+             catch (Exception ex) { AppendLog($"Workspace preload failed: {ex.Message}"); }
++            if (_startChanges is not null) await _startChanges.RefreshAsync();
+         };
+         Controls.Add(tabs);
+         var search = new CurrentTabSearch(() => tabs.SelectedTab);
+         search.Attach(this);
+         Disposed += (_, _) => search.Dispose();
+-        _openButton.Enabled = false;
+-        _packButton.Enabled = false;
++        _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+     }
+ 
+     private void BrowsePak()
+@@ -231,6 +237,7 @@ internal sealed class MainForm : Form
+         {
+             _workspacePath.Text = dialog.SelectedPath;
+             RememberPaths();
++            if (_startChanges is not null) _ = _startChanges.RefreshAsync();
+         }
+     }
+ 
+@@ -278,6 +285,7 @@ internal sealed class MainForm : Form
+             _experienceTab.WorkspaceUpdated();
+             _ownedContentTab.WorkspaceUpdated();
+             _truckEditTab.WorkspaceUpdated();
++            if (_startChanges is not null) await _startChanges.RefreshAsync();
+         }
+     }
+ 
+@@ -297,8 +305,40 @@ internal sealed class MainForm : Form
+         };
+         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+         var output = dialog.FileName;
+-
++        if (File.Exists(_pakPath.Text.Trim()) && Path.GetFullPath(output).Equals(Path.GetFullPath(_pakPath.Text.Trim()), StringComparison.OrdinalIgnoreCase))
++        { MessageBox.Show(this, "Choose a new PAK output file; the input PAK is preserved.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
++        try { SavePendingPakChanges(); }
++        catch (Exception ex) { AppendLog(ex.Message); return; }
+         await RunBusyAsync("Building cache block and PAK…", () => PackWorkspace(workspace, output));
++        if (_startChanges is not null) await _startChanges.RefreshAsync();
++    }
++
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
++        .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
++
++    private void SavePendingPakChanges()
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (_experienceTab.PendingChanges(workspace).Any()) _experienceTab.SavePendingChanges();
++        if (_truckEditTab.PendingChanges(workspace).Any()) _truckEditTab.SavePendingChanges();
++        if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
++    }
++
++    private async Task ApplyMapChangesAsync()
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) return;
++        _ownedContentTab.EnsureLoaded();
++        var enabled = _ownedContentTab.GetAvailableCustomGroupingTrucks().Select(truck => truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var succeeded = await RunBusyAsync("Applying pending map replacements and preserving backups…", () =>
++        {
++            if (PendingTruckReplacements.Load(workspace).Any(change => !enabled.Contains(change.Target.Code)))
++                throw new InvalidOperationException("A pending replacement truck is no longer enabled. Review the pending map changes.");
++            foreach (var saved in PendingTruckReplacements.ApplyAll(workspace))
++                BeginInvoke((Action)(() => AppendLog($"Map saved: {saved.OutputPath} · Original backup: {saved.OriginalBackupPath}")));
++        });
++        await _regionsTrucksTab.RefreshChangesAsync();
++        if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+     private static void ExtractPak(string pakPath, string workspace)
+@@ -546,6 +586,8 @@ internal sealed class MainForm : Form
+ 
+     private void SetBusy(bool busy)
+     {
++        if (_workspacePath.Parent is not null) _workspacePath.Parent.Enabled = !busy;
++        if (_startChanges is not null) _startChanges.Enabled = !busy;
+         _loadingBar.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
+         _loadingBar.MarqueeAnimationSpeed = busy ? 30 : 0;
+         _loadingBar.Value = 0;
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index f0b0a2b..feff58d 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -13,7 +13,7 @@ internal sealed record RegionTruckEntry(string RegionCode, string Region, string
+     string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
+     IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
+     IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1,
+-    string MapDataHash = "");
++    string MapDataHash = "", [property: System.Text.Json.Serialization.JsonIgnore] RegionTruckEntry? FileEntry = null);
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead,
+     TruckEquipmentCatalog? EquipmentCatalog = null);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment, IReadOnlyList<float>? Transform = null);
+@@ -116,7 +116,7 @@ internal static class RegionTruckCatalogService
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+             { warnings.Add($"{map}: {ex.Message}"); }
+         }
+-        return new(entries.Select(availabilityStore.Apply).ToArray(), warnings.ToArray(), mapsRead, equipmentCatalog);
++        return new(PendingTruckReplacements.Preview(workspace, entries.Select(availabilityStore.Apply).ToArray(), equipmentCatalog), warnings.ToArray(), mapsRead, equipmentCatalog);
+     }
+ 
+     internal static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, IReadOnlySet<string> truckCodes)
+@@ -245,7 +245,7 @@ internal static class RegionTruckCatalogService
+         return names.GetValueOrDefault(keyName, map);
+     }
+ 
+-    private static Dictionary<string, (string Name, string Class)> LoadTrucks(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
++    internal static Dictionary<string, (string Name, string Class)> LoadTrucks(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
+     {
+         var trucks = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase);
+         foreach (var file in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+index 88898fa..f14b6a6 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -77,7 +77,7 @@ internal sealed class TruckReplacementDialog : Form
+     private int _comparisonRequest;
+     private readonly Button _apply = new() { Text = "Apply replacement", AutoSize = true, Enabled = false };
+     private bool _saving;
+-    public SavedTruckReplacement? SavedReplacement { get; private set; }
++    public PendingTruckReplacement? QueuedReplacement { get; private set; }
+ 
+     public TruckReplacementDialog(string workspace, RegionTruckEntry current, Func<IReadOnlyList<CustomTruck>> getEnabled,
+         TruckEquipmentCatalog? equipmentCatalog = null)
+@@ -102,7 +102,7 @@ internal sealed class TruckReplacementDialog : Form
+         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
+         var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel }; footer.Controls.Add(close);
+         footer.Controls.Add(_apply);
+-        footer.Controls.Add(new Label { Text = "Uses default equipment • saves a workspace map copy and original backup", AutoSize = true, Padding = new Padding(4, 7, 12, 0) });
++        footer.Controls.Add(new Label { Text = "Queues a persistent table change • apply map files from Start", AutoSize = true, Padding = new Padding(4, 7, 12, 0) });
+         layout.Controls.Add(footer, 0, 3); Controls.Add(layout); CancelButton = close;
+         _comparison.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+         _comparison.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+@@ -177,7 +177,7 @@ internal sealed class TruckReplacementDialog : Form
+ 
+     private void Compare()
+     {
+-        _apply.Enabled = !_saving && SavedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
++        _apply.Enabled = !_saving && QueuedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
+             && !choice.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase);
+         var request = ++_comparisonRequest;
+         var selected = Selected();
+@@ -219,22 +219,21 @@ internal sealed class TruckReplacementDialog : Form
+ 
+     private async Task ApplyReplacementAsync()
+     {
+-        if (_saving || SavedReplacement is not null || Selected() is not { } selected) return;
++        if (_saving || QueuedReplacement is not null || Selected() is not { } selected) return;
+         var enabled = _getEnabled();
+         if (!enabled.Any(truck => truck.Code.Equals(selected.Truck.Code, StringComparison.OrdinalIgnoreCase)))
+         { _status.Text = "This truck is no longer enabled. Close and reopen the replacement window."; return; }
+         _saving = true; _apply.Enabled = false; _apply.Text = "Saving…";
+         _list.Enabled = _class.Enabled = _tires.Enabled = false;
+-        _status.Text = "Backing up the map and saving the replacement…";
++        _status.Text = "Saving the pending replacement…";
+         try
+         {
+-            var saved = await Task.Run(() => TruckReplacementStore.Save(_workspace, _current, selected));
++            var queued = await Task.Run(() => PendingTruckReplacements.Queue(_workspace, _current, selected.Truck));
+             if (IsDisposed) return;
+             await InvokeAsync(() =>
+             {
+-                SavedReplacement = saved;
+-                _status.Text = $"Saved {saved.TruckName}.\r\nEdited map: {saved.OutputPath}\r\nOriginal backup: {saved.OriginalBackupPath}"
+-                    + (saved.PreviousBackupPath is null ? "" : "\r\nPrevious edited version: " + saved.PreviousBackupPath);
++                QueuedReplacement = queued;
++                _status.Text = $"Queued {selected.Truck.Name}. The table preview is saved; map files are unchanged. Apply it from Start → Map files.";
+             });
+         }
+         catch (Exception ex) { if (!IsDisposed) await InvokeAsync(() => _status.Text = "Replacement was not saved: " + ex.Message); }
+@@ -244,9 +243,9 @@ internal sealed class TruckReplacementDialog : Form
+             {
+                 await InvokeAsync(() =>
+                 {
+-                    _saving = false; _apply.Text = SavedReplacement is null ? "Apply replacement" : "Saved";
++                    _saving = false; _apply.Text = QueuedReplacement is null ? "Apply replacement" : "Queued";
+                     _list.Enabled = _class.Enabled = _tires.Enabled = true;
+-                    _apply.Enabled = SavedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
++                    _apply.Enabled = QueuedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
+                         && !choice.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase);
+                 });
+             }
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 28f7dc4..849593a 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -118,6 +118,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     }
+ 
+     public Task EnsureLoadedAsync() => LoadAsync(force: false);
++    public Task RefreshChangesAsync() { _loadedMapFolder = null; return LoadAsync(force: false); }
+ 
+     private async Task LoadAsync(bool force)
+     {
+@@ -126,9 +127,10 @@ internal sealed class RegionsTrucksTab : UserControl
+         if (_mapFolder.Text.Length == 0) _mapFolder.Text = RegionTruckCatalogService.FindMapDirectory(_getPakPath());
+         var mapFolder = _mapFolder.Text.Trim();
+         if (!force && workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase)
+-            && mapFolder.Equals(_loadedMapFolder, StringComparison.OrdinalIgnoreCase)) return;
++            && mapFolder.Equals(_loadedMapFolder, StringComparison.OrdinalIgnoreCase)
++            && _catalog?.EquipmentCatalog?.IsCurrent(workspace) == true) return;
+         ClearCatalog();
+-        if (workspace.Length == 0 || !Directory.Exists(workspace)) { _status.Text = "Choose an extracted workspace on the Unpack / Pack tab."; return; }
++        if (workspace.Length == 0 || !Directory.Exists(workspace)) { _status.Text = "Choose an extracted workspace on the Start tab."; return; }
+         if (mapFolder.Length == 0 || !Directory.Exists(mapFolder)) { _status.Text = "Choose a map folder containing level_*.pak archives or extracted maps."; return; }
+         _loading = true;
+         _reload.Enabled = _browse.Enabled = false;
+@@ -229,10 +231,10 @@ internal sealed class RegionsTrucksTab : UserControl
+                 || (entry.Availability == "Mission/task only" && _showMission.Checked))
+             .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
+         var table = new DataTable();
+-        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Frame addons", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
++        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Frame addons", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID", "Change state" }) table.Columns.Add(name);
+         table.Columns.Add("Entry", typeof(RegionTruckEntry));
+         foreach (var entry in rows) table.Rows.Add(entry.Region, entry.Map, entry.Truck, entry.Class,
+-            entry.Tires, entry.FrameAddons, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
++            entry.Tires, entry.FrameAddons, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry.FileEntry is null ? "In files" : "Pending", entry);
+         _updatingTable = true;
+         try
+         {
+@@ -265,6 +267,7 @@ internal sealed class RegionsTrucksTab : UserControl
+             foreach (DataGridViewRow row in _trucks.Rows)
+             {
+                 if (row.DataBoundItem is not DataRowView view || view["Entry"] is not RegionTruckEntry entry) continue;
++                row.Cells["Truck"].Style.BackColor = entry.FileEntry is null ? AppColors.Get("Surface") : AppColors.Get("EngineMatch");
+                 if (entry.AvailabilityEditable && row.Cells["Availability"] is not DataGridViewComboBoxCell)
+                 {
+                     var choice = new DataGridViewComboBoxCell { DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton };
+@@ -348,11 +351,11 @@ internal sealed class RegionsTrucksTab : UserControl
+             || _trucks.Rows[rowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry) return;
+         using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks, _catalog?.EquipmentCatalog);
+         dialog.ShowDialog(this);
+-        if (dialog.SavedReplacement is { } saved)
++        if (dialog.QueuedReplacement is { } queued)
+         {
+             _loadedMapFolder = null;
+             await LoadAsync(force: false);
+-            _status.Text += $" Saved {saved.TruckName}. Edited map: {saved.OutputPath} · Original backup: {saved.OriginalBackupPath}";
++            _status.Text += $" Pending replacement: {queued.Original.Truck} → {queued.Target.Name}. Apply map files from Start.";
+         }
+     }
+ 
+@@ -361,7 +364,8 @@ internal sealed class RegionsTrucksTab : UserControl
+         if (e.RowIndex < 0 || e.ColumnIndex < 0 || _trucks.Rows[e.RowIndex].DataBoundItem is not DataRowView row
+             || row["Entry"] is not RegionTruckEntry entry) return;
+         // Resolve from the bound entry so tooltips remain correct after sorting.
+-        if (_trucks.Columns[e.ColumnIndex].Name == "Truck") e.ToolTipText = "Compare replacement trucks (⇄ button, F4 or Alt+Down).";
++        if (_trucks.Columns[e.ColumnIndex].Name == "Truck") e.ToolTipText = entry.FileEntry is null ? "Compare replacement trucks (⇄ button, F4 or Alt+Down)."
++            : $"Pending: {entry.FileEntry.Truck} → {entry.Truck}. Apply from Start → Map files.";
+         if (_trucks.Columns[e.ColumnIndex].Name == "Tires") e.ToolTipText = entry.TireDetails;
+         if (_trucks.Columns[e.ColumnIndex].Name == "Addons") e.ToolTipText = entry.AddonDetails;
+         if (_trucks.Columns[e.ColumnIndex].Name == "Frame addons") e.ToolTipText = entry.FrameAddonDetails;
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementStore.cs b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+index f3f63a8..aeab368 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementStore.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+@@ -34,7 +34,23 @@ internal static class TruckReplacementStore
+         lock (SaveGate) return SaveCore(workspace, current, replacement);
+     }
+ 
+-    private static SavedTruckReplacement SaveCore(string workspace, RegionTruckEntry current, ReplacementTruck replacement)
++    public static SavedTruckReplacement SaveBatch(string workspace, IReadOnlyList<(RegionTruckEntry Original, ReplacementTruck Replacement)> changes)
++    {
++        lock (SaveGate)
++        {
++            if (changes.Count == 0) throw new ArgumentException("No map changes were selected.");
++            var first = changes[0].Original;
++            var data = RegionTruckCatalogService.ReadMapData(first.Source) ?? throw new InvalidDataException("The map metadata is missing.");
++            var hash = Hash(data);
++            if (changes.Any(change => change.Original.MapCode != first.MapCode || change.Original.Source != first.Source || change.Original.MapDataHash != hash))
++                throw new InvalidDataException("The map changed since these replacements were queued. Reload and review the pending changes.");
++            foreach (var change in changes.OrderByDescending(change => change.Original.BinaryOffset))
++                data = Patch(data, change.Original, change.Replacement);
++            return SaveCore(workspace, first, changes[0].Replacement, data);
++        }
++    }
++
++    private static SavedTruckReplacement SaveCore(string workspace, RegionTruckEntry current, ReplacementTruck replacement, byte[]? prepared = null)
+     {
+         if (!Regex.IsMatch(current.MapCode, @"^level_(?:us|ru)_\d{2}_\d{2}(?:_[a-z0-9]+)*$", RegexOptions.IgnoreCase))
+             throw new InvalidDataException("The map has no valid map identifier.");
+@@ -47,7 +63,7 @@ internal static class TruckReplacementStore
+         var data = RegionTruckCatalogService.ReadMapData(source) ?? throw new InvalidDataException("The source map has no scene metadata.");
+         if (current.MapDataHash.Length == 0 || current.MapDataHash != Hash(data))
+             throw new InvalidDataException("The map changed since it was scanned. Reload maps before replacing this truck.");
+-        var patched = Patch(data, current, replacement);
++        var patched = prepared ?? Patch(data, current, replacement);
+         var root = Root(workspace);
+         var archive = source.EndsWith(".pak", StringComparison.OrdinalIgnoreCase);
+         if (!archive && !source.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Unsupported map file.");
+diff --git a/src/SnowPakTool.Desktop/EngineEditTab.cs b/src/SnowPakTool.Desktop/EngineEditTab.cs
+index 5bf1efb..b2af2b1 100644
+--- a/src/SnowPakTool.Desktop/EngineEditTab.cs
++++ b/src/SnowPakTool.Desktop/EngineEditTab.cs
+@@ -872,6 +872,26 @@ internal sealed class EngineEditTab : UserControl
+             : $"Engine compatibility changes for {data.Name} are pending save.";
+     }
+ 
++    public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
++    {
++        if (!string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) yield break;
++        foreach (var row in _compatibilityGrid.Rows.Cast<DataGridViewRow>().Select(row => row.Tag).OfType<TruckRow>().Where(row => !row.Types.SetEquals(row.PersistedTypes)))
++            yield return new(WorkspaceChange.Pending, row.FilePath, row.Name + " / Engine compatibility", string.Join(", ", row.PersistedTypes.Order()), string.Join(", ", row.Types.Order()));
++        foreach (var engineClass in _engineClasses)
++            foreach (var original in engineClass.Definitions)
++                if (_updatedDefinitions.TryGetValue(DefinitionKey(engineClass.Code, original.Name), out var updated))
++                    foreach (var key in original.Properties.Keys.Concat(updated.Properties.Keys).Distinct())
++                        if (original.Properties.GetValueOrDefault(key) != updated.Properties.GetValueOrDefault(key))
++                            yield return new(WorkspaceChange.Pending, engineClass.FilePath, original.UiName + " / " + key,
++                                original.Properties.GetValueOrDefault(key, ""), updated.Properties.GetValueOrDefault(key, ""));
++    }
++
++    public void SavePendingChanges()
++    {
++        _compatibilityGrid.EndEdit(); _updatedPropertiesGrid.EndEdit();
++        SaveCompatibility(this, EventArgs.Empty); ConfirmProperties(this, EventArgs.Empty);
++    }
++
+     private void SaveCompatibility(object? sender, EventArgs e)
+     {
+         var pending = _compatibilityGrid.Rows.Cast<DataGridViewRow>().Select(row => row.Tag).OfType<TruckRow>()
+diff --git a/src/SnowPakTool.Desktop/TruckEditTab.cs b/src/SnowPakTool.Desktop/TruckEditTab.cs
+index 42775d8..1fce289 100644
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -532,6 +532,26 @@ internal sealed class TruckEditTab : UserControl
+             .Any(row => !row.Types.SetEquals(row.PersistedTypes));
+     }
+ 
++    public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
++    {
++        foreach (var change in _engineEditTab.PendingChanges(workspace)) yield return change;
++        if (!string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) yield break;
++        foreach (var row in _winchGrid.Rows.Cast<DataGridViewRow>().Select(row => row.Tag).OfType<TruckRow>().Where(row => !row.Types.SetEquals(row.PersistedTypes)))
++            yield return new(WorkspaceChange.Pending, row.FilePath, row.Name + " / Winch compatibility", string.Join(", ", row.PersistedTypes.Order()), string.Join(", ", row.Types.Order()));
++        foreach (var winchClass in _winchClasses)
++            foreach (var original in winchClass.Definitions)
++                if (_updatedDefinitions.TryGetValue(DefinitionKey(winchClass.Code, original.Name), out var updated) && original != updated)
++                    foreach (var field in new[] { ("Length", original.Length, updated.Length), ("StrengthMultiplier", original.StrengthMultiplier, updated.StrengthMultiplier),
++                                 ("IgnitionRequired", original.IgnitionRequired, updated.IgnitionRequired), ("UnlockByRank", original.UnlockByRank, updated.UnlockByRank) })
++                        if (field.Item2 != field.Item3) yield return new(WorkspaceChange.Pending, winchClass.FilePath, original.UiName + " / " + field.Item1, field.Item2, field.Item3);
++    }
++
++    public void SavePendingChanges()
++    {
++        _engineEditTab.SavePendingChanges(); _winchGrid.EndEdit(); _updatedWinchPropertiesGrid.EndEdit();
++        SaveWinchCompatibility(this, EventArgs.Empty); ConfirmWinchPreset(this, EventArgs.Empty);
++    }
++
+     private void SaveWinchCompatibility(object? sender, EventArgs e)
+     {
+         var pending = _winchGrid.Rows
+diff --git a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+index 9c4bce8..46bc741 100644
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -831,6 +831,19 @@ internal sealed class ExperienceEditorTab : UserControl
+         }
+     }
+ 
++    public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
++    {
++        if (!string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase) || _rankSettingsPath is null || _loadedValues is null) yield break;
++        for (var i = 0; i < Math.Min(_grid.Rows.Count, _loadedValues.Count); i++)
++        {
++            var value = Convert.ToString(_grid.Rows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture) ?? "";
++            var before = _loadedValues[i].ToString(CultureInfo.InvariantCulture);
++            if (value != before) yield return new(WorkspaceChange.Pending, _rankSettingsPath, $"Rank {i + 2} XP", before, value);
++        }
++    }
++
++    public void SavePendingChanges() => SaveSettings();
++
+     private void SaveSettings()
+     {
+         if (_rankSettingsPath is null || _loadedFileText is null) return;
+diff --git a/src/SnowPakTool.Desktop/WorkspaceDataCache.cs b/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
+index 3dd0b62..13e470c 100644
+--- a/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
+@@ -124,7 +124,7 @@ internal static class WorkspaceDataCache
+         files = snapshot.CurrentFiles
+             .Where(file => IsWithinDirectory(file.RelativePath, directory, searchOption))
+             .Where(file => MatchesPattern(file.RelativePath, searchPattern))
+-            .Select(file => file.FullPath)
++            .Select(file => WorkspaceOriginals.GetCurrentPath(workspace, file.RelativePath))
+             .ToArray();
+         return true;
+     }
+diff --git a/src/SnowPakTool.Desktop/WorkspaceOriginals.cs b/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
+index de4c570..83fc5a5 100644
+--- a/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
+@@ -83,7 +83,9 @@ internal static class WorkspaceOriginals
+     public static string GetRelativePath(string workspace, string filePath)
+     {
+         var path = Path.GetFullPath(filePath);
+-        foreach (var root in new[] { GetUpdatedRoot(workspace), Path.Combine(GetOriginalRoot(workspace), LegacyOriginalsDirectory), GetOriginalRoot(workspace) })
++        // A flat updated root may contain original_files; resolve the more
++        // specific original roots first so edits never target the baseline.
++        foreach (var root in new[] { Path.Combine(GetOriginalRoot(workspace), LegacyOriginalsDirectory), GetOriginalRoot(workspace), GetUpdatedRoot(workspace) })
+         {
+             var fullRoot = Path.GetFullPath(root);
+             var prefix = Path.EndsInDirectorySeparator(fullRoot) ? fullRoot : fullRoot + Path.DirectorySeparatorChar;
+diff --git a/src/SnowPakTool.Desktop/TrucksCargoTab.cs b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index 5044884..f0c6ab4 100644
+--- a/src/SnowPakTool.Desktop/TrucksCargoTab.cs
++++ b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -72,7 +72,7 @@ internal sealed class TrucksCargoTab : UserControl
+         _description.Clear();
+         if (workspace.Length == 0 || !Directory.Exists(workspace))
+         {
+-            _status.Text = "Choose an extracted workspace on the Unpack / Pack tab to list cargo.";
++            _status.Text = "Choose an extracted workspace on the Start tab to list cargo.";
+             return;
+         }
+         try
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 432d6c5..6ea45b2 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -42,7 +42,7 @@ The table excludes visual (`_tuning`) parts from both addon columns. The remaini
+ 
+ The bottom details pane is resizable using the horizontal divider above it. It lists internal equipment by slot and name, visual addons by name with their game category in parentheses, vehicle properties and tire/wheel details. AWD/transfer-box and differential-lock components appear only under internal equipment, even when stored in a `_tuning` folder; the folder distinction remains in the underlying metadata. Placement, availability evidence, truck/map headings and frame/other addon lists are omitted from this pane. Vehicle property labels omit the TruckData/GameData prefixes and use spaces around =. Map overrides take precedence over vehicle socket defaults. Component names resolve through workspace definitions, including parent variant files; unresolved names fall back to their IDs. Definition properties are separate from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
+ 
+-Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** when focused) that opens the replacement comparison popup. Its candidates use the same enabled base-game/owned-DLC catalog as Tier list, regardless of Tier list groups or filters. Class and default-tire filters combine; column headers sort the list. The popup uses the shared double-Shift search with a three-character minimum to search all displayed strings and attached metadata. Selecting a candidate updates the resizable lower comparison table: current map equipment versus candidate defaults, internal component names, nonvisual installed addons, vehicle properties, compatible wheel families/tires and nonvisual addon socket options. Truck/Class/Truck ID rows and detailed engine, gearbox, suspension and winch settings are omitted from the comparison. Socket options shared by both trucks are always hidden, independently of the Differences only checkbox. The comparison uses an animated pixel-scrolling viewport instead of jumping by variable-height rows; wheel input over the table, keyboard navigation and shared search all use this viewport. Changed values are highlighted, with a **Differences only** checkbox. Socket matches alone do not validate addon conflicts or other restrictions; explicit definition values do not fully resolve templates. The **Apply replacement** button saves the selected model with its default addons and default engine/gearbox/winch/suspension/wheels. Placement ID, transform and all bytes outside the model/equipment fields are preserved. The button is disabled for the current model, during saving, and after a successful save. Saved and backup paths are displayed; closing the popup reloads Regions-Trucks from the edited map.
++Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** when focused) that opens the replacement comparison popup. Its candidates use the same enabled base-game/owned-DLC catalog as Tier list, regardless of Tier list groups or filters. Class and default-tire filters combine; column headers sort the list. The popup uses the shared double-Shift search with a three-character minimum to search all displayed strings and attached metadata. Selecting a candidate updates the resizable lower comparison table: current map equipment versus candidate defaults, internal component names, nonvisual installed addons, vehicle properties, compatible wheel families/tires and nonvisual addon socket options. Truck/Class/Truck ID rows and detailed engine, gearbox, suspension and winch settings are omitted from the comparison. Socket options shared by both trucks are always hidden, independently of the Differences only checkbox. The comparison uses an animated pixel-scrolling viewport instead of jumping by variable-height rows; wheel input over the table, keyboard navigation and shared search all use this viewport. Changed values are highlighted, with a **Differences only** checkbox. Socket matches alone do not validate addon conflicts or other restrictions; explicit definition values do not fully resolve templates. The **Apply replacement** button queues the selected truck in persistent metadata only. Closing the popup refreshes the table preview, with the pending truck highlighted and its file-backed original retained. No map or backup files are written by the popup. Use **Start → Map files → Apply pending map changes** to commit queued replacements with default equipment. Placement IDs, transforms and bytes outside the changed model/equipment fields are preserved.
+ 
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Classification evidence, map coordinates and source metadata remain available internally for search. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+@@ -50,8 +50,16 @@ Regions-Trucks waits for the shared workspace/ownership snapshot without waiting
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+ 
+-Small improvements: Engines uses a short one-line description; Custom tires include their underlying category. The shared search uses Tab/Shift+Tab to cycle focus through matches, wrapping at either end. Farming Tractor is an app-only class for Ankatra 1160, Futom 7290RA, Kirovets K-700 and K-7M; XML TruckType values are preserved. The Unpack / Pack tab has a bottom activity bar that animates while unpacking/merging or packing, and resets on completion, cancellation or error. Replacement comparisons hide hood-ornament and miscellaneous addon categories and the requested technical fields, with only Compatible families and scale under Wheels.
++Small improvements: Engines uses a short one-line description; Custom tires include their underlying category. The shared search uses Tab/Shift+Tab to cycle focus through matches, wrapping at either end. Farming Tractor is an app-only class for Ankatra 1160, Futom 7290RA, Kirovets K-700 and K-7M; XML TruckType values are preserved. The Start tab has a bottom activity bar that animates while unpacking/merging or packing, and resets on completion, cancellation or error. Replacement comparisons hide hood-ornament and miscellaneous addon categories and the requested technical fields, with only Compatible families and scale under Wheels.
+ 
+-Replacement outputs are stored separately under the workspace root: `.snowpaktool/region-maps/updated/level_*.pak` (or `level_*/[scene]/data_for_ssl.bin` for extracted maps). The first original is kept under `.snowpaktool/region-maps/backups/<map>/original.pak` or `original.bin`; further saves also preserve a timestamped copy of the preceding edited version. Input archives, original extracted maps and player saves are not overwritten. These map outputs are separate from the initial.pak build on the Unpack / Pack tab and are not installed into the game automatically. The catalog prefers saved maps belonging to the selected map folder and workspace. Save checks the scanned metadata hash, exact placement boundary and transform, verifies the patch by re-reading placements, verifies backup bytes, stages archive changes in a temporary file, re-reads the written metadata and checks the full source file hash before an atomic output replacement. In-game behavior has not been validated by the automated checks.
++Replacement outputs are stored separately under the workspace root: `.snowpaktool/region-maps/updated/level_*.pak` (or `level_*/[scene]/data_for_ssl.bin` for extracted maps). The first original is kept under `.snowpaktool/region-maps/backups/<map>/original.pak` or `original.bin`; further saves also preserve a timestamped copy of the preceding edited version. Input archives, original extracted maps and player saves are not overwritten. These map outputs are separate from the initial.pak build in the Start PAK section and are not installed into the game automatically. The catalog prefers saved maps belonging to the selected map folder and workspace. Save checks the scanned metadata hash, exact placement boundary and transform, verifies the patch by re-reading placements, verifies backup bytes, stages archive changes in a temporary file, re-reads the written metadata and checks the full source file hash before an atomic output replacement. In-game behavior has not been validated by the automated checks.
+ 
+ The [official truck placement documentation](https://expeditions-guides.saber.games/map_modding/creating_a_map/trucks/adding_trucks/) describes placement IDs as objective references and the vehicle defaults/upgrades used by this replacement behavior.
++
++## Start: PAK and map changes
++
++The first tab is **Start**, with separate **PAK** and **Map files** sections. Both show before/after values and distinguish **In files** (green) from **Pending** (amber). The baseline for default game values is the workspace's preserved `original_files` tree; map changes use the preserved original map backup. The dashboard refreshes when Start is opened, after Start actions, or via **Refresh changes**. Search and column sorting work in both change tables.
++
++The PAK section lists actual changes in edited workspace files, including XML attribute changes, and unsaved changes in the rank XP, engine compatibility/properties and winch compatibility/properties editors. **Apply pending PAK edits** uses the editors' existing validation and save methods; successful edits move from Pending to In files. **Pack to new PAK…** saves pending editor edits before building a new archive and refuses to overwrite the selected input PAK. Files already saved from other editor tabs appear as In files.
++
++Truck choices from the replacement popup are persisted in `.snowpaktool/region-maps/pending-replacements.json`, independently of edited maps. Regions-Trucks previews these choices with a Pending state and retains the original file identity for later application. Pending changes can be revised in the popup or discarded on Start. **Apply pending map changes** is the only UI action that writes replacement map files. It validates the source metadata, processes same-map edits in descending binary-offset order, saves each map once with original/previous backups, and clears only the successfully committed plans. Stale plans remain pending for review. Outputs remain separate map copies; no source archives, preserved originals or player saves are overwritten.
+\ No newline at end of file
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index ee894dc..6e3e28b 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -10,6 +10,10 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/PendingTruckReplacements.cs" Link="PendingTruckReplacements.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs" Link="WorkspaceChangeAudit.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/StartChangesPanel.cs" Link="StartChangesPanel.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckClasses.cs" Link="TruckClasses.cs" />
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index c2a7479..5346746 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -352,6 +352,7 @@ internal static class Program
+         var stringsFolder = Path.Combine(workspace, "original_files", "[strings]"); Directory.CreateDirectory(stringsFolder);
+         File.WriteAllText(Path.Combine(stringsFolder, "strings_english.str"), "");
+         var popupCurrent = reloaded.Entries.Single(entry => entry.PlacementId == "AWARD");
++        var mapBeforeQueue = File.ReadAllBytes(popupCurrent.Source);
+         using (var popup = new TruckReplacementDialog(workspace, popupCurrent,
+                    () => [new("test_truck", "Test truck", "Scout"), new("test_truck_second", "Second truck", "Scout")], reloaded.EquipmentCatalog))
+         {
+@@ -365,16 +366,65 @@ internal static class Program
+                 if (Convert.ToString(row.Cells["Truck ID"].Value) == "test_truck_second") grid.CurrentCell = row.Cells[0];
+             Check(Field<Button>(popup, "_apply").Enabled, "Apply is enabled for a different enabled truck");
+             Field<Button>(popup, "_apply").PerformClick(); timer.Restart();
+-            while ((popup.SavedReplacement is null || Field<bool>(popup, "_saving")) && timer.ElapsedMilliseconds < 10000)
++            while ((popup.QueuedReplacement is null || Field<bool>(popup, "_saving")) && timer.ElapsedMilliseconds < 10000)
+             { Application.DoEvents(); Thread.Sleep(5); }
+-            Check(popup.SavedReplacement is not null && File.Exists(popup.SavedReplacement.OutputPath)
+-                && !Field<Button>(popup, "_apply").Enabled && Field<Label>(popup, "_status").Text.Contains("Original backup:"),
+-                "Clicking Apply saves the selected truck, displays paths and prevents duplicate saves");
++            Check(popup.QueuedReplacement is not null && File.ReadAllBytes(popupCurrent.Source).SequenceEqual(mapBeforeQueue)
++                && !Field<Button>(popup, "_apply").Enabled && Field<Label>(popup, "_status").Text.Contains("Start"),
++                "Popup Apply persists the queue without touching map files");
+             popup.Close();
+         }
++        Check(PendingTruckReplacements.Load(workspace).Count == 1, "Queued replacements persist independently of popup lifetime");
++        var preview = RegionTruckCatalogService.Load(workspace, maps, new Dictionary<string, string>(), new Dictionary<string, string>(), new RegionTruckAvailabilityStore(Path.Combine(run, "preview-availability.json")));
++        Check(preview.Entries.Single(entry => entry.PlacementId == "AWARD") is { TruckCode: "test_truck_second", FileEntry.TruckCode: "test_truck" }, "Table shows queued truck and retains the file-backed original");
++        var discovery = preview.Entries.Single(entry => entry.PlacementId.Length == 0);
++        PendingTruckReplacements.Queue(workspace, discovery, new("test_truck_second", "Second truck", "Scout"));
++        Check(WorkspaceChangeAudit.MapFiles(workspace).Count(row => row.State == WorkspaceChange.Pending) == 2, "Start map list includes every pending replacement");
++        Check(File.ReadAllBytes(popupCurrent.Source).SequenceEqual(mapBeforeQueue), "Multiple queued changes still leave the map untouched");
++        var appliedMaps = PendingTruckReplacements.ApplyAll(workspace);
++        Check(appliedMaps.Count == 1 && PendingTruckReplacements.Load(workspace).Count == 0, "Start applies same-map changes together and clears only committed plans");
++        var committed = RegionTruckCatalogService.Load(workspace, maps, new Dictionary<string, string>(), new Dictionary<string, string>(), new RegionTruckAvailabilityStore(Path.Combine(run, "committed-availability.json")));
++        Check(committed.Entries.Single(entry => entry.PlacementId == "AWARD").TruckCode == "test_truck_second"
++            && committed.Entries.Single(entry => entry.PlacementId.Length == 0).TruckCode == "test_truck_second" && committed.Entries.All(entry => entry.FileEntry is null),
++            "Both replacements survive variable-length edits and reload as applied file values");
++        Check(WorkspaceChangeAudit.MapFiles(workspace).Any(row => row.State == WorkspaceChange.InFiles && row.After.Contains("test_truck_second")), "Start distinguishes applied map changes from pending plans");
++        var xml = Path.Combine(mediaFor(workspace), "test_truck_second.xml");
++        var originalXml = WorkspaceOriginals.GetOriginalReadPath(workspace, "[media]/classes/trucks/test_truck_second.xml");
++        Directory.CreateDirectory(Path.GetDirectoryName(xml)!); File.WriteAllText(xml, File.ReadAllText(originalXml).Replace("<TruckData ", "<TruckData FuelCapacity=\"99\" "));
++        Check(WorkspaceChangeAudit.PakFiles(workspace).Any(row => row.State == WorkspaceChange.InFiles && row.Property.EndsWith("/@FuelCapacity") && row.After == "99"), "Start PAK audit compares saved XML properties with default originals");
++        var pendingAgain = committed.Entries.Single(entry => entry.PlacementId == "AWARD");
++        PendingTruckReplacements.Queue(workspace, pendingAgain, new("test_truck", "Test truck", "Scout"));
++        StartPanelRegression(workspace);
++        string mediaFor(string root) => Path.Combine(WorkspaceOriginals.GetUpdatedRoot(root), "[media]", "classes", "trucks");
+         Console.WriteLine("PASS: replacement saving, byte-identical backups, repeat revisions, task/discovery identity, stale rejection, overlay reload and unrelated archive content.");
+     }
+ 
++    private static void StartPanelRegression(string workspace)
++    {
++        var pendingPak = true;
++        var panel = new StartChangesPanel(() => workspace, new Button { Text = "Pack to new PAK" },
++            _ => pendingPak ? [new(WorkspaceChange.Pending, "rank_settings.sso", "Rank 2 XP", "100", "150")] : [],
++            () => pendingPak = false, () => { PendingTruckReplacements.ApplyAll(workspace); return Task.CompletedTask; }, () => Task.CompletedTask);
++        using var host = new Form { Size = new Size(1100, 850) }; host.Controls.Add(panel); host.Show();
++        void Refresh()
++        {
++            var task = panel.RefreshAsync(); var clock = System.Diagnostics.Stopwatch.StartNew();
++            while (!task.IsCompleted && clock.ElapsedMilliseconds < 5000) { Application.DoEvents(); Thread.Sleep(5); }
++            task.GetAwaiter().GetResult(); Application.DoEvents();
++        }
++        Refresh(); var pak = Field<DataGridView>(panel, "_pak"); var maps = Field<DataGridView>(panel, "_maps");
++        Check(pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending)
++            && pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.InFiles)
++            && maps.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending), "Start shows saved file changes together with pending PAK and map edits");
++        Check(pak.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending).All(row => row.DefaultCellStyle.BackColor == AppColors.Get("EngineMatch"))
++            && pak.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.InFiles).All(row => row.DefaultCellStyle.BackColor == AppColors.Get("DAF8E0")), "Start uses distinct state colors");
++        using (var image = new Bitmap(host.Width, host.Height))
++        { host.DrawToBitmap(image, new Rectangle(0, 0, host.Width, host.Height)); image.Save(Path.Combine(AppContext.BaseDirectory, "start-sections-preview.png")); }
++        Field<Button>(panel, "_savePakButton").PerformClick(); Refresh(); Check(!pendingPak, "Start PAK apply invokes pending editor saves");
++        Field<Button>(panel, "_applyMapsButton").PerformClick(); Refresh(); Check(PendingTruckReplacements.Load(workspace).Count == 0, "Start map apply commits queued replacements");
++        host.Close();
++        Console.WriteLine("PASS: Start PAK/map sections, applied/pending lists, state colors and apply actions.");
++    }
++
+     private static void ReplacementPopupRegression(string workspace, RegionTruckEntry source, TruckEquipmentCatalog equipmentCatalog)
+     {
+         var enabled = new[] { new CustomTruck(source.TruckCode, source.Truck, source.Class),
+diff --git a/src/SnowPakTool.Desktop/PendingTruckReplacements.cs b/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+new file mode 100644
+index 0000000..c16eb06
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+@@ -0,0 +1,81 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record PendingTruckReplacement(string Key, RegionTruckEntry Original, CustomTruck Target, DateTimeOffset QueuedAt);
++
++/// <summary>Persist intent independently of the map files. Only Start calls ApplyAll.</summary>
++internal static class PendingTruckReplacements
++{
++    private static readonly object Gate = new();
++    private static string PathFor(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "pending-replacements.json");
++    private static string Key(RegionTruckEntry entry) => entry.MapCode + "|" + entry.PlacementId + "|" + entry.BinaryOffset;
++
++    public static IReadOnlyList<PendingTruckReplacement> Load(string workspace)
++    {
++        var path = PathFor(workspace);
++        if (!File.Exists(path)) return [];
++        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
++        return JsonSerializer.Deserialize<List<PendingTruckReplacement>>(input)
++            ?? throw new InvalidDataException("The pending map changes file is empty or invalid.");
++    }
++
++    public static PendingTruckReplacement Queue(string workspace, RegionTruckEntry displayed, CustomTruck target)
++    {
++        lock (Gate)
++        {
++            var original = displayed.FileEntry ?? displayed;
++            if (original.MapDataHash.Length == 0) throw new InvalidDataException("Reload maps before queuing a replacement.");
++            var item = new PendingTruckReplacement(Key(original), original, target, DateTimeOffset.UtcNow);
++            var changes = Load(workspace).Where(change => change.Key != item.Key).ToList();
++            if (!original.TruckCode.Equals(target.Code, StringComparison.OrdinalIgnoreCase)) changes.Add(item);
++            Write(workspace, changes);
++            return item;
++        }
++    }
++
++    private static void Write(string workspace, IReadOnlyList<PendingTruckReplacement> changes)
++    {
++        var path = PathFor(workspace); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try { File.WriteAllText(temporary, JsonSerializer.Serialize(changes, new JsonSerializerOptions { WriteIndented = true })); File.Move(temporary, path, overwrite: true); }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    public static IReadOnlyList<RegionTruckEntry> Preview(string workspace, IReadOnlyList<RegionTruckEntry> entries, TruckEquipmentCatalog catalog)
++    {
++        var pending = Load(workspace).ToDictionary(change => change.Key, StringComparer.OrdinalIgnoreCase);
++        return entries.Select(entry =>
++        {
++            if (!pending.TryGetValue(Key(entry), out var change) || entry.MapDataHash != change.Original.MapDataHash) return entry;
++            var equipment = catalog.ResolveDefault(change.Target.Code);
++            return entry with { TruckCode = change.Target.Code, Truck = change.Target.Name, Class = change.Target.Class,
++                Tires = equipment.Tires, TireDetails = equipment.TireDetails, Addons = equipment.Addons, AddonDetails = equipment.AddonDetails,
++                FrameAddons = equipment.FrameAddons, FrameAddonDetails = equipment.FrameAddonDetails,
++                InstalledAddons = equipment.InstalledAddons, InternalEquipment = equipment.InternalEquipment, FileEntry = entry };
++        }).ToArray();
++    }
++
++    public static IReadOnlyList<SavedTruckReplacement> ApplyAll(string workspace)
++    {
++        lock (Gate)
++        {
++            var changes = Load(workspace).ToList();
++            var catalog = new TruckEquipmentCatalog(workspace, WorkspaceDataCache.GetLocalizedNames(workspace), []);
++            var saved = new List<SavedTruckReplacement>();
++            foreach (var group in changes.GroupBy(change => change.Original.MapCode).ToArray())
++            {
++                var replacements = group.Select(change => (change.Original, new ReplacementTruck(change.Target,
++                    catalog.ResolveDefault(change.Target.Code), catalog.ComparisonProperties(change.Target.Code)))).ToArray();
++                saved.Add(TruckReplacementStore.SaveBatch(workspace, replacements));
++                var keys = group.Select(change => change.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++                changes.RemoveAll(change => keys.Contains(change.Key));
++                Write(workspace, changes); // Each successfully written map is removed independently.
++            }
++            return saved;
++        }
++    }
++
++    public static void Discard(string workspace, string key)
++    { lock (Gate) Write(workspace, Load(workspace).Where(change => change.Key != key).ToArray()); }
++}
+diff --git a/src/SnowPakTool.Desktop/WorkspaceChange.cs b/src/SnowPakTool.Desktop/WorkspaceChange.cs
+new file mode 100644
+index 0000000..06d15af
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/WorkspaceChange.cs
+@@ -0,0 +1,7 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed record WorkspaceChange(string State, string Target, string Property, string Before, string After, string Key = "")
++{
++    public const string InFiles = "In files";
++    public const string Pending = "Pending";
++}
+diff --git a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+new file mode 100644
+index 0000000..72151ef
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+@@ -0,0 +1,116 @@
++using System.Globalization;
++using System.Security.Cryptography;
++using System.Text.RegularExpressions;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal static class WorkspaceChangeAudit
++{
++    public static IReadOnlyList<WorkspaceChange> PakFiles(string workspace)
++    {
++        var rows = new List<WorkspaceChange>();
++        foreach (var folder in new[] { "[media]", "[ps]", "[ps_common]", "[strings]" })
++        {
++            var updated = Path.Combine(WorkspaceOriginals.GetUpdatedRoot(workspace), folder);
++            if (!Directory.Exists(updated)) continue;
++            foreach (var path in Directory.EnumerateFiles(updated, "*", SearchOption.AllDirectories))
++            {
++                var relative = WorkspaceOriginals.GetRelativePath(workspace, path);
++                var original = WorkspaceOriginals.GetOriginalReadPath(workspace, relative);
++                if (!File.Exists(original)) { rows.Add(new(WorkspaceChange.InFiles, relative, "Added file", "Not present", "Added")); continue; }
++                var before = File.ReadAllBytes(original); var after = File.ReadAllBytes(path);
++                if (before.AsSpan().SequenceEqual(after)) continue;
++                if (path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
++                {
++                    try
++                    {
++                        var a = XmlValues(File.ReadAllText(original)); var b = XmlValues(File.ReadAllText(path));
++                        var count = rows.Count;
++                        foreach (var key in a.Keys.Concat(b.Keys).Distinct())
++                            if (a.GetValueOrDefault(key) != b.GetValueOrDefault(key))
++                                rows.Add(new(WorkspaceChange.InFiles, relative, key, a.GetValueOrDefault(key, "Not present"), b.GetValueOrDefault(key, "Not present")));
++                        if (rows.Count > count) continue;
++                    }
++                    catch (System.Xml.XmlException) { }
++                }
++                if (new[] { ".sso", ".str", ".txt", ".xml" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
++                {
++                    var a = File.ReadAllLines(original); var b = File.ReadAllLines(path);
++                    // Keep a file-level row and the changed line preview for non-XML formats.
++                    var first = Enumerable.Range(0, Math.Min(a.Length, b.Length)).FirstOrDefault(i => a[i] != b[i], -1);
++                    if (first < 0) first = Math.Min(a.Length, b.Length);
++                    rows.Add(new(WorkspaceChange.InFiles, relative, $"Text changed (first difference: line {first + 1})",
++                        first < a.Length ? a[first] : "End of file", first < b.Length ? b[first] : "End of file"));
++                }
++                else rows.Add(new(WorkspaceChange.InFiles, relative, "Binary file changed", $"{before.Length:N0} bytes", $"{after.Length:N0} bytes"));
++            }
++        }
++        return rows;
++    }
++
++    private static Dictionary<string, string> XmlValues(string text)
++    {
++        text = Regex.Replace(text, @"<\?xml[\s\S]*?\?>", "");
++        text = Regex.Replace(text, @"<(/?)([A-Za-z_][\w.-]*):", "<$1$2_");
++        var root = XElement.Parse("<Root>" + text + "</Root>");
++        var values = new Dictionary<string, string>();
++        void Visit(XElement node, string path)
++        {
++            foreach (var attr in node.Attributes()) values[path + "/@" + attr.Name] = attr.Value;
++            if (!node.HasElements && !string.IsNullOrWhiteSpace(node.Value)) values[path + "/text"] = node.Value;
++            var counts = new Dictionary<string, int>();
++            foreach (var child in node.Elements())
++            {
++                var tag = child.Name.LocalName; counts[tag] = counts.GetValueOrDefault(tag) + 1;
++                var id = (string?)child.Attribute("Name");
++                Visit(child, path + "/" + tag + (id is null ? $"[{counts[tag]}]" : "[" + id + "]"));
++            }
++        }
++        Visit(root, ""); return values;
++    }
++
++    public static IReadOnlyList<WorkspaceChange> MapFiles(string workspace)
++    {
++        var rows = new List<WorkspaceChange>();
++        var names = WorkspaceDataCache.GetLocalizedNames(workspace);
++        var trucks = RegionTruckCatalogService.LoadTrucks(workspace, names, []);
++        var codes = trucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
++        foreach (var (map, path) in TruckReplacementStore.SavedMaps(workspace))
++        {
++            var backup = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "backups", map,
++                path.EndsWith(".pak", StringComparison.OrdinalIgnoreCase) ? "original.pak" : "original.bin");
++            if (!File.Exists(backup)) { rows.Add(new(WorkspaceChange.InFiles, map, "Edited map (original backup unavailable)", "Unknown", path)); continue; }
++            var before = RegionTruckCatalogService.ReadMapData(backup); var after = RegionTruckCatalogService.ReadMapData(path);
++            if (before is null || after is null) throw new InvalidDataException("Cannot read map metadata for " + map);
++            if (before.AsSpan().SequenceEqual(after)) continue;
++            var old = RegionTruckCatalogService.ReadPlacements(before, codes).ToLookup(Identity);
++            var updated = RegionTruckCatalogService.ReadPlacements(after, codes).ToLookup(Identity);
++            var start = rows.Count;
++            foreach (var key in old.Select(group => group.Key).Concat(updated.Select(group => group.Key)).Distinct())
++            {
++                var a = old[key].ToArray(); var b = updated[key].ToArray();
++                for (var i = 0; i < Math.Max(a.Length, b.Length); i++)
++                {
++                    var first = i < a.Length ? a[i] : null; var second = i < b.Length ? b[i] : null;
++                    var label = first?.Id is { Length: > 0 } id ? id : $"Placement at {first?.X ?? second!.X:0.#}; {first?.Z ?? second!.Z:0.#}";
++                    if (first?.TruckCode != second?.TruckCode)
++                        rows.Add(new(WorkspaceChange.InFiles, map, label + " / Truck", Name(first?.TruckCode), Name(second?.TruckCode)));
++                    else if (first is not null && second is not null && Equipment(first.Equipment) != Equipment(second.Equipment))
++                        rows.Add(new(WorkspaceChange.InFiles, map, label + " / Installed equipment", Equipment(first.Equipment), Equipment(second.Equipment)));
++                }
++            }
++            if (rows.Count == start) rows.Add(new(WorkspaceChange.InFiles, map, "Other map metadata changed", "Original metadata", "Modified metadata"));
++            string Name(string? code) => code is null ? "Not present" : trucks.TryGetValue(code, out var truck) ? truck.Name : code;
++        }
++        foreach (var change in PendingTruckReplacements.Load(workspace))
++            rows.Add(new(WorkspaceChange.Pending, change.Original.MapCode,
++                (change.Original.PlacementId.Length > 0 ? change.Original.PlacementId : $"Placement at {change.Original.X:0.#}; {change.Original.Z:0.#}") + " / Truck",
++                change.Original.Truck, change.Target.Name, change.Key));
++        return rows;
++    }
++
++    private static string Identity(MapTruckPlacement row) => row.Id + "|" + string.Join(",", row.Transform!.Select(value => value.ToString("R", CultureInfo.InvariantCulture)));
++    private static string Equipment(MapTruckEquipment equipment) => string.Join(", ", equipment.Addons) + " | "
++        + string.Join(" / ", equipment.Engine, equipment.Gearbox, equipment.Winch, equipment.Suspension, equipment.WheelType, equipment.Tire, equipment.Rim, equipment.WheelScale);
++}
+diff --git a/src/SnowPakTool.Desktop/StartChangesPanel.cs b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+new file mode 100644
+index 0000000..85df43d
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -0,0 +1,127 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class StartChangesPanel : UserControl
++{
++    private readonly Func<string> _workspace;
++    private readonly Func<string, IReadOnlyList<WorkspaceChange>> _pendingPak;
++    private readonly Action _savePak;
++    private readonly Func<Task> _applyMaps;
++    private readonly Func<Task> _reloadRegions;
++    private readonly DataGridView _pak = Grid();
++    private readonly DataGridView _maps = Grid();
++    private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 7, 4, 2) };
++    private readonly Button _refresh = new() { Text = "Refresh changes", AutoSize = true };
++    private readonly Button _savePakButton = new() { Text = "Apply pending PAK edits", AutoSize = true, Enabled = false };
++    private readonly Button _applyMapsButton = new() { Text = "Apply pending map changes", AutoSize = true, Enabled = false };
++    private readonly Button _discardMap = new() { Text = "Discard selected pending change", AutoSize = true, Enabled = false };
++    private readonly List<Label> _legend = [];
++    private int _request;
++    private string _displayedWorkspace = "";
++
++    public StartChangesPanel(Func<string> workspace, Control pakActions, Func<string, IReadOnlyList<WorkspaceChange>> pendingPak,
++        Action savePak, Func<Task> applyMaps, Func<Task> reloadRegions)
++    {
++        _workspace = workspace; _pendingPak = pendingPak; _savePak = savePak; _applyMaps = applyMaps; _reloadRegions = reloadRegions;
++        Dock = DockStyle.Fill;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        var legend = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        legend.Controls.Add(_refresh);
++        legend.Controls.Add(new Label { Text = "In files vs preserved originals", AutoSize = true, BackColor = AppColors.Get("DAF8E0"), Padding = new Padding(6), Margin = new Padding(8, 3, 3, 3) });
++        legend.Controls.Add(new Label { Text = "Pending — not applied", AutoSize = true, BackColor = AppColors.Get("EngineMatch"), Padding = new Padding(6) });
++        _legend.AddRange(legend.Controls.OfType<Label>());
++        legend.Controls.Add(_status); layout.Controls.Add(legend, 0, 0);
++        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(950, 650), SplitterDistance = 310, Panel1MinSize = 80, Panel2MinSize = 80, SplitterWidth = 6 };
++        var pakTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        if (pakActions is FlowLayoutPanel flow)
++        { flow.WrapContents = false; flow.AutoSizeMode = AutoSizeMode.GrowAndShrink; flow.Padding = Padding.Empty; }
++        pakActions.Dock = DockStyle.None; pakActions.Margin = Padding.Empty; pakTools.Controls.Add(pakActions); pakTools.Controls.Add(_savePakButton);
++        var mapTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        mapTools.Controls.Add(_applyMapsButton); mapTools.Controls.Add(_discardMap);
++        split.Panel1.Controls.Add(Section("PAK", pakTools, _pak)); split.Panel2.Controls.Add(Section("Map files", mapTools, _maps));
++        layout.Controls.Add(split, 0, 1); Controls.Add(layout);
++        _refresh.Click += async (_, _) => await RefreshAsync();
++        _savePakButton.Click += async (_, _) =>
++        {
++            string? error = null; try { _savePak(); } catch (Exception ex) { error = ex.Message; }
++            await RefreshAsync(); if (error is not null) _status.Text = error;
++        };
++        _applyMapsButton.Click += async (_, _) => await _applyMaps();
++        _discardMap.Click += async (_, _) =>
++        {
++            if (_maps.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is WorkspaceChange { State: WorkspaceChange.Pending, Key.Length: > 0 } change)
++            { PendingTruckReplacements.Discard(_workspace(), change.Key); await _reloadRegions(); await RefreshAsync(); }
++        };
++        _maps.CurrentCellChanged += (_, _) => _discardMap.Enabled = _maps.CurrentRow?.DataBoundItem is DataRowView row && row["State"].ToString() == WorkspaceChange.Pending;
++        _maps.Sorted += (_, _) => PaintRows(_maps); _pak.Sorted += (_, _) => PaintRows(_pak);
++        AppColors.Changed += ColorsChanged; Disposed += (_, _) => AppColors.Changed -= ColorsChanged;
++    }
++
++    public async Task RefreshAsync()
++    {
++        if (IsDisposed) return;
++        if (InvokeRequired)
++        { await InvokeAsync(async (CancellationToken _) => { await RefreshAsync(); }); return; }
++        var request = ++_request; var workspace = _workspace().Trim();
++        if (_displayedWorkspace != workspace) { Bind(_pak, []); Bind(_maps, []); _displayedWorkspace = workspace; }
++        _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = false;
++        if (!Directory.Exists(workspace)) { Bind(_pak, []); Bind(_maps, []); _status.Text = "Choose a workspace."; return; }
++        _status.Text = "Comparing files…"; _refresh.Enabled = false;
++        try
++        {
++            var pending = _pendingPak(workspace);
++            var result = await Task.Run(() => (Pak: WorkspaceChangeAudit.PakFiles(workspace), Maps: WorkspaceChangeAudit.MapFiles(workspace)));
++            if (IsDisposed) return;
++            await InvokeAsync(() =>
++            {
++                if (request != _request || workspace != _workspace().Trim()) return;
++                Bind(_pak, result.Pak.Concat(pending).ToArray()); Bind(_maps, result.Maps);
++                _savePakButton.Enabled = pending.Count > 0;
++                _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
++                _status.Text = $"{result.Pak.Count + result.Maps.Count(change => change.State == WorkspaceChange.InFiles)} in files · {pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending)} pending";
++            });
++        }
++        catch (Exception ex) { if (!IsDisposed) await InvokeAsync(() => { if (request == _request) _status.Text = "Could not compare changes: " + ex.Message; }); }
++        finally { if (!IsDisposed) await InvokeAsync(() => { if (request == _request) _refresh.Enabled = true; }); }
++    }
++
++    private static GroupBox Section(string title, Control tools, Control grid)
++    {
++        var box = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(8) };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.Controls.Add(tools, 0, 0); layout.Controls.Add(grid, 0, 1); box.Controls.Add(layout); return box;
++    }
++
++    private static DataGridView Grid() => new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        RowHeadersVisible = false, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
++        BackgroundColor = AppColors.Get("Surface"), ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold) },
++        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowTemplate = { Height = 26 } };
++
++    private static void Bind(DataGridView grid, IReadOnlyList<WorkspaceChange> changes)
++    {
++        var data = new DataTable(); foreach (var column in new[] { "State", "File / target", "Change", "Before", "After" }) data.Columns.Add(column);
++        data.Columns.Add("Entry", typeof(WorkspaceChange));
++        foreach (var change in changes) data.Rows.Add(change.State, change.Target, change.Property, change.Before, change.After, change);
++        grid.DataSource = data; grid.Columns["Entry"]!.Visible = false; grid.Columns["State"]!.FillWeight = 45;
++        PaintRows(grid);
++    }
++
++    private static void PaintRows(DataGridView grid)
++    {
++        foreach (DataGridViewRow row in grid.Rows)
++        {
++            var color = AppColors.Get(row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending ? "EngineMatch" : "DAF8E0");
++            row.DefaultCellStyle.BackColor = row.DefaultCellStyle.SelectionBackColor = color;
++            row.DefaultCellStyle.ForeColor = row.DefaultCellStyle.SelectionForeColor = SystemColors.ControlText;
++        }
++    }
++    private void ColorsChanged(object? sender, EventArgs e)
++    {
++        PaintRows(_pak); PaintRows(_maps);
++        _pak.BackgroundColor = _maps.BackgroundColor = AppColors.Get("Surface");
++        for (var i = 0; i < _legend.Count; i++) _legend[i].BackColor = AppColors.Get(i == 0 ? "DAF8E0" : "EngineMatch");
++    }
++}
+diff --git a/.checks/StartSmoke/StartSmoke.csproj b/.checks/StartSmoke/StartSmoke.csproj
+new file mode 100644
+index 0000000..2a46b7c
+--- /dev/null
++++ b/.checks/StartSmoke/StartSmoke.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>
+diff --git a/.checks/StartSmoke/Program.cs b/.checks/StartSmoke/Program.cs
+new file mode 100644
+index 0000000..7d0aa01
+--- /dev/null
++++ b/.checks/StartSmoke/Program.cs
+@@ -0,0 +1,51 @@
++using System.Reflection;
++using System.Diagnostics;
++
++internal static class Program
++{
++    [STAThread]
++    private static void Main(string[] args)
++    {
++        Control.CheckForIllegalCrossThreadCalls = true;
++        var workspace = args[0];
++        var path = Path.Combine(workspace, "original_files", "[ps]", "rank_settings.sso");
++        File.WriteAllText(path, "rankExp = [ 100 ]");
++        var assembly = Assembly.Load("SnowPakTool.Desktop");
++        using var form = (Form)Activator.CreateInstance(assembly.GetType("SnowPakTool.Desktop.MainForm")!)!;
++        form.Size = new Size(1200, 1000);
++        Field<TextBox>(form, "_workspacePath").Text = workspace;
++        form.Show();
++        var start = Field<Control>(form, "_startChanges");
++        var cache = assembly.GetType("SnowPakTool.Desktop.WorkspaceDataCache")!;
++        Pump((Task)cache.GetMethod("PreloadAsync")!.Invoke(null, [workspace, false])!);
++        var experience = Field<Control>(form, "_experienceTab");
++        Set(experience, "_isLoading", true);
++        Set(experience, "_loadedWorkspace", workspace); Set(experience, "_rankSettingsPath", path);
++        Set(experience, "_loadedFileText", "rankExp = [ 100 ]"); Set(experience, "_loadedValues", new List<int> { 100 });
++        Field<DataGridView>(experience, "_grid").Rows.Add(2, 100, 150); Set(experience, "_isLoading", false);
++        Pump((Task)start.GetType().GetMethod("RefreshAsync")!.Invoke(start, null)!);
++        var tabs = form.Controls.OfType<TabControl>().Single();
++        if (tabs.TabPages[0].Text != "Start") throw new Exception("Start tab was not renamed.");
++        var pak = Field<DataGridView>(start, "_pak");
++        if (!pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == "Pending" && row.Cells["Change"].Value?.ToString() == "Rank 2 XP"))
++            throw new Exception("Actual rank editor changes were not listed on Start.");
++        using var image = new Bitmap(form.Width, form.Height); form.DrawToBitmap(image, new Rectangle(0, 0, form.Width, form.Height));
++        image.Save(Path.Combine(AppContext.BaseDirectory, "start-main-preview.png"));
++        Field<Button>(start, "_savePakButton").PerformClick(); Application.DoEvents();
++        Pump((Task)start.GetType().GetMethod("RefreshAsync")!.Invoke(start, null)!);
++        var updated = Path.Combine(workspace, "[ps]", "rank_settings.sso");
++        if (!File.Exists(updated) || !File.ReadAllText(updated).Contains("150")) throw new Exception("Start did not apply the actual XP edit.");
++        if (File.ReadAllText(path) != "rankExp = [ 100 ]") throw new Exception("Start changed the preserved default baseline.");
++        if (pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == "Pending")) throw new Exception("Applied XP still marked pending.");
++        Console.WriteLine("PASS: actual MainForm Start layout, real XP pending detection, Start save and transition to file change.");
++        // Dispose rather than Close to avoid writing the user's window/last-workspace preferences.
++    }
++    private static T Field<T>(object item, string name) => (T)item.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(item)!;
++    private static void Set(object item, string name, object value) => item.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(item, value);
++    private static void Pump(Task task)
++    {
++        var timer = Stopwatch.StartNew();
++        while (!task.IsCompleted && timer.ElapsedMilliseconds < 15000) { Application.DoEvents(); Thread.Sleep(5); }
++        if (!task.IsCompleted) throw new TimeoutException(); task.GetAwaiter().GetResult(); Application.DoEvents();
++    }
++}

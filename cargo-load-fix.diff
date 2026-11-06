@@ -1,0 +1,116 @@
+diff --git a/investigation/cargo-load-fix/before/TrucksCargoTab.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index 8ccbf1f..3f0fdf1 100644
+--- a/investigation/cargo-load-fix/before/TrucksCargoTab.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -12,6 +12,7 @@ internal sealed partial class TrucksCargoTab : UserControl
+     private CargoCatalog? _catalog;
+     private string? _loadedWorkspace;
+     private bool _loading;
++    private bool _bindingCargo;
+ 
+     public TrucksCargoTab(Func<string> getWorkspacePath)
+     {
+@@ -69,27 +70,38 @@ internal sealed partial class TrucksCargoTab : UserControl
+     private void LoadCargo()
+     {
+         var workspace = _getWorkspacePath().Trim();
+-        _catalog = null;
+-        _massRows.Clear();
+-        _loadedWorkspace = null;
+-        _cargo.DataSource = null;
+-        _properties.Rows.Clear();
+-        _description.Clear();
+-        if (workspace.Length == 0 || !Directory.Exists(workspace))
+-        {
+-            _status.Text = "Choose an extracted workspace on the Start tab to list cargo.";
+-            return;
+-        }
++        _bindingCargo = true;
+         try
+         {
+-            _catalog = CargoCatalogService.Load(workspace, WorkspaceDataCache.GetLocalizedNames(workspace));
+-            _massRows = CargoMassStore.ReadRows(workspace, _catalog);
++            // Detaching can synchronously format old rows. Keep their lookup intact
++            // until they are detached, and suppress callbacks throughout the transition.
++            _cargo.DataSource = null;
++            _catalog = null;
++            _massRows = new(StringComparer.OrdinalIgnoreCase);
++            _loadedWorkspace = null;
++            _properties.Rows.Clear();
++            _description.Clear();
++            if (workspace.Length == 0 || !Directory.Exists(workspace))
++            {
++                _status.Text = "Choose an extracted workspace on the Start tab to list cargo.";
++                return;
++            }
++            var catalog = CargoCatalogService.Load(workspace, WorkspaceDataCache.GetLocalizedNames(workspace));
++            var massRows = CargoMassStore.ReadRows(workspace, catalog);
++            _catalog = catalog;
++            _massRows = massRows;
+             _loadedWorkspace = workspace;
+             _loadedVersion = WorkspaceDataCache.ContentVersion;
+             RestoreStagedMass();
+             ApplyFilter();
+         }
+         catch (Exception ex) { _status.Text = $"Could not load cargo: {ex.Message}"; }
++        finally
++        {
++            _bindingCargo = false;
++            _cargo.Invalidate();
++            ShowProperties();
++        }
+     }
+ 
+     private void ApplyFilter()
+@@ -132,6 +144,7 @@ internal sealed partial class TrucksCargoTab : UserControl
+ 
+     private void ShowProperties()
+     {
++        if (_bindingCargo) return;
+         _properties.Rows.Clear();
+         _description.Clear();
+         if (_cargo.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not CargoEntry entry) return;
+diff --git a/investigation/cargo-load-fix/before/CargoMassEditing.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+index 789b301..d2206e8 100644
+--- a/investigation/cargo-load-fix/before/CargoMassEditing.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+@@ -12,11 +12,14 @@ internal sealed partial class TrucksCargoTab
+     private static string? MassRole(string column) => column == "Loose weight (kg)" ? "Loose" : column == "Packed weight (kg)" ? "Packed" : null;
+     private void EditMassBodies(int rowIndex, int columnIndex)
+     {
+-        if (rowIndex < 0 || columnIndex < 0 || _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim()
++        if (_bindingCargo || rowIndex < 0 || columnIndex < 0 || _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim()
+             || PresetBrowseMode.IsReadOnly(this) || SharedPreset.HasPending(_loadedWorkspace)
+             || MassRole(_cargo.Columns[columnIndex].Name) is not { } role
+             || _cargo.Rows[rowIndex].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return;
+-        var rows = entry.MassTargets.Where(target => target.Role == role).Select(target => _massRows[CargoMassStore.Key(target)])
++        var targets = entry.MassTargets.Where(target => target.Role == role).ToArray();
++        if (targets.Any(target => !_massRows.ContainsKey(CargoMassStore.Key(target))))
++        { _status.Text = "Cargo details are being refreshed. Reload cargo before editing body masses."; return; }
++        var rows = targets.Select(target => _massRows[CargoMassStore.Key(target)])
+             .DistinctBy(row => CargoMassStore.Key(row.Target), StringComparer.OrdinalIgnoreCase).ToArray();
+         if (rows.Length == 0) { _status.Text = $"No editable {role.ToLowerInvariant()} body definitions are available for {entry.Name}."; return; }
+         using var dialog = new CargoMassDialog(entry.Name, role, rows);
+@@ -81,7 +84,7 @@ internal sealed partial class TrucksCargoTab
+             decimal total = 0;
+             foreach (var target in group)
+             {
+-                var row = _massRows[CargoMassStore.Key(target)];
++                if (!_massRows.TryGetValue(CargoMassStore.Key(target), out var row)) return null;
+                 if (original && !row.HasOriginal) return null;
+                 var value = original ? row.Original : row.Draft;
+                 if (value is not null) total += decimal.Parse(value, CultureInfo.InvariantCulture);
+@@ -105,9 +108,11 @@ internal sealed partial class TrucksCargoTab
+     }
+     private void FormatMass(object? sender, DataGridViewCellFormattingEventArgs e)
+     {
+-        if (e.RowIndex < 0 || e.ColumnIndex < 0 || MassRole(_cargo.Columns[e.ColumnIndex].Name) is not { } role
++        if (_bindingCargo || e.RowIndex < 0 || e.ColumnIndex < 0 || MassRole(_cargo.Columns[e.ColumnIndex].Name) is not { } role
+             || _cargo.Rows[e.RowIndex].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return;
+-        var rows = entry.MassTargets.Where(target => target.Role == role).Select(target => _massRows[CargoMassStore.Key(target)]).ToArray();
++        var targets = entry.MassTargets.Where(target => target.Role == role).ToArray();
++        if (targets.Any(target => !_massRows.ContainsKey(CargoMassStore.Key(target)))) return;
++        var rows = targets.Select(target => _massRows[CargoMassStore.Key(target)]).ToArray();
+         var changed = rows.Any(row => !CargoMassStore.Equal(row.Draft, row.Current));
+         var applied = rows.Any(row => row.HasOriginal && !CargoMassStore.Equal(row.Current, row.Original));
+         e.CellStyle!.BackColor = changed ? Color.LightGoldenrodYellow : applied ? Color.Honeydew : AppColors.Get("Surface");

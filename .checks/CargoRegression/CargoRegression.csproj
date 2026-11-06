@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/CargoCatalogService.cs" Link="CargoCatalogService.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/Editors/Cargo/TrucksCargoTab.cs" Link="TrucksCargoTab.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+    <Compile Include="../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs" />
+  </ItemGroup>
+<ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>

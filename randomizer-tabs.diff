@@ -1,0 +1,43 @@
+--- MainForm.cs
++++ MainForm.cs
+@@ -133,7 +133,10 @@
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+         var trucksCargoPage = new TabPage("Trucks-Cargo");
+         var regionsTrucksPage = new TabPage("Regions-Trucks");
++        var randomizerPage = new TabPage("Randomizer");
++        var randomizerTabs = new TabControl { Dock = DockStyle.Fill };
+         var truckRandomizationPage = new TabPage("Truck-Randomization");
++        var regionProgressionPage = new TabPage("Region progression");
+         var settingsPage = new TabPage("Settings");
+         root.Dock = DockStyle.Fill;
+         _experienceTab.Dock = DockStyle.Fill;
+@@ -160,7 +163,9 @@
+         regionsTrucksPage.Controls.Add(_regionsTrucksTab);
+         gameDataTabs.TabPages.Add(regionsTrucksPage);
+         truckRandomizationPage.Controls.Add(new TruckRandomizationTab { Dock = DockStyle.Fill });
+-        gameDataTabs.TabPages.Add(truckRandomizationPage);
++        randomizerTabs.TabPages.Add(truckRandomizationPage);
++        randomizerTabs.TabPages.Add(regionProgressionPage);
++        randomizerPage.Controls.Add(randomizerTabs);
+         gameDataTabs.SelectedIndexChanged += async (_, _) =>
+         {
+             if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+@@ -175,6 +180,7 @@
+         tabs.TabPages.Add(experiencePage);
+         tabs.TabPages.Add(truckEditPage);
+         tabs.TabPages.Add(gameDataPage);
++        tabs.TabPages.Add(randomizerPage);
+         tabs.TabPages.Add(settingsPage);
+         async Task RefreshSelectedTierListAsync()
+         {
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-Under **Game data**, **Truck-Randomization** sits immediately after **Regions-Trucks**. It displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has Add rule, and every rule has Edit and Remove actions. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Truck-Randomization** and an empty **Region progression** sub-tab. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has Add rule, and every rule has Edit and Remove actions. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 

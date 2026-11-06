@@ -1,0 +1,52 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 4060838..a5453d7 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -104,6 +104,8 @@ internal sealed class MainForm : Form
+         var customGroupingPage = new TabPage("Custom grouping");
+         var tierListPage = new TabPage("Tier List");
+         var truckEditPage = new TabPage("Truck edit");
++        var gameDataPage = new TabPage("Game data");
++        var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+         var trucksCargoPage = new TabPage("Trucks-Cargo");
+         var settingsPage = new TabPage("Settings");
+         root.Dock = DockStyle.Fill;
+@@ -121,6 +123,8 @@ internal sealed class MainForm : Form
+         truckEditPage.Controls.Add(_truckEditTab);
+         _trucksCargoTab.Dock = DockStyle.Fill;
+         trucksCargoPage.Controls.Add(_trucksCargoTab);
++        gameDataTabs.TabPages.Add(trucksCargoPage);
++        gameDataPage.Controls.Add(gameDataTabs);
+         settingsPage.Controls.Add(_settingsTab);
+         tabs.TabPages.Add(unpackPage);
+         tabs.TabPages.Add(ownedContentPage);
+@@ -128,7 +132,7 @@ internal sealed class MainForm : Form
+         tabs.TabPages.Add(tierListPage);
+         tabs.TabPages.Add(experiencePage);
+         tabs.TabPages.Add(truckEditPage);
+-        tabs.TabPages.Add(trucksCargoPage);
++        tabs.TabPages.Add(gameDataPage);
+         tabs.TabPages.Add(settingsPage);
+         tabs.SelectedIndexChanged += async (_, _) =>
+         {
+@@ -148,7 +152,7 @@ internal sealed class MainForm : Form
+             if (tabs.SelectedTab != selectedPage) return;
+ 
+             if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+-            if (selectedPage == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
++            if (selectedPage == gameDataPage) _trucksCargoTab.EnsureLoaded();
+             if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
+             if (selectedPage == customGroupingPage)
+             {
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 0dc2e46..06581d6 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -22,6 +22,6 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+-The **Trucks-Cargo** tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
++The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.

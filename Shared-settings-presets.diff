@@ -1,0 +1,1184 @@
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -39,6 +39,9 @@
+         WordWrap = false
+     };
+ 
++    internal event Action? ReloadRequested;
++    private bool _sharedPresetApplied;
++
+     public MainForm()
+     {
+         Text = "SnowPakTool — Workspace Editor";
+@@ -135,6 +138,16 @@
+         browseWorkspace.Click += (_, _) => BrowseWorkspace();
+         paths.Controls.Add(browseWorkspace, 2, 1);
+         root.Controls.Add(paths, 0, 1);
++        var sharing = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
++        var saveShared = new Button { Text = "Save shared preset…", AutoSize = true };
++        var loadShared = new Button { Text = "Load shared preset…", AutoSize = true };
++        var discardShared = new Button { Text = "Discard shared preset", AutoSize = true, Enabled = SharedPreset.HasPending(_workspacePath.Text.Trim()) };
++        saveShared.Click += async (_, _) => await SaveSharedPresetAsync();
++        loadShared.Click += async (_, _) => await LoadSharedPresetAsync();
++        discardShared.Click += (_, _) => { SharedPreset.Discard(_workspacePath.Text.Trim()); RememberPaths(); ReloadRequested?.Invoke(); };
++        sharing.Controls.AddRange([saveShared, loadShared, discardShared,
++            new Label { Text = "Share edits and planning. Loading stages changes; Apply writes them.", AutoSize = true, Padding = new Padding(4, 7, 0, 0) }]);
++        root.Controls.Add(sharing, 0, 2);
+ 
+         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 8) };
+         actions.Controls.Add(_unpackButton);
+@@ -142,6 +155,13 @@
+         actions.Controls.Add(_packButton);
+         _startChanges = new StartChangesPanel(() => _workspacePath.Text.Trim(), actions, PendingPakChanges, SavePendingPakChanges,
+             ApplyMapChangesAsync, () => _regionsTrucksTab.RefreshChangesAsync());
++        _startChanges.ChangesApplied += async () =>
++        {
++            if (!_sharedPresetApplied) return;
++            try { await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim(), forceReload: true); }
++            catch (Exception ex) { AppendLog("Preset applied; workspace refresh reported: " + ex.Message); }
++            RememberPaths(); BeginInvoke(() => ReloadRequested?.Invoke());
++        };
+         var startSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1000, 750),
+             SplitterDistance = 640, Panel1MinSize = 180, Panel2MinSize = 40, SplitterWidth = 6 };
+         startSplit.Panel1.Controls.Add(_startChanges); startSplit.Panel2.Controls.Add(_log);
+@@ -186,6 +206,14 @@
+         randomizerTabs.TabPages.AddRange([upgradesPage, mapUpgradesPage]);
+         editorTabs.TabPages.Add(trucksCargoPage);
+         tabs.TabPages.AddRange([unpackPage, planningPage, randomizerPage, editorsPage]);
++        void LockSharedSnapshot()
++        {
++            var locked = !string.IsNullOrWhiteSpace(_workspacePath.Text) && SharedPreset.HasPending(_workspacePath.Text.Trim());
++            planningPage.Enabled = randomizerPage.Enabled = editorsPage.Enabled = !locked;
++            _unpackButton.Enabled = !locked;
++            discardShared.Enabled = locked;
++        }
++        LockSharedSnapshot(); _workspacePath.TextChanged += (_, _) => LockSharedSnapshot();
+ 
+         void ShowPendingCount(int count) => unpackPage.Text = count > 0 ? $"Start ({count})" : "Start";
+         void RefreshPendingCount()
+@@ -381,10 +409,59 @@
+         }
+     }
+ 
++    private async Task SaveSharedPresetAsync()
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) return;
++        using var dialog = new SaveFileDialog { Title = "Save all edits and planning", Filter = "SnowPakTool shared preset (*.snowpreset)|*.snowpreset", DefaultExt = "snowpreset", AddExtension = true, FileName = "snowrunner.snowpreset" };
++        if (dialog.ShowDialog(this) != DialogResult.OK) return;
++        try
++        {
++            // Build the desired pickup snapshot against the current inputs; never reroll.
++            UpgradeTrialCatalog? upgrades = null;
++            if (!SharedPreset.HasPending(workspace) && UpgradeTrialStore.Load(workspace) is not null)
++                upgrades = await GetUpgradeTrialCatalogAsync(false);
++            Enabled = false; UseWaitCursor = true;
++            SharedPreset.Export(workspace, dialog.FileName, temporary =>
++            {
++                _experienceTab.ExportPreview(temporary);
++                _truckEditTab.ExportPreview(temporary);
++                _truckPropertiesTab.ExportPreview(temporary);
++                TruckPropertiesStore.Apply(temporary);
++                FrameAddonFuelStore.Apply(temporary);
++                if (upgrades is not null) UpgradeChanges.Stage(upgrades with { Workspace = temporary });
++                UpgradeChanges.Apply(temporary);
++            });
++            AppendLog($"Saved shared preset: {dialog.FileName} ({new FileInfo(dialog.FileName).Length:N0} bytes). Current previews, drafts, applied edits and planning included.");
++        }
++        catch (Exception ex) { MessageBox.Show(this, "Could not save shared preset: " + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
++        finally { UseWaitCursor = false; Enabled = true; }
++    }
++
++    private async Task LoadSharedPresetAsync()
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) return;
++        using var dialog = new OpenFileDialog { Title = "Load shared preset as staged changes", Filter = "SnowPakTool shared preset (*.snowpreset)|*.snowpreset" };
++        if (dialog.ShowDialog(this) != DialogResult.OK) return;
++        try
++        {
++            if (!SharedPreset.HasPending(workspace) && (PendingPakChanges(workspace).Count > 0 || PendingTruckReplacements.Load(workspace).Count > 0
++                || UpgradeTrialStore.Load(workspace) is not null))
++                throw new InvalidOperationException("This workspace has pending edits or randomizer drafts. Use a separate clean workspace to load a shared preset.");
++            var mapFolder = _regionsTrucksTab.PresetMapFolder;
++            await RunBusyAsync("Checking preset baselines and staging shared changes…", () => SharedPreset.Stage(workspace, dialog.FileName, mapFolder));
++            if (SharedPreset.HasPending(workspace)) { RememberPaths(); ReloadRequested?.Invoke(); }
++        }
++        catch (Exception ex) { MessageBox.Show(this, "Could not load shared preset: " + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
++    }
++
+     private async Task PackAsync()
+     {
+         var workspace = _workspacePath.Text.Trim();
+         if (!Directory.Exists(workspace)) { MessageBox.Show(this, "Choose an existing workspace folder first.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
++        if (SharedPreset.HasPending(workspace))
++        { MessageBox.Show(this, "Apply the staged shared preset from Start before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+         RememberPaths();
+         using var dialog = new SaveFileDialog
+         {
+@@ -415,12 +492,18 @@
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+     {
+         var workspace = _workspacePath.Text.Trim();
++        if (SharedPreset.HasPending(workspace))
++        {
++            SharedPreset.Apply(workspace, _regionsTrucksTab.PresetMapFolder);
++            _sharedPresetApplied = true;
++            return;
++        }
+         if (_experienceTab.PendingChanges(workspace).Any()) _experienceTab.SavePendingChanges();
+         if (_truckEditTab.PendingChanges(workspace).Any()) _truckEditTab.SavePendingChanges();
+         if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
+@@ -711,7 +794,7 @@
+             var entries = CacheBlockWriter.GetFileEntries(mergedWorkspace, mixed: true)
+                 .Where(entry => !entry.ExternalName.StartsWith("[ps]\\.snowpaktool\\", StringComparison.OrdinalIgnoreCase)
+                                 && !entry.ExternalName.StartsWith("[ps_common]\\.snowpaktool\\", StringComparison.OrdinalIgnoreCase))
+-                .OrderBy(entry => entry.InternalName).ToList();
++                .OrderBy(entry => entry.InternalName, StringComparer.Ordinal).ToList();
+             using (var stream = new FileStream(tempBlock, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+             {
+                 var writer = new CacheBlockWriter(stream);
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -26,6 +26,7 @@
+     private bool _applying;
+ 
+     public event Action<int>? PendingCountChanged;
++    internal event Action? ChangesApplied;
+ 
+     public StartChangesPanel(Func<string> workspace, Control pakActions, Func<string, IReadOnlyList<WorkspaceChange>> pendingPak,
+         Action savePak, Func<Task> applyMaps, Func<Task> reloadRegions)
+@@ -92,7 +93,7 @@
+         var workspace = _workspace().Trim();
+         if (!Directory.Exists(workspace)) return;
+         _applying = true; _applyButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = _refresh.Enabled = false;
+-        string message;
++        string message; var succeeded = false;
+         try
+         {
+             // These remain separate stores. If the second operation fails, the first
+@@ -102,11 +103,13 @@
+                 throw new InvalidOperationException("Workspace changed during Apply. Review the remaining pending changes.");
+             if (PendingTruckReplacements.LoadStaged(workspace).Count > 0) await _applyMaps();
+             await _reloadRegions();
++            succeeded = true;
+             message = "Pending changes applied to the workspace. Pack the initial PAK as needed; install the resulting PAK and map files manually.";
+         }
+         catch (Exception ex) { message = "Apply stopped: " + ex.Message + " Completed changes remain in files; remaining changes stay pending."; }
+         finally { _applying = false; await RefreshAsync(); }
+         _status.Text = message;
++        if (succeeded) ChangesApplied?.Invoke();
+     }
+ 
+     private void UpdateDiscardButton() => _discardMap.Enabled = !_applying && _changes.CurrentRow?.DataBoundItem is DataRowView row
+@@ -161,6 +164,8 @@
+     {
+         (string Key, string Name) Identity(WorkspaceChange change, int index)
+         {
++            if (change.SummaryGroup.StartsWith("shared:", StringComparison.Ordinal))
++                return (change.SummaryGroup, change.SummaryName);
+             if (change.SummaryGroup.StartsWith("winch:", StringComparison.OrdinalIgnoreCase))
+                 return (change.SummaryGroup.ToLowerInvariant(), change.SummaryName);
+             var path = change.Target.Replace('\\', '/');
+@@ -182,7 +187,9 @@
+             var target = group.Name.Length > 0 ? group.Name : first.Target;
+             var parts = group.Changes.Select(change => BriefPakChange(change, group.Name)).ToArray();
+             var summary = string.Join("; ", parts.Take(3)) + (parts.Length > 3 ? $"; +{parts.Length - 3} more" : "");
+-            yield return new ChangeGroup("Initial PAK", target, summary, group.Changes);
++            var area = first.SummaryGroup.StartsWith("shared:map:", StringComparison.Ordinal) ? "Maps"
++                : first.SummaryGroup == "shared:planning" ? "Planning" : "Initial PAK";
++            yield return new ChangeGroup(area, target, summary, group.Changes);
+         }
+     }
+ 
+--- a/src/SnowPakTool.Desktop/EngineEditTab.cs
++++ b/src/SnowPakTool.Desktop/EngineEditTab.cs
+@@ -846,6 +846,21 @@
+                                 original.Properties.GetValueOrDefault(key, ""), updated.Properties.GetValueOrDefault(key, ""));
+     }
+ 
++    internal void ExportPreview(string destination)
++    {
++        if (!string.Equals(_loadedWorkspace, _getWorkspacePath(), StringComparison.OrdinalIgnoreCase)) return;
++        if (!_compatibilityGrid.EndEdit() || !_updatedPropertiesGrid.EndEdit()) throw new InvalidDataException("Finish editing engine values before sharing.");
++        foreach (var row in _compatibilityGrid.Rows.Cast<DataGridViewRow>().Select(row => row.Tag).OfType<TruckRow>().Where(row => !row.Types.SetEquals(row.PersistedTypes)))
++            WriteTruckCompatibility(row, row.Types, destination);
++        foreach (var group in _engineClasses.GroupBy(c => c.FilePath, StringComparer.OrdinalIgnoreCase))
++        {
++            var edits = group.SelectMany(c => c.Definitions.Select(d => (Original: d, Updated: _updatedDefinitions[DefinitionKey(c.Code, d.Name)])))
++                .Where(p => !EngineDefinitionsEqual(p.Original, p.Updated)).ToArray();
++            foreach (var edit in edits) if (!ValidProperties(edit.Updated, out var error)) throw new InvalidDataException(error);
++            if (edits.Length > 0) WriteEngineDefinitions(group.Key, edits.Select(p => (p.Original.Name, p.Updated)).ToArray(), destination);
++        }
++    }
++
+     public void SavePendingChanges()
+     {
+         _compatibilityGrid.EndEdit(); _updatedPropertiesGrid.EndEdit();
+@@ -1064,9 +1079,10 @@
+         return true;
+     }
+ 
+-    private void WriteEngineDefinitions(string path, IReadOnlyList<(string Name, EngineDefinition Updated)> definitions)
+-    {
+-        path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path);
++    private void WriteEngineDefinitions(string path, IReadOnlyList<(string Name, EngineDefinition Updated)> definitions, string? destination = null)
++    {
++        path = destination is null ? WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path)
++            : WorkspaceOriginals.PrepareForEdit(destination, WorkspaceOriginals.GetCurrentPath(destination, WorkspaceOriginals.GetRelativePath(_getWorkspacePath(), path)));
+         var bytes = File.ReadAllBytes(path);
+         var bom = Encoding.UTF8.GetPreamble();
+         var hasBom = bytes.AsSpan().StartsWith(bom);
+@@ -1100,9 +1116,10 @@
+         WorkspaceDataCache.InvalidateFile(path);
+     }
+ 
+-    private void WriteTruckCompatibility(TruckRow row, HashSet<string> types)
+-    {
+-        var path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), row.FilePath);
++    private void WriteTruckCompatibility(TruckRow row, HashSet<string> types, string? destination = null)
++    {
++        var path = destination is null ? WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), row.FilePath)
++            : WorkspaceOriginals.PrepareForEdit(destination, WorkspaceOriginals.GetCurrentPath(destination, WorkspaceOriginals.GetRelativePath(_getWorkspacePath(), row.FilePath)));
+         var bytes = File.ReadAllBytes(path);
+         var bom = Encoding.UTF8.GetPreamble();
+         var hasBom = bytes.AsSpan().StartsWith(bom);
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -662,6 +662,52 @@
+                 }
+     }
+ 
++    internal void ExportPreview(string destination)
++    {
++        _engineEditTab.ExportPreview(destination);
++        _frameAddonsTab.ExportFuelPreview(destination);
++        if (!string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) EnsureLoaded();
++        if (!_winchGrid.EndEdit() || !_updatedWinchPropertiesGrid.EndEdit()) throw new InvalidDataException("Finish editing winch values before sharing.");
++        var staged = PendingWinchChangesStore.Load(_getWorkspacePath());
++        var compatibility = staged.Trucks.ToDictionary(p => p.RelativeFile, StringComparer.OrdinalIgnoreCase);
++        var rows = _winchGrid.Rows.Cast<DataGridViewRow>().Select(row => row.Tag).OfType<TruckRow>()
++            .ToDictionary(row => WorkspaceOriginals.GetRelativePath(_getWorkspacePath(), row.FilePath), StringComparer.OrdinalIgnoreCase);
++        foreach (var (relative, row) in rows)
++            if (row.Types.SetEquals(row.PersistedTypes)) compatibility.Remove(relative);
++            else compatibility[relative] = new(relative, row.Name, row.Types.ToArray());
++        foreach (var (relative, change) in compatibility)
++        {
++            if (!rows.TryGetValue(relative, out var row))
++            {
++                var file = WorkspaceOriginals.GetCurrentPath(_getWorkspacePath(), relative);
++                var xml = File.ReadAllText(file); var socket = WinchSocket.Match(xml);
++                row = new TruckRow(file, change.TruckName, socket.Success, ReadWinchTypes(xml), ReadWinchTypes(xml), GetAttribute(socket.Value, "Default"));
++            }
++            UpdateTruckXml(row, change.Types.ToHashSet(StringComparer.OrdinalIgnoreCase), _winchClasses, destination);
++        }
++        var known = _winchClasses.SelectMany(c => c.Definitions.Select(d => DefinitionKey(c.Code, d.Name))).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        if (staged.Definitions.Any(d => !known.Contains(DefinitionKey(d.ClassCode, d.WinchName))))
++            throw new InvalidDataException("A staged winch definition is missing. Reload and review winches before sharing.");
++        var strings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var group in _winchClasses.GroupBy(c => c.FilePath, StringComparer.OrdinalIgnoreCase))
++        {
++            var edits = group.SelectMany(c => c.Definitions.Select(d => (d.Name, Original: d, Updated: _updatedDefinitions.GetValueOrDefault(DefinitionKey(c.Code, d.Name), d))))
++                .Where(p => p.Original != p.Updated).ToArray();
++            foreach (var edit in edits)
++            {
++                if (!double.TryParse(edit.Updated.Length, NumberStyles.Float, CultureInfo.InvariantCulture, out var length) || !double.IsFinite(length) || length <= 0
++                    || !double.TryParse(edit.Updated.StrengthMultiplier, NumberStyles.Float, CultureInfo.InvariantCulture, out var strength) || !double.IsFinite(strength) || strength <= 0
++                    || edit.Updated.UnlockByRank != "—" && !string.IsNullOrWhiteSpace(edit.Updated.UnlockByRank)
++                        && (!int.TryParse(edit.Updated.UnlockByRank, out var rank) || rank < 1))
++                    throw new InvalidDataException("Invalid winch values: " + edit.Updated.UiName);
++                if (edit.Original.UiName != edit.Updated.UiName && !string.IsNullOrWhiteSpace(edit.Updated.UiNameKey)) strings[edit.Updated.UiNameKey] = edit.Updated.UiName;
++                if (edit.Original.Description != edit.Updated.Description && !string.IsNullOrWhiteSpace(edit.Updated.UiDescriptionKey)) strings[edit.Updated.UiDescriptionKey] = edit.Updated.Description;
++            }
++            if (edits.Length > 0) WriteWinchDefinitions(group.Key, edits, destination);
++        }
++        if (strings.Count > 0) WriteLocalizedWinchStrings(destination, strings);
++    }
++
+     public void SavePendingChanges()
+     {
+         _engineEditTab.SavePendingChanges(); _winchGrid.EndEdit(); _updatedWinchPropertiesGrid.EndEdit();
+@@ -1257,9 +1303,10 @@
+         return (new UTF8Encoding(false), Array.Empty<byte>());
+     }
+ 
+-    private void WriteWinchDefinitions(string path, IReadOnlyList<(string Name, WinchDefinition Original, WinchDefinition Updated)> definitions)
+-    {
+-        path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path);
++    private void WriteWinchDefinitions(string path, IReadOnlyList<(string Name, WinchDefinition Original, WinchDefinition Updated)> definitions, string? destination = null)
++    {
++        path = destination is null ? WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path)
++            : WorkspaceOriginals.PrepareForEdit(destination, WorkspaceOriginals.GetCurrentPath(destination, WorkspaceOriginals.GetRelativePath(_getWorkspacePath(), path)));
+         var bytes = File.ReadAllBytes(path);
+         var bom = Encoding.UTF8.GetPreamble();
+         var hasBom = bytes.AsSpan().StartsWith(bom);
+@@ -1354,9 +1401,10 @@
+             : $"Winch compatibility changes for {rowData.Name} are ready to stage.";
+     }
+ 
+-    private void UpdateTruckXml(TruckRow row, HashSet<string> types, IReadOnlyList<WinchClass> classes)
+-    {
+-        var path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), row.FilePath);
++    private void UpdateTruckXml(TruckRow row, HashSet<string> types, IReadOnlyList<WinchClass> classes, string? destination = null)
++    {
++        var path = destination is null ? WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), row.FilePath)
++            : WorkspaceOriginals.PrepareForEdit(destination, WorkspaceOriginals.GetCurrentPath(destination, WorkspaceOriginals.GetRelativePath(_getWorkspacePath(), row.FilePath)));
+         var bytes = File.ReadAllBytes(path);
+         var hasBom = bytes.AsSpan().StartsWith(Encoding.UTF8.GetPreamble());
+         var xml = Encoding.UTF8.GetString(bytes, hasBom ? Encoding.UTF8.GetPreamble().Length : 0, bytes.Length - (hasBom ? Encoding.UTF8.GetPreamble().Length : 0));
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -830,6 +830,23 @@
+         }
+     }
+ 
++    internal void ExportPreview(string destination)
++    {
++        var workspace = _getWorkspacePath();
++        var staged = _rankStageStore.Load(workspace);
++        IReadOnlyList<int>? values = staged?.Values;
++        if (_loadedWorkspace == workspace && _rankSettingsPath is not null)
++        {
++            if (!_grid.EndEdit() || !TryReadGridValues(out var preview)) throw new InvalidDataException("Every XP value must be a non-negative whole number.");
++            values = preview;
++        }
++        if (values is null) return;
++        var path = WorkspaceOriginals.GetCurrentPath(destination, Path.Combine("[ps]", "rank_settings.sso"));
++        var text = File.ReadAllText(path, Encoding.UTF8);
++        path = WorkspaceOriginals.PrepareForEdit(destination, path);
++        File.WriteAllText(path, ReplaceIntegerArray(text, RankExperienceArray, values, "rankExp"), GameFileEncoding);
++    }
++
+     public void SavePendingChanges()
+     {
+         var workspace = _getWorkspacePath();
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -465,6 +465,13 @@
+         _status.Text = $"Staged {edits.Count} truck property changes. Apply pending changes from Start.";
+     }
+ 
++    internal void ExportPreview(string destination)
++    {
++        if (_loadedWorkspace != _getWorkspace().Trim()) return;
++        if (!_grid.EndEdit()) throw new InvalidDataException("Finish editing truck properties before sharing.");
++        TruckPropertiesStore.SavePending(destination, DraftValues(true));
++    }
++
+     private void SavePreset()
+     {
+         if (!_grid.EndEdit() || !Ready()) return;
+--- a/src/SnowPakTool.Desktop/Program.cs
++++ b/src/SnowPakTool.Desktop/Program.cs
+@@ -1,130 +1,89 @@
+-using System.Buffers.Binary;
+-using System.Collections;
+-using System.Globalization;
+-using System.IO.Compression;
+-using System.Reflection;
+-using System.Security.Cryptography;
+-using System.Text;
+-using System.Text.Json;
+-using System.Text.Json.Nodes;
++namespace SnowPakTool.Desktop;
+ 
+-internal static class Regression
++internal static class Program
+ {
+- static Assembly A=Assembly.Load("SnowPakTool.Desktop");
+- static Type T(string type)=>A.GetType("SnowPakTool.Desktop."+type)!;
+- static object? Call(string type,string method,params object?[] args)=>T(type).GetMethod(method,BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,args);
+- static void Check(bool test,string message){if(!test)throw new Exception(message);Console.WriteLine("PASS "+message);}
+- static void Reject(Action action,string message){try{action();}catch(TargetInvocationException e)when(e.InnerException is InvalidDataException or IOException or UnauthorizedAccessException){Check(true,message);return;}throw new Exception("Accepted "+message);}
+- static void Put(string path,string text){Directory.CreateDirectory(Path.GetDirectoryName(path)!);File.WriteAllText(path,text);}
+- static string Hash(string file)=>Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file)));
+- static void Copy(string from,string to){foreach(var f in Directory.GetFiles(from,"*",SearchOption.AllDirectories)){var target=Path.Combine(to,Path.GetRelativePath(from,f));Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(f,target);}}
+- [STAThread] static void Main()
+- {
+-  ApplicationConfiguration.Initialize();
+-  var scratch=Path.Combine(AppContext.BaseDirectory,"fixtures-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(scratch);
+-  string W(string name)=>Path.Combine(scratch,name);
+-  string Original(string ws,string path)=>Path.Combine(ws,"initial.pak","original_files",path);
+-  string Updated(string ws,string path)=>Path.Combine(ws,"initial.pak","updated",path);
+-  var sender=W("sender");var prefs=W("sender-prefs");
+-  var xml="<Truck><TruckData TruckType=\"SCOUT\" FuelCapacity=\"20\"/><GameData Price=\"100\" UnlockByRank=\"1\"/></Truck>";
+-  var relative="[media]/classes/trucks/test.xml";
+-  Put(Original(sender,relative),xml);Put(Original(sender,"[ps]/rank_settings.sso"),"rankExp = [0, 100, 200]");Put(Original(sender,"pak.load_list"),"test");
+-  var random=new byte[1024*1024];new Random(128).NextBytes(random);random[10]=0;
+-  Put(Original(sender,"[media]/unchanged.txt"),Convert.ToBase64String(random));
+-  Put(Updated(sender,relative),xml.Replace("20","30"));
+-  Put(Path.Combine(sender,"truck-properties/pending-changes.json"),"[{\"RelativeFile\":\""+relative+"\",\"TruckName\":\"Test\",\"Attribute\":\"FuelCapacity\",\"Before\":30,\"After\":40}]");
+-  Put(Path.Combine(sender,"progression-settings.json"),"{\"XpReductionSteps\":80}");
+-  Put(Path.Combine(prefs,"truck-tiers.json"),"[{\"Name\":\"S\",\"TruckCodes\":[\"test\"]}]");
+-  Put(Path.Combine(prefs,"region-progression.json"),"{\"Order\":[\"us_01\"],\"Difficulty\":1,\"IsFinalized\":true}");
+-  var scene=new byte[1024*1024];new Random(32).NextBytes(scene);BinaryPrimitives.WriteUInt32LittleEndian(scene,20190655);BinaryPrimitives.WriteInt32LittleEndian(scene.AsSpan(4),scene.Length);BinaryPrimitives.WriteInt32LittleEndian(scene.AsSpan(8),scene.Length);
+-  var baselineMap=Path.Combine(sender,"region-maps/backups/level_us_01_01/original.pak");Directory.CreateDirectory(Path.GetDirectoryName(baselineMap)!);
+-  using(var archive=ZipFile.Open(baselineMap,ZipArchiveMode.Create))
+-  {foreach(var name in new[]{"[scene]/data_for_ssl.bin","unrelated.txt"}){var e=archive.CreateEntry(name,CompressionLevel.NoCompression);e.LastWriteTime=new DateTimeOffset(2020,1,1,0,0,0,TimeSpan.Zero);using var stream=e.Open();stream.Write(name.StartsWith("[scene]")?scene:Encoding.UTF8.GetBytes("preserve me"));}}
+-  var mapOutput=Path.Combine(sender,"region-maps/updated/level_us_01_01.pak");Directory.CreateDirectory(Path.GetDirectoryName(mapOutput)!);
+-  var changed=(byte[])scene.Clone();Encoding.UTF8.GetBytes("new_truck").CopyTo(changed,256);Encoding.UTF8.GetBytes("other_edit").CopyTo(changed,900000);Call("MapArchiveWriter","Write",baselineMap,mapOutput,changed);
+-  var originalMapHash=Hash(baselineMap);var senderUpdatedHash=Hash(Updated(sender,relative));var stageBefore=File.ReadAllText(Path.Combine(sender,"truck-properties/pending-changes.json"));
+-  var preset=W("share.snowpreset");
+-  Call("SharedPreset","Export",sender,preset,(Action<string>)(temp=>Call("TruckPropertiesStore","Apply",temp)),prefs);
+-  Check(Hash(Updated(sender,relative))==senderUpdatedHash&&File.ReadAllText(Path.Combine(sender,"truck-properties/pending-changes.json"))==stageBefore,"export leaves sender applied files and staged intent unchanged");
+-  Check(new FileInfo(preset).Length<12000,"compact delta excludes two megabytes of unchanged game data ("+new FileInfo(preset).Length+" bytes)");
+-  var doc=Call("SharedPreset","Read",preset)!;var json=JsonSerializer.SerializeToNode(doc,doc.GetType())!;
+-  Check(!json.ToJsonString().Contains(sender.Replace("\\","\\\\")),"portable preset has no sender workspace paths");
+-  var receiver=W("different-person/other-workspace");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(receiver,"initial.pak/original_files"));
+-  var maps=W("installed-maps");Directory.CreateDirectory(maps);File.Copy(baselineMap,Path.Combine(maps,"level_us_01_01.pak"));
+-  var receiverPrefs=W("receiver-prefs");Put(Path.Combine(receiverPrefs,"truck-tiers.json"),"[]");
+-  Call("SharedPreset","Stage",receiver,preset,maps);
+-  Check(!Directory.Exists(Path.Combine(receiver,"initial.pak/updated"))&&File.ReadAllText(Path.Combine(receiverPrefs,"truck-tiers.json"))=="[]","load writes only staged preset; game outputs and planning untouched");
+-  Check(((IEnumerable)Call("SharedPreset","Pending",receiver)!).Cast<object>().Count()==3,"staged files and planning visible after rereading saved stage");
+-  Call("SharedPreset","Apply",receiver,maps,receiverPrefs);
+-  Check(File.ReadAllText(Updated(receiver,relative))==xml.Replace("20","40"),"apply combines sender applied edits and staged edits");
+-  Check(Hash(Path.Combine(receiver,"region-maps/updated/level_us_01_01.pak"))==Hash(mapOutput),"receiver map PAK is byte-identical to sender");
+-  Check(Hash(baselineMap)==originalMapHash&&Hash(Path.Combine(maps,"level_us_01_01.pak"))==originalMapHash,"sender and recipient input archives preserved");
+-  Check(File.ReadAllText(Path.Combine(receiverPrefs,"truck-tiers.json")).Contains("test")&&!File.Exists(Path.Combine(receiver,"shared-preset.staged")),"planning restored and staged snapshot cleared after Apply");
+-  var other=W("second-person");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(other,"initial.pak/original_files"));Call("SharedPreset","Stage",other,preset,maps);Call("SharedPreset","Apply",other,maps,W("other-prefs"));
+-  CultureInfo.CurrentCulture=CultureInfo.GetCultureInfo("tr-TR");var packed1=W("one.pak");Call("MainForm","PackWorkspace",receiver,packed1);
+-  File.SetLastWriteTime(Updated(other,relative),new DateTime(2001,2,3));CultureInfo.CurrentCulture=CultureInfo.GetCultureInfo("sk-SK");var packed2=W("two.pak");Call("MainForm","PackWorkspace",other,packed2);
+-  Check(Hash(packed1)==Hash(packed2),"packed initial PAK byte equality across paths, timestamps and cultures");
+-  var conflict=W("conflict");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(conflict,"initial.pak/original_files"));Put(Updated(conflict,relative),xml.Replace("20","99"));Reject(()=>Call("SharedPreset","Stage",conflict,preset,maps),"conflicting local edits rejected before staging");
+-  var stale=W("stale");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(stale,"initial.pak/original_files"));Put(Original(stale,relative),xml+" ");Reject(()=>Call("SharedPreset","Stage",stale,preset,maps),"different initial baseline rejected");
+-  var badMap=W("bad-map");Directory.CreateDirectory(badMap);File.Copy(mapOutput,Path.Combine(badMap,"level_us_01_01.pak"));var clean=W("clean");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(clean,"initial.pak/original_files"));Reject(()=>Call("SharedPreset","Stage",clean,preset,badMap),"different map archive rejected");
+-  Call("SharedPreset","Stage",clean,preset,maps);Put(Original(clean,relative),xml+" ");Reject(()=>Call("SharedPreset","Apply",clean,maps,W("clean-prefs")),"Apply revalidates changed originals and retains staged snapshot");Check((bool)Call("SharedPreset","HasPending",clean)!,"failed Apply preserves stage");
+-  void Malformed(string label,Action<JsonNode> modify){var copy=json.DeepClone();modify(copy);var file=W(label+".snowpreset");using(var output=File.Create(file)){output.Write("SNOWPRESET1\n"u8);using var zip=new BrotliStream(output,CompressionLevel.Optimal);JsonSerializer.Serialize(zip,copy);}Reject(()=>Call("SharedPreset","Stage",other,file,maps),label);}
+-  Malformed("path-traversal",n=>n["Files"]![0]!["Path"]="../outside.txt");
+-  Malformed("duplicate-target",n=>((JsonArray)n["Files"]!).Add(n["Files"]![0]!.DeepClone()));
+-  Malformed("corrupt-output",n=>n["Files"]![0]!["After"]=new string('A',64));
+-  Malformed("unsupported-version",n=>n["Version"]=9);
+-  Malformed("machine-path-plan",n=>n["Metadata"]!["region-maps/pending-replacements.json"]="{\"Pending\":[{}]}");
+-  Call("SharedPreset","Stage",other,preset,maps);Call("SharedPreset","Discard",other);Check(!(bool)Call("SharedPreset","HasPending",other)!,"discard removes staging without changing applied outputs");
+-  var renderTarget=W("preview-output");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(renderTarget,"initial.pak/original_files"));Copy(Path.Combine(sender,"initial.pak/updated"),Path.Combine(renderTarget,"initial.pak/updated"));
+-  void Set(object o,string field,object? value)=>o.GetType().GetField(field,BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(o,value);
+-  object? Invoke(object o,string method,params object?[] values)=>o.GetType().GetMethod(method,BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public)!.Invoke(o,values);
+-  using(var properties=(Control)Activator.CreateInstance(T("TruckPropertiesTab"),new object?[]{(Func<string>)(()=>sender),null})!)
+-  {
+-   var rows=Call("TruckPropertiesStore","LoadRows",sender)!;var row=((IList)rows)[0]!;
+-   ((Dictionary<string,decimal>)row.GetType().GetProperty("Draft")!.GetValue(row)!)["FuelCapacity"]=55;
+-   Set(properties,"_rows",rows);Set(properties,"_loadedWorkspace",sender);Invoke(properties,"ExportPreview",renderTarget);Call("TruckPropertiesStore","Apply",renderTarget);
+-   Check(File.ReadAllText(Updated(renderTarget,relative)).Contains("FuelCapacity=\"55\"")&&Hash(Updated(sender,relative))==senderUpdatedHash,"truck preview exports without staging or applying sender edits");
+-  }
+-  var xpStore=Activator.CreateInstance(T("RankXpStageStore"),new object?[]{W("xp-stage")})!;
+-  Invoke(xpStore,"Stage",sender,"rankExp = [0, 100, 200]",new[]{0,250,500});
+-  var owned=Activator.CreateInstance(T("OwnedRegionState"))!;
+-  using(var xp=(Control)Activator.CreateInstance(T("ExperienceEditorTab"),new object?[]{(Func<string>)(()=>sender),owned})!)
+-  {Set(xp,"_rankStageStore",xpStore);Invoke(xp,"ExportPreview",renderTarget);Check(File.ReadAllText(Updated(renderTarget,"[ps]/rank_settings.sso")).Contains("250")&&Invoke(xpStore,"Load",sender) is not null,"rank XP snapshot rendered without clearing sender stage");}
+-  var rollback=W("rollback");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(rollback,"initial.pak/original_files"));var rollbackPrefs=W("rollback-prefs");Put(Path.Combine(rollbackPrefs,"truck-tiers.json"),"[]");
+-  Call("SharedPreset","Stage",rollback,preset,maps);
+-  using(var locked=new FileStream(Path.Combine(rollbackPrefs,"truck-tiers.json"),FileMode.Open,FileAccess.Read,FileShare.Read))
+-   Reject(()=>Call("SharedPreset","Apply",rollback,maps,rollbackPrefs),"locked settings cause Apply rollback");
+-  Check(!File.Exists(Updated(rollback,relative))&&!File.Exists(Path.Combine(rollback,"region-maps/updated/level_us_01_01.pak"))&&(bool)Call("SharedPreset","HasPending",rollback)!,"rollback restores earlier outputs and keeps staged snapshot");
+-  var cropped=json.DeepClone();cropped["Files"]!.AsArray().Single(n=>(string?)n!["Area"]=="map")!["Path"]="level_us_01_01_crop.pak";
+-  var croppedPath=W("cropped.snowpreset");using(var output=File.Create(croppedPath)){output.Write("SNOWPRESET1\n"u8);using var zip=new BrotliStream(output,CompressionLevel.Optimal);JsonSerializer.Serialize(zip,cropped);}
+-  File.Copy(baselineMap,Path.Combine(maps,"level_us_01_01_crop.pak"));var croppedReceiver=W("cropped-receiver");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(croppedReceiver,"initial.pak/original_files"));Call("SharedPreset","Stage",croppedReceiver,croppedPath,maps);Check((bool)Call("SharedPreset","HasPending",croppedReceiver)!,"cropped map names supported");
+-  Call("SharedPreset","Stage",other,preset,maps);
+-  var pendingMethod=T("SharedPreset").GetMethod("Pending",BindingFlags.Public|BindingFlags.Static)!;
+-  var pendingDelegate=Delegate.CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(string),pendingMethod.ReturnType),pendingMethod);
+-  using(var panel=(Control)Activator.CreateInstance(T("StartChangesPanel"),new object[]{(Func<string>)(()=>other),new FlowLayoutPanel(),pendingDelegate,(Action)(()=>{}),(Func<Task>)(()=>Task.CompletedTask),(Func<Task>)(()=>Task.CompletedTask)})!)
+-  using(var form=new Form {Size=new Size(1120,920)})
+-  {
+-   panel.Dock=DockStyle.Fill;form.Controls.Add(panel);form.ShowInTaskbar=false;form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-20000,-20000);form.Show();Application.DoEvents();
+-   var refresh=(Task)Invoke(panel,"RefreshAsync")!;while(!refresh.IsCompleted){Application.DoEvents();Thread.Sleep(1);}refresh.GetAwaiter().GetResult();
+-   form.PerformLayout();using var bitmap=new Bitmap(form.Width,form.Height);form.DrawToBitmap(bitmap,new Rectangle(Point.Empty,form.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"shared-preset-staged.png"));
+-   var button=(Button)panel.GetType().GetField("_applyButton",BindingFlags.NonPublic|BindingFlags.Instance)!.GetValue(panel)!;
+-   Check(button.Enabled,"Start enables Apply for imported snapshot after refresh");
+-  }
+-  var draftSender=W("draft-sender");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(draftSender,"initial.pak/original_files"));
+-  Put(Original(draftSender,"[media]/classes/trucks/old_truck.xml"),"<Truck><TruckData TruckType=\"SCOUT\"/><GameData><UiDesc UiName=\"OLD\"/></GameData></Truck>");
+-  Put(Original(draftSender,"[media]/classes/trucks/new_truck.xml"),"<Truck><TruckData TruckType=\"SCOUT\"/><GameData><UiDesc UiName=\"NEW\"/></GameData></Truck>");
+-  byte[] DraftScene(){using var memory=new MemoryStream();using var writer=new BinaryWriter(memory);writer.Write(20190654u);writer.Write(0);writer.Write(0);void Str(string v){writer.Write((ushort)(v.Length+1));writer.Write(Encoding.ASCII.GetBytes(v));writer.Write((byte)0);}Str("old_truck");Str("PICKUP");foreach(var f in new float[]{1,0,0,0,0,1,0,0,0,0,1,0,100,10,200,1})writer.Write(f);writer.Write(true);for(int i=0;i<6;i++)writer.Write(float.MaxValue);writer.Write(0u);for(int i=0;i<7;i++)Str("");writer.Write(new byte[26]);var end=(int)memory.Length;writer.Write("tail"u8);var data=memory.ToArray();BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(4),end);BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(8),data.Length);return data;}
+-  var draftMaps=W("draft-input-maps");Directory.CreateDirectory(draftMaps);var draftMap=Path.Combine(draftMaps,"level_us_01_01.pak");using(var zip=ZipFile.Open(draftMap,ZipArchiveMode.Create)){var e=zip.CreateEntry("[scene]/data_for_ssl.bin",CompressionLevel.NoCompression);using var stream=e.Open();stream.Write(DraftScene());}
+-  var draftHash=Hash(draftMap);var catalog=Call("RegionTruckCatalogService","Load",draftSender,draftMaps,new Dictionary<string,string>(),new Dictionary<string,string>(),null,false)!;
+-  var entry=((IEnumerable)catalog.GetType().GetProperty("Entries")!.GetValue(catalog)!).Cast<object>().Single();
+-  var targetTruck=Activator.CreateInstance(T("CustomTruck"),new object[]{"new_truck","New","Scout",""})!;
+-  Call("PendingTruckReplacements","Queue",draftSender,entry,targetTruck);
+-  var draftPreset=W("draft.snowpreset");Call("SharedPreset","Export",draftSender,draftPreset,(Action<string>)(_=>{}),prefs);
+-  Check(Hash(draftMap)==draftHash&&!Directory.Exists(Path.Combine(draftSender,"region-maps/updated"))&&((IEnumerable)Call("PendingTruckReplacements","LoadStaged",draftSender)!).Cast<object>().Count()==0,"export materializes map drafts without staging sender or changing external source map");
+-  var draftReceiver=W("draft-receiver");Copy(Path.Combine(draftSender,"initial.pak/original_files"),Path.Combine(draftReceiver,"initial.pak/original_files"));Call("SharedPreset","Stage",draftReceiver,draftPreset,draftMaps);Call("SharedPreset","Apply",draftReceiver,draftMaps,W("draft-prefs"));
+-  var draftOutput=Path.Combine(draftReceiver,"region-maps/updated/level_us_01_01.pak");var draftData=(byte[])Call("RegionTruckCatalogService","ReadMapData",draftOutput)!;
+-  Check(Encoding.ASCII.GetString(draftData).Contains("new_truck")&&!Encoding.ASCII.GetString(draftData).Contains("old_truck"),"recipient applies concrete map draft from portable snapshot");
+-  File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"results.json"),JsonSerializer.Serialize(new{PresetBytes=new FileInfo(preset).Length,InitialSha256=Hash(packed1),MapSha256=Hash(mapOutput),Scratch=scratch},new JsonSerializerOptions{WriteIndented=true}));
+- }
++    private static readonly string StartupLogPath = Path.Combine(
++        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++        "SnowPakTool.Desktop",
++        "startup-error.txt");
++
++    [STAThread]
++    private static void Main()
++    {
++        try
++        {
++            WriteStartupStage("Main entered");
++            ApplicationConfiguration.Initialize();
++            WriteStartupStage("WinForms initialized");
++            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
++            Application.ThreadException += (_, eventArgs) => ReportStartupError(eventArgs.Exception);
++            AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
++            {
++                if (eventArgs.ExceptionObject is Exception exception) ReportStartupError(exception);
++            };
++
++            using var context = new WorkspaceApplicationContext();
++            WriteStartupStage("Main window created");
++            Application.Run(context);
++        }
++        catch (Exception exception)
++        {
++            ReportStartupError(exception);
++        }
++    }
++
++    private sealed class WorkspaceApplicationContext : ApplicationContext
++    {
++        public WorkspaceApplicationContext() => Open();
++        private void Open()
++        {
++            var form = new MainForm(); MainForm = form;
++            form.ReloadRequested += () =>
++            {
++                // Swap the application-context window before closing the old one.
++                // This reloads all planning stores without retaining stale editor state.
++                Open(); form.Close(); form.Dispose();
++            };
++            form.Show();
++        }
++    }
++
++    private static void WriteStartupStage(string stage)
++    {
++        try
++        {
++            Directory.CreateDirectory(Path.GetDirectoryName(StartupLogPath)!);
++            File.AppendAllText(StartupLogPath, $"{DateTimeOffset.Now:O} {stage}{Environment.NewLine}");
++        }
++        catch
++        {
++            // Keep diagnostics from causing another startup failure.
++        }
++    }
++
++    private static void ReportStartupError(Exception exception)
++    {
++        try
++        {
++            Directory.CreateDirectory(Path.GetDirectoryName(StartupLogPath)!);
++            File.AppendAllText(StartupLogPath, $"{DateTimeOffset.Now:O}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
++        }
++        catch
++        {
++            // Keep error reporting from throwing while handling the original startup failure.
++        }
++
++        try
++        {
++            MessageBox.Show(
++                $"SnowPakTool could not start or encountered an unhandled error.{Environment.NewLine}{Environment.NewLine}{exception.Message}{Environment.NewLine}{Environment.NewLine}Details: {StartupLogPath}",
++                "SnowPakTool startup error",
++                MessageBoxButtons.OK,
++                MessageBoxIcon.Error);
++        }
++        catch
++        {
++            // The error log remains available if Windows cannot display a dialog.
++        }
++    }
+ }
+-
+--- a/src/SnowPakTool/ZipPakHelper.cs
++++ b/src/SnowPakTool/ZipPakHelper.cs
+@@ -45,7 +45,11 @@
+ 					foreach ( var file in files ) {
+ 						Console.Write ( $"\rAdding file {index + 1}/{files.Count}" );
+ 						var compress = CanBeCompressed ( index , file.Key );
+-						zip.CreateEntryFromFile ( file.Value , file.Key , compress ? CompressionLevel.Optimal : CompressionLevel.NoCompression );
++						var entry = zip.CreateEntry ( file.Key , compress ? CompressionLevel.Optimal : CompressionLevel.NoCompression );
++                        entry.LastWriteTime = new DateTimeOffset ( 2000 , 1 , 1 , 0 , 0 , 0 , TimeSpan.Zero );
++                        entry.ExternalAttributes = 0;
++                        using ( var input = File.OpenRead ( file.Value ) )
++                        using ( var output = entry.Open () ) input.CopyTo ( output );
+ 						index++;
+ 					}
+ 				}
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,13 @@
+ * Packing/unpacking _initial.pak\initial.cache_block_ (various game data: UI layout, settings, translations, etc.)
+ 
+ ### SnowPakTool Desktop UI
++
++
++**Start → Save shared preset… / Load shared preset…** shares the complete gameplay setup in a versioned `.snowpreset` file: current truck/engine/winch/frame-addon/XP previews, staged edits, map-truck drafts and applied map edits, upgrade results, ownership, truck groups/tiers, region difficulty/progression, randomizer rules and workspace planning settings. Export renders drafts in an isolated workspace without applying or clearing the sender's edits. Randomization choices are stored as concrete results; loading never rerolls. The file contains Brotli-compressed copy/literal differences against preserved originals, rather than full PAKs or unchanged assets. Machine paths, installed game archives, player saves, window settings and caches are excluded.
++
++Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. Conflicting local edits or drafts require a separate clean workspace. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
++
++The same preset applied to matching originals produces the same initial and map contents. Initial PAK packing uses ordinal cache-entry ordering and fixed ZIP timestamps/attributes, so the same app build also produces byte-identical archives across workspace paths, file modification times and system cultures. For the sender to reproduce the complete exported preview, stage and apply all included previews/drafts, or load that same preset into a clean workspace. Automated checks cover cross-workspace initial/map SHA-256 equality, compact deltas, preview capture, staging/restart reads, baseline conflicts, malformed presets and rollback after a locked-file failure. Runtime behavior still requires in-game verification.
+ 
+ **Start** has one differences table for Initial PAK and map files, one shared log, and one **Apply pending changes** button. The Area column and shared filters identify each output; truck/winch summaries, per-region map summaries, hover details and pending/in-files colors remain. Apply processes all staged changes, including hidden rows. Map-discard remains limited to the selected staged map group. If one store fails, completed outputs remain applied and the remaining staged changes are shown for retry. The app writes workspace outputs only: pack the initial PAK as needed and install all resulting files manually.
+ 
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -275,6 +275,14 @@
+         UpdateFuelCells();
+     }
+ 
++    internal void ExportFuelPreview(string destination)
++    {
++        if (_loadedWorkspace != _getWorkspacePath().Trim() || !_frameAddonsOnly) return;
++        var edits = _fuelRows.Where(pair => pair.Value.Draft != pair.Value.Current)
++            .Select(pair => new FrameAddonFuelEdit(pair.Key, pair.Value.Name, pair.Value.Current, pair.Value.Draft)).ToList();
++        FrameAddonFuelStore.Save(destination, edits);
++    }
++
+     private void StageFuel()
+     {
+         var edits = _fuelRows.Where(pair => pair.Value.Draft != pair.Value.Current)
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -8,6 +8,7 @@
+     private readonly Func<string> _getPakPath;
+     private readonly RegionTruckAvailabilityStore _availabilityStore;
+     private readonly Func<IReadOnlyList<CustomTruck>> _getEnabledTrucks;
++    internal string PresetMapFolder => string.IsNullOrWhiteSpace(_mapFolder.Text) ? RegionTruckCatalogService.FindMapDirectory(_getPakPath()) : _mapFolder.Text.Trim();
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/SharedPreset.cs
+@@ -0,0 +1,389 @@
++using System.IO.Compression;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++// Copy instructions refer only to the recipient's verified baseline. Literal bytes
++// contain the edits, not complete game archives. The whole document is Brotli compressed.
++internal sealed record PresetBlock(int Offset, int Length, byte[]? Data = null);
++internal sealed record PresetPatch(string Area, string Path, string Before, string After, int Length, List<PresetBlock> Blocks,
++    string ArchiveHash = "");
++internal sealed record SharedPresetDocument(int Version, string Baseline, List<PresetPatch> Files,
++    Dictionary<string, string?> Planning, Dictionary<string, string?> Metadata, List<WorkspaceChange>? Review = null);
++
++internal static class SharedPreset
++{
++    private const int MaxDocument = 128 * 1024 * 1024;
++    private static readonly byte[] Magic = "SNOWPRESET1\n"u8.ToArray();
++    internal static readonly string[] PlanningFiles = ["truck-tiers.json", "region-tiers.json", "custom-truck-groups.json",
++        "owned-dlcs.json", "owned-regions.json", "region-progression.json", "region-truck-availability.json",
++        "truck-randomization-rules.json", "upgrade-randomization-rules.json"];
++    private static readonly string[] MetadataFiles = ["progression-settings.json", "truck-properties/unlock-rank-settings.json",
++        "winches/custom-presets.json", "region-maps/pending-replacements.json"];
++    private static string StagePath(string workspace) => Path.Combine(WorkspaceOriginals.GetWorkspaceRoot(workspace), "shared-preset.staged");
++    public static bool HasPending(string workspace) => !string.IsNullOrWhiteSpace(workspace) && File.Exists(StagePath(workspace));
++    internal static string PreferencesRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SnowPakTool.Desktop");
++
++    internal static string SafePath(string root, string relative)
++    {
++        if (string.IsNullOrWhiteSpace(relative) || relative.Contains('\\') || relative.Contains(':')
++            || relative.Split('/').Any(p => p is "" or "." or ".." || p.EndsWith('.') || p.EndsWith(' ') || p.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
++            throw new InvalidDataException("Invalid preset path: " + relative);
++        var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
++        var full = Path.GetFullPath(Path.Combine(fullRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
++        if (!full.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Preset path escapes its workspace.");
++        for (var p = full; p is not null; p = Path.GetDirectoryName(p))
++        {
++            if ((File.Exists(p) || Directory.Exists(p)) && (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0)
++                throw new InvalidDataException("Preset paths cannot follow filesystem links.");
++            if (p.Equals(fullRoot, StringComparison.OrdinalIgnoreCase)) break;
++        }
++        return full;
++    }
++
++    private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
++    private static string FileHash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
++    private static string Relative(string root, string file) => Path.GetRelativePath(root, file).Replace('\\', '/');
++    private static IEnumerable<string> Files(string root) => Directory.Exists(root)
++        ? Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal) : [];
++
++    internal static string Fingerprint(string workspace)
++    {
++        var root = WorkspaceOriginals.GetOriginalRoot(workspace);
++        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++        var count = 0;
++        foreach (var file in Files(root))
++        {
++            var path = Relative(root, file); SafePath(root, path);
++            hash.AppendData(Encoding.UTF8.GetBytes(path.ToLowerInvariant() + "\0"));
++            hash.AppendData(Convert.FromHexString(FileHash(file))); count++;
++        }
++        if (count == 0) throw new InvalidDataException("Unpack the initial PAK before sharing presets.");
++        return Convert.ToHexString(hash.GetHashAndReset());
++    }
++
++    internal static PresetPatch Diff(string area, string path, byte[] before, byte[] after, string archiveHash = "")
++    {
++        // Small fixed anchors resynchronize after insertions, including map model names.
++        const int anchor = 32;
++        var index = new Dictionary<ulong, int>();
++        static ulong Key(byte[] data, int offset) => System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(offset, 8));
++        for (var i = 0; i <= before.Length - anchor; i += 16) index.TryAdd(Key(before, i), i);
++        var blocks = new List<PresetBlock>(); var literal = new MemoryStream();
++        void Flush() { if (literal.Length > 0) { blocks.Add(new(0, (int)literal.Length, literal.ToArray())); literal.SetLength(0); } }
++        for (var i = 0; i < after.Length;)
++        {
++            if (i <= after.Length - anchor && index.TryGetValue(Key(after, i), out var at)
++                && before.AsSpan(at, anchor).SequenceEqual(after.AsSpan(i, anchor)))
++            {
++                Flush(); var length = anchor;
++                while (at + length < before.Length && i + length < after.Length && before[at + length] == after[i + length]) length++;
++                blocks.Add(new(at, length)); i += length;
++            }
++            else literal.WriteByte(after[i++]);
++        }
++        Flush(); literal.Dispose();
++        return new(area, path, Hash(before), Hash(after), after.Length, blocks, archiveHash);
++    }
++
++    internal static byte[] Patch(PresetPatch patch, byte[] before)
++    {
++        if (Hash(before) != patch.Before) throw new InvalidDataException("Preset baseline differs: " + patch.Path);
++        if (patch.Length < 0 || patch.Length > MaxDocument || patch.Blocks is null) throw new InvalidDataException("Invalid preset output size.");
++        var result = new byte[patch.Length]; var cursor = 0;
++        foreach (var block in patch.Blocks)
++        {
++            if (block is null || block.Offset < 0 || block.Length <= 0 || block.Length > result.Length - cursor
++                || (block.Data is null ? block.Offset > before.Length - block.Length : block.Data.Length != block.Length))
++                throw new InvalidDataException("Invalid preset copy instruction.");
++            (block.Data is null ? before.AsSpan(block.Offset, block.Length) : block.Data.AsSpan()).CopyTo(result.AsSpan(cursor)); cursor += block.Length;
++        }
++        if (cursor != result.Length || Hash(result) != patch.After) throw new InvalidDataException("Preset output failed verification: " + patch.Path);
++        return result;
++    }
++
++    internal static SharedPresetDocument Read(string path)
++    {
++        using var input = File.OpenRead(path); var magic = new byte[Magic.Length]; input.ReadExactly(magic);
++        if (!magic.SequenceEqual(Magic)) throw new InvalidDataException("Not a SnowPakTool shared preset.");
++        using var compressed = new BrotliStream(input, CompressionMode.Decompress);
++        using var decoded = new MemoryStream(); var buffer = new byte[65536]; int read;
++        while ((read = compressed.Read(buffer)) > 0)
++        { if (decoded.Length + read > MaxDocument) throw new InvalidDataException("Preset exceeds the supported size."); decoded.Write(buffer, 0, read); }
++        var document = JsonSerializer.Deserialize<SharedPresetDocument>(decoded.ToArray()) ?? throw new InvalidDataException("Empty preset.");
++        if (document.Version != 1 || document.Files is null || document.Planning is null || document.Metadata is null
++            || document.Planning.Count != PlanningFiles.Length || PlanningFiles.Any(p => !document.Planning.ContainsKey(p))
++            || document.Metadata.Count != MetadataFiles.Length || MetadataFiles.Any(p => !document.Metadata.ContainsKey(p)))
++            throw new InvalidDataException("Unsupported or incomplete shared preset.");
++        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var patch in document.Files)
++        {
++            if (patch is null || patch.Area is not ("initial" or "map") || !keys.Add(patch.Area + "/" + patch.Path)) throw new InvalidDataException("Invalid or duplicate preset target.");
++            SafePath(Path.GetTempPath(), patch.Path);
++            if (patch.Area == "initial" && !(patch.Path.StartsWith('[') || patch.Path == "pak.load_list" || patch.Path == "sound.sound_list"))
++                throw new InvalidDataException("Unsupported initial PAK target.");
++            if (patch.Area == "map" && !Regex.IsMatch(patch.Path, @"^level_(us|ru)_\d{2}_\d{2}(?:_[a-z0-9]+)*\.(pak|bin)$", RegexOptions.CultureInvariant))
++                throw new InvalidDataException("Invalid map target.");
++            if (!Regex.IsMatch(patch.Before ?? "", "^[A-F0-9]{64}$") || !Regex.IsMatch(patch.After ?? "", "^[A-F0-9]{64}$")
++                || patch.Area == "map" && !Regex.IsMatch(patch.ArchiveHash ?? "", "^[A-F0-9]{64}$"))
++                throw new InvalidDataException("Invalid preset checksum.");
++        }
++        foreach (var json in document.Planning.Values.Concat(document.Metadata.Values).Where(v => v is not null))
++            using (JsonDocument.Parse(json!)) { }
++        foreach (var change in document.Review ?? [])
++            if (change is null || !document.Files.Any(p => p.Area == "initial" && p.Path.Equals(change.Target, StringComparison.OrdinalIgnoreCase))
++                || change.Property is null || change.Before is null || change.After is null)
++                throw new InvalidDataException("Invalid preset review details.");
++        var mapState = document.Metadata["region-maps/pending-replacements.json"];
++        if (mapState is not null)
++        {
++            using var state = JsonDocument.Parse(mapState);
++            if (!state.RootElement.TryGetProperty("Pending", out var pending) || pending.ValueKind != JsonValueKind.Array || pending.GetArrayLength() != 0)
++                throw new InvalidDataException("Shared map results must be materialized, with no machine-specific pending paths.");
++        }
++        return document;
++    }
++
++    internal static void Write(string path, SharedPresetDocument document)
++    {
++        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try
++        {
++            using (var output = File.Create(temporary))
++            { output.Write(Magic); using var zip = new BrotliStream(output, CompressionLevel.SmallestSize); JsonSerializer.Serialize(zip, document); }
++            File.Move(temporary, path, true);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    private static void CopyTree(string source, string destination)
++    {
++        foreach (var file in Files(source))
++        { var relative = Relative(source, file); SafePath(source, relative); var output = SafePath(destination, relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!); File.Copy(file, output); }
++    }
++
++    private static string InputStamp(string workspace, string preferences)
++    {
++        var files = Files(WorkspaceOriginals.GetUpdatedRoot(workspace))
++            .Concat(new[] { "truck-properties", "frame-addon-fuel", "winches", "upgrade-randomization", "region-maps" }
++                .SelectMany(p => Files(WorkspaceOriginals.GetMetadataPath(workspace, p))))
++            .Concat(PlanningFiles.Select(p => Path.Combine(preferences, p)))
++            .Append(WorkspaceOriginals.GetMetadataPath(workspace, "progression-settings.json"))
++            .Concat(PendingTruckReplacements.Load(workspace).Select(p => p.Original.Source));
++        return string.Join('\n', files.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).Select(p =>
++        { var info = new FileInfo(p); return p + "|" + (info.Exists ? info.Length + "|" + info.LastWriteTimeUtc.Ticks : "missing"); }));
++    }
++
++    // Rendering runs against an isolated copy, including all drafts. It never applies
++    // the sender's staged edits or changes the sender's original/updated files.
++    public static void Export(string workspace, string path, Action<string> render, string? preferences = null)
++    {
++        if (!path.EndsWith(".snowpreset", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Use the .snowpreset extension for shared presets.");
++        var output = Path.GetFullPath(path);
++        foreach (var protectedRoot in new[] { WorkspaceOriginals.GetOriginalRoot(workspace), WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(WorkspaceOriginals.GetWorkspaceRoot(workspace), "region-maps") })
++            if (output.StartsWith(Path.TrimEndingDirectorySeparator(protectedRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
++                throw new IOException("Save the shared preset outside the game data folders.");
++        if (HasPending(workspace)) { var staged = Read(StagePath(workspace)); Write(path, staged); return; }
++        var baseline = Fingerprint(workspace);
++        var stamp = InputStamp(workspace, preferences ?? PreferencesRoot);
++        var temporary = Path.Combine(Path.GetTempPath(), "snowpreset-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temporary);
++        try
++        {
++            CopyTree(WorkspaceOriginals.GetOriginalRoot(workspace), Path.Combine(temporary, "initial.pak", "original_files"));
++            CopyTree(WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(temporary, "initial.pak", "updated"));
++            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "winches", "upgrade-randomization" })
++                CopyTree(WorkspaceOriginals.GetMetadataPath(workspace, relative), Path.Combine(temporary, relative));
++            var pending = PendingTruckReplacements.Load(workspace);
++            var savedMaps = TruckReplacementStore.SavedMaps(workspace).ToArray();
++            var sources = pending.Select(p => (Map: p.Original.MapCode, p.Original.Source)).GroupBy(x => x.Map, StringComparer.OrdinalIgnoreCase);
++            var mapBaselines = savedMaps.ToDictionary(x => x.Map,
++                x => RegionTruckCatalogService.OriginalMapPath(workspace, x.Map)
++                    ?? throw new InvalidDataException("Missing preserved original map: " + x.Map), StringComparer.OrdinalIgnoreCase);
++            foreach (var group in sources)
++            {
++                var source = group.First().Source;
++                var original = RegionTruckCatalogService.OriginalMapPath(workspace, group.Key) ?? source;
++                mapBaselines[group.Key] = original;
++                var extension = original.EndsWith(".pak", StringComparison.OrdinalIgnoreCase) ? ".pak" : ".bin";
++                var dest = SafePath(temporary, "region-maps/backups/" + group.Key + "/original" + extension);
++                Directory.CreateDirectory(Path.GetDirectoryName(dest)!); File.Copy(original, dest);
++            }
++            var statePath = WorkspaceOriginals.GetMetadataPath(temporary, "region-maps", "pending-replacements.json");
++            // Map writers read Source and write only to the temporary workspace.
++            var plans = pending.Select(p => p with { Original = p.Original with { FileEntry = null }, Staged = true }).ToArray();
++            TruckPropertiesStore.WriteAtomic(statePath, JsonSerializer.Serialize(new { Pending = plans, Assignments = PendingTruckReplacements.LoadAssignments(workspace) }));
++            render(temporary);
++            PendingTruckReplacements.Stage(temporary); PendingTruckReplacements.ApplyAll(temporary);
++            var patches = new List<PresetPatch>();
++            var originalRoot = WorkspaceOriginals.GetOriginalRoot(temporary); var updatedRoot = WorkspaceOriginals.GetUpdatedRoot(temporary);
++            foreach (var file in Files(updatedRoot))
++            {
++                var relative = Relative(updatedRoot, file); var original = SafePath(originalRoot, relative);
++                var before = File.Exists(original) ? File.ReadAllBytes(original) : [];
++                var after = File.ReadAllBytes(file);
++                if (!File.Exists(original) || !before.AsSpan().SequenceEqual(after)) patches.Add(Diff("initial", relative, before, after));
++            }
++            foreach (var (map, source) in savedMaps.Concat(TruckReplacementStore.SavedMaps(temporary))
++                         .GroupBy(x => x.Map, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()))
++            {
++                var original = mapBaselines[map];
++                var before = RegionTruckCatalogService.ReadMapData(original)!; var after = RegionTruckCatalogService.ReadMapData(source)!;
++                TruckReplacementStore.ValidateScene(before); TruckReplacementStore.ValidateScene(after);
++                var extension = original.EndsWith(".pak", StringComparison.OrdinalIgnoreCase) ? ".pak" : ".bin";
++                // Normalize through the preserved archive layout for reproducible maps.
++                patches.Add(Diff("map", map + extension, before, after, FileHash(original)));
++            }
++            var planning = PlanningFiles.ToDictionary(p => p, p => ReadJson(Path.Combine(preferences ?? PreferencesRoot, p)));
++            var metadata = MetadataFiles.ToDictionary(p => p, p => ReadJson(WorkspaceOriginals.GetMetadataPath(p == "region-maps/pending-replacements.json" ? temporary : workspace, p.Replace('/', Path.DirectorySeparatorChar))));
++            // All map drafts were rendered; assignments have no machine-specific paths.
++            var review = WorkspaceChangeAudit.PakFiles(temporary).Select(c => c with { State = WorkspaceChange.Pending, Target = c.Target.Replace('\\', '/') }).ToList();
++            var document = new SharedPresetDocument(1, baseline, patches, planning, metadata, review);
++            if (Fingerprint(workspace) != baseline) throw new IOException("Workspace originals changed during export. Retry sharing the preset.");
++            if (InputStamp(workspace, preferences ?? PreferencesRoot) != stamp) throw new IOException("Edits or planning changed during export. Wait for active randomizers to finish and save the preset again.");
++            var export = Path.Combine(temporary, "result.snowpreset");
++            Write(export, document); Read(export); // Validate before replacing an existing preset.
++            Write(path, document);
++        }
++        finally { Directory.Delete(temporary, true); }
++    }
++
++    private static string? ReadJson(string path)
++    { if (!File.Exists(path)) return null; using var json = JsonDocument.Parse(File.ReadAllText(path)); return JsonSerializer.Serialize(json.RootElement); }
++
++    private static string MapBaseline(string workspace, PresetPatch patch, string mapFolder)
++    {
++        var map = Path.GetFileNameWithoutExtension(patch.Path);
++        var original = RegionTruckCatalogService.OriginalMapPath(workspace, map);
++        if (original is null)
++        {
++            original = patch.Path.EndsWith(".pak", StringComparison.Ordinal) ? Path.Combine(mapFolder, patch.Path)
++                : Path.Combine(mapFolder, map, "[scene]", "data_for_ssl.bin");
++        }
++        if (!File.Exists(original) || FileHash(original) != patch.ArchiveHash)
++            throw new InvalidDataException("Map baseline differs or is missing: " + map + ". Select the matching game map folder.");
++        return original;
++    }
++
++    private static void ValidateWorkspace(string workspace, SharedPresetDocument document, string mapFolder)
++    {
++        if (Fingerprint(workspace) != document.Baseline) throw new InvalidDataException("This preset requires the same initial PAK originals/game version as its sender.");
++        var initial = document.Files.Where(p => p.Area == "initial").ToDictionary(p => p.Path, StringComparer.OrdinalIgnoreCase);
++        foreach (var file in Files(WorkspaceOriginals.GetUpdatedRoot(workspace)))
++        {
++            var relative = Relative(WorkspaceOriginals.GetUpdatedRoot(workspace), file);
++            var original = WorkspaceOriginals.GetOriginalReadPath(workspace, relative); var hash = FileHash(file);
++            if ((File.Exists(original) && hash == FileHash(original)) || initial.TryGetValue(relative, out var patch) && hash == patch.After) continue;
++            throw new InvalidDataException("Local edits conflict with this preset: " + relative + ". Use a separate clean workspace.");
++        }
++        foreach (var patch in document.Files)
++        {
++            var before = patch.Area == "initial" ? WorkspaceOriginals.GetOriginalReadPath(workspace, patch.Path) : MapBaseline(workspace, patch, mapFolder);
++            Patch(patch, patch.Area == "initial" ? File.Exists(before) ? File.ReadAllBytes(before) : [] : RegionTruckCatalogService.ReadMapData(before)!);
++        }
++        var maps = document.Files.Where(p => p.Area == "map").ToDictionary(p => Path.GetFileNameWithoutExtension(p.Path), StringComparer.OrdinalIgnoreCase);
++        foreach (var (map, file) in TruckReplacementStore.SavedMaps(workspace))
++        {
++            var bytes = RegionTruckCatalogService.ReadMapData(file)!; var original = RegionTruckCatalogService.OriginalMapPath(workspace, map);
++            if (original is not null && bytes.AsSpan().SequenceEqual(RegionTruckCatalogService.ReadMapData(original))) continue;
++            if (maps.TryGetValue(map, out var patch) && Hash(bytes) == patch.After) continue;
++            throw new InvalidDataException("Local map edits conflict with this preset: " + map + ". Use a separate clean workspace.");
++        }
++    }
++
++    public static void Stage(string workspace, string path, string mapFolder)
++    {
++        var document = Read(path); ValidateWorkspace(workspace, document, mapFolder);
++        // Only the portable snapshot is staged. No planning or game output is written.
++        Write(StagePath(workspace), document);
++    }
++
++    public static IReadOnlyList<WorkspaceChange> Pending(string workspace)
++    {
++        if (!HasPending(workspace)) return [];
++        var document = Read(StagePath(workspace));
++        var review = (document.Review ?? []).Select(c => c with { State = WorkspaceChange.Pending, Target = WorkspaceOriginals.GetUpdatedPath(workspace, c.Target) });
++        return review.Concat(document.Files.Where(p => p.Area != "initial" || !(document.Review ?? []).Any(c => c.Target.Equals(p.Path, StringComparison.OrdinalIgnoreCase)))
++            .Select(p => new WorkspaceChange(WorkspaceChange.Pending,
++            p.Area == "initial" ? WorkspaceOriginals.GetUpdatedPath(workspace, p.Path) : Path.Combine(WorkspaceOriginals.GetUpdatedRoot(workspace), "Shared maps", p.Path),
++            "Shared preset / " + (p.Area == "initial" ? "File changes" : "Map changes"), p.Before[..12], p.After[..12],
++            SummaryGroup: p.Area == "map" ? "shared:map:" + p.Path : "", SummaryName: p.Area == "map" ? p.Path : "")))
++            .Append(new(WorkspaceChange.Pending, Path.Combine(WorkspaceOriginals.GetUpdatedRoot(workspace), "Shared planning"), "Shared preset / Planning and settings", "Local settings", "Shared settings (staged)",
++                SummaryGroup: "shared:planning", SummaryName: "Gameplay planning and settings")).ToArray();
++    }
++
++    public static void Discard(string workspace) => File.Delete(StagePath(workspace));
++
++    public static void Apply(string workspace, string mapFolder, string? preferences = null)
++    {
++        var document = Read(StagePath(workspace)); ValidateWorkspace(workspace, document, mapFolder);
++        var root = WorkspaceOriginals.GetWorkspaceRoot(workspace);
++        var transaction = Path.Combine(root, "preset-history", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff") + "-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(transaction);
++        var outputs = new List<(string Target, string? Temporary, string? Backup)>();
++        void Prepare(string target, byte[]? data)
++        {
++            if (Directory.Exists(target)) throw new IOException("A preset output conflicts with a folder: " + target);
++            var number = outputs.Count.ToString(); var temp = data is null ? null : Path.Combine(transaction, number + ".new");
++            if (temp is not null) File.WriteAllBytes(temp, data!);
++            var backup = File.Exists(target) ? Path.Combine(transaction, number + ".before") : null;
++            if (backup is not null) File.Copy(target, backup);
++            outputs.Add((target, temp, backup));
++        }
++        void PrepareFile(string target, string source)
++        {
++            if (Directory.Exists(target)) throw new IOException("A preset output conflicts with a folder: " + target);
++            var number = outputs.Count.ToString(); var temp = Path.Combine(transaction, number + ".new");
++            File.Copy(source, temp);
++            var backup = File.Exists(target) ? Path.Combine(transaction, number + ".before") : null;
++            if (backup is not null) File.Copy(target, backup);
++            outputs.Add((target, temp, backup));
++        }
++        foreach (var patch in document.Files)
++        {
++            if (patch.Area == "initial")
++            {
++                var original = WorkspaceOriginals.GetOriginalReadPath(workspace, patch.Path);
++                Prepare(SafePath(WorkspaceOriginals.GetUpdatedRoot(workspace), patch.Path), Patch(patch, File.Exists(original) ? File.ReadAllBytes(original) : []));
++            }
++            else
++            {
++                var original = MapBaseline(workspace, patch, mapFolder); var map = Path.GetFileNameWithoutExtension(patch.Path);
++                var data = Patch(patch, RegionTruckCatalogService.ReadMapData(original)!);
++                var extension = Path.GetExtension(patch.Path);
++                var backup = SafePath(root, "region-maps/backups/" + map + "/original" + extension);
++                if (!File.Exists(backup)) PrepareFile(backup, original);
++                if (extension == ".pak")
++                {
++                    var packed = Path.Combine(transaction, map + ".pak"); MapArchiveWriter.Write(original, packed, data);
++                    PrepareFile(SafePath(root, "region-maps/updated/" + patch.Path), packed);
++                }
++                else Prepare(SafePath(root, "region-maps/updated/" + map + "/[scene]/data_for_ssl.bin"), data);
++            }
++        }
++        foreach (var (relative, json) in document.Planning) Prepare(SafePath(preferences ?? PreferencesRoot, relative), json is null ? null : Encoding.UTF8.GetBytes(json));
++        foreach (var (relative, json) in document.Metadata) Prepare(SafePath(root, relative), json is null ? null : Encoding.UTF8.GetBytes(json));
++        File.WriteAllText(Path.Combine(transaction, "targets.json"), JsonSerializer.Serialize(outputs.Select(o => new { o.Target, o.Backup })));
++        var committed = new List<(string Target, string? Temporary, string? Backup)>();
++        try
++        {
++            foreach (var item in outputs)
++            {
++                Directory.CreateDirectory(Path.GetDirectoryName(item.Target)!);
++                if (item.Temporary is null) File.Delete(item.Target);
++                else { var temp = item.Target + ".preset-tmp"; File.Copy(item.Temporary, temp, true); File.Move(temp, item.Target, true); }
++                committed.Add(item);
++                WorkspaceDataCache.InvalidateFile(item.Target);
++            }
++            File.Delete(StagePath(workspace));
++        }
++        catch
++        {
++            foreach (var item in committed.AsEnumerable().Reverse())
++                if (item.Backup is null) File.Delete(item.Target); else File.Copy(item.Backup, item.Target, true);
++            throw;
++        }
++    }
++}
+--- /dev/null
++++ b/.checks/SharedPreset/SharedPresetRegression.csproj
+@@ -0,0 +1,2 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><EnableDefaultCompileItems>false</EnableDefaultCompileItems><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="Program.cs" /><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference><Reference Include="SnowPakTool"><HintPath>../../src/SnowPakTool/bin/Release/netcoreapp3.1/SnowPakTool.dll</HintPath></Reference></ItemGroup></Project>
++
+--- /dev/null
++++ b/.checks/SharedPreset/Program.cs
+@@ -0,0 +1,130 @@
++using System.Buffers.Binary;
++using System.Collections;
++using System.Globalization;
++using System.IO.Compression;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using System.Text.Json.Nodes;
++
++internal static class Regression
++{
++ static Assembly A=Assembly.Load("SnowPakTool.Desktop");
++ static Type T(string type)=>A.GetType("SnowPakTool.Desktop."+type)!;
++ static object? Call(string type,string method,params object?[] args)=>T(type).GetMethod(method,BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,args);
++ static void Check(bool test,string message){if(!test)throw new Exception(message);Console.WriteLine("PASS "+message);}
++ static void Reject(Action action,string message){try{action();}catch(TargetInvocationException e)when(e.InnerException is InvalidDataException or IOException or UnauthorizedAccessException){Check(true,message);return;}throw new Exception("Accepted "+message);}
++ static void Put(string path,string text){Directory.CreateDirectory(Path.GetDirectoryName(path)!);File.WriteAllText(path,text);}
++ static string Hash(string file)=>Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file)));
++ static void Copy(string from,string to){foreach(var f in Directory.GetFiles(from,"*",SearchOption.AllDirectories)){var target=Path.Combine(to,Path.GetRelativePath(from,f));Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(f,target);}}
++ [STAThread] static void Main()
++ {
++  ApplicationConfiguration.Initialize();
++  var scratch=Path.Combine(AppContext.BaseDirectory,"fixtures-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(scratch);
++  string W(string name)=>Path.Combine(scratch,name);
++  string Original(string ws,string path)=>Path.Combine(ws,"initial.pak","original_files",path);
++  string Updated(string ws,string path)=>Path.Combine(ws,"initial.pak","updated",path);
++  var sender=W("sender");var prefs=W("sender-prefs");
++  var xml="<Truck><TruckData TruckType=\"SCOUT\" FuelCapacity=\"20\"/><GameData Price=\"100\" UnlockByRank=\"1\"/></Truck>";
++  var relative="[media]/classes/trucks/test.xml";
++  Put(Original(sender,relative),xml);Put(Original(sender,"[ps]/rank_settings.sso"),"rankExp = [0, 100, 200]");Put(Original(sender,"pak.load_list"),"test");
++  var random=new byte[1024*1024];new Random(128).NextBytes(random);random[10]=0;
++  Put(Original(sender,"[media]/unchanged.txt"),Convert.ToBase64String(random));
++  Put(Updated(sender,relative),xml.Replace("20","30"));
++  Put(Path.Combine(sender,"truck-properties/pending-changes.json"),"[{\"RelativeFile\":\""+relative+"\",\"TruckName\":\"Test\",\"Attribute\":\"FuelCapacity\",\"Before\":30,\"After\":40}]");
++  Put(Path.Combine(sender,"progression-settings.json"),"{\"XpReductionSteps\":80}");
++  Put(Path.Combine(prefs,"truck-tiers.json"),"[{\"Name\":\"S\",\"TruckCodes\":[\"test\"]}]");
++  Put(Path.Combine(prefs,"region-progression.json"),"{\"Order\":[\"us_01\"],\"Difficulty\":1,\"IsFinalized\":true}");
++  var scene=new byte[1024*1024];new Random(32).NextBytes(scene);BinaryPrimitives.WriteUInt32LittleEndian(scene,20190655);BinaryPrimitives.WriteInt32LittleEndian(scene.AsSpan(4),scene.Length);BinaryPrimitives.WriteInt32LittleEndian(scene.AsSpan(8),scene.Length);
++  var baselineMap=Path.Combine(sender,"region-maps/backups/level_us_01_01/original.pak");Directory.CreateDirectory(Path.GetDirectoryName(baselineMap)!);
++  using(var archive=ZipFile.Open(baselineMap,ZipArchiveMode.Create))
++  {foreach(var name in new[]{"[scene]/data_for_ssl.bin","unrelated.txt"}){var e=archive.CreateEntry(name,CompressionLevel.NoCompression);e.LastWriteTime=new DateTimeOffset(2020,1,1,0,0,0,TimeSpan.Zero);using var stream=e.Open();stream.Write(name.StartsWith("[scene]")?scene:Encoding.UTF8.GetBytes("preserve me"));}}
++  var mapOutput=Path.Combine(sender,"region-maps/updated/level_us_01_01.pak");Directory.CreateDirectory(Path.GetDirectoryName(mapOutput)!);
++  var changed=(byte[])scene.Clone();Encoding.UTF8.GetBytes("new_truck").CopyTo(changed,256);Encoding.UTF8.GetBytes("other_edit").CopyTo(changed,900000);Call("MapArchiveWriter","Write",baselineMap,mapOutput,changed);
++  var originalMapHash=Hash(baselineMap);var senderUpdatedHash=Hash(Updated(sender,relative));var stageBefore=File.ReadAllText(Path.Combine(sender,"truck-properties/pending-changes.json"));
++  var preset=W("share.snowpreset");
++  Call("SharedPreset","Export",sender,preset,(Action<string>)(temp=>Call("TruckPropertiesStore","Apply",temp)),prefs);
++  Check(Hash(Updated(sender,relative))==senderUpdatedHash&&File.ReadAllText(Path.Combine(sender,"truck-properties/pending-changes.json"))==stageBefore,"export leaves sender applied files and staged intent unchanged");
++  Check(new FileInfo(preset).Length<12000,"compact delta excludes two megabytes of unchanged game data ("+new FileInfo(preset).Length+" bytes)");
++  var doc=Call("SharedPreset","Read",preset)!;var json=JsonSerializer.SerializeToNode(doc,doc.GetType())!;
++  Check(!json.ToJsonString().Contains(sender.Replace("\\","\\\\")),"portable preset has no sender workspace paths");
++  var receiver=W("different-person/other-workspace");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(receiver,"initial.pak/original_files"));
++  var maps=W("installed-maps");Directory.CreateDirectory(maps);File.Copy(baselineMap,Path.Combine(maps,"level_us_01_01.pak"));
++  var receiverPrefs=W("receiver-prefs");Put(Path.Combine(receiverPrefs,"truck-tiers.json"),"[]");
++  Call("SharedPreset","Stage",receiver,preset,maps);
++  Check(!Directory.Exists(Path.Combine(receiver,"initial.pak/updated"))&&File.ReadAllText(Path.Combine(receiverPrefs,"truck-tiers.json"))=="[]","load writes only staged preset; game outputs and planning untouched");
++  Check(((IEnumerable)Call("SharedPreset","Pending",receiver)!).Cast<object>().Count()==3,"staged files and planning visible after rereading saved stage");
++  Call("SharedPreset","Apply",receiver,maps,receiverPrefs);
++  Check(File.ReadAllText(Updated(receiver,relative))==xml.Replace("20","40"),"apply combines sender applied edits and staged edits");
++  Check(Hash(Path.Combine(receiver,"region-maps/updated/level_us_01_01.pak"))==Hash(mapOutput),"receiver map PAK is byte-identical to sender");
++  Check(Hash(baselineMap)==originalMapHash&&Hash(Path.Combine(maps,"level_us_01_01.pak"))==originalMapHash,"sender and recipient input archives preserved");
++  Check(File.ReadAllText(Path.Combine(receiverPrefs,"truck-tiers.json")).Contains("test")&&!File.Exists(Path.Combine(receiver,"shared-preset.staged")),"planning restored and staged snapshot cleared after Apply");
++  var other=W("second-person");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(other,"initial.pak/original_files"));Call("SharedPreset","Stage",other,preset,maps);Call("SharedPreset","Apply",other,maps,W("other-prefs"));
++  CultureInfo.CurrentCulture=CultureInfo.GetCultureInfo("tr-TR");var packed1=W("one.pak");Call("MainForm","PackWorkspace",receiver,packed1);
++  File.SetLastWriteTime(Updated(other,relative),new DateTime(2001,2,3));CultureInfo.CurrentCulture=CultureInfo.GetCultureInfo("sk-SK");var packed2=W("two.pak");Call("MainForm","PackWorkspace",other,packed2);
++  Check(Hash(packed1)==Hash(packed2),"packed initial PAK byte equality across paths, timestamps and cultures");
++  var conflict=W("conflict");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(conflict,"initial.pak/original_files"));Put(Updated(conflict,relative),xml.Replace("20","99"));Reject(()=>Call("SharedPreset","Stage",conflict,preset,maps),"conflicting local edits rejected before staging");
++  var stale=W("stale");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(stale,"initial.pak/original_files"));Put(Original(stale,relative),xml+" ");Reject(()=>Call("SharedPreset","Stage",stale,preset,maps),"different initial baseline rejected");
++  var badMap=W("bad-map");Directory.CreateDirectory(badMap);File.Copy(mapOutput,Path.Combine(badMap,"level_us_01_01.pak"));var clean=W("clean");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(clean,"initial.pak/original_files"));Reject(()=>Call("SharedPreset","Stage",clean,preset,badMap),"different map archive rejected");
++  Call("SharedPreset","Stage",clean,preset,maps);Put(Original(clean,relative),xml+" ");Reject(()=>Call("SharedPreset","Apply",clean,maps,W("clean-prefs")),"Apply revalidates changed originals and retains staged snapshot");Check((bool)Call("SharedPreset","HasPending",clean)!,"failed Apply preserves stage");
++  void Malformed(string label,Action<JsonNode> modify){var copy=json.DeepClone();modify(copy);var file=W(label+".snowpreset");using(var output=File.Create(file)){output.Write("SNOWPRESET1\n"u8);using var zip=new BrotliStream(output,CompressionLevel.Optimal);JsonSerializer.Serialize(zip,copy);}Reject(()=>Call("SharedPreset","Stage",other,file,maps),label);}
++  Malformed("path-traversal",n=>n["Files"]![0]!["Path"]="../outside.txt");
++  Malformed("duplicate-target",n=>((JsonArray)n["Files"]!).Add(n["Files"]![0]!.DeepClone()));
++  Malformed("corrupt-output",n=>n["Files"]![0]!["After"]=new string('A',64));
++  Malformed("unsupported-version",n=>n["Version"]=9);
++  Malformed("machine-path-plan",n=>n["Metadata"]!["region-maps/pending-replacements.json"]="{\"Pending\":[{}]}");
++  Call("SharedPreset","Stage",other,preset,maps);Call("SharedPreset","Discard",other);Check(!(bool)Call("SharedPreset","HasPending",other)!,"discard removes staging without changing applied outputs");
++  var renderTarget=W("preview-output");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(renderTarget,"initial.pak/original_files"));Copy(Path.Combine(sender,"initial.pak/updated"),Path.Combine(renderTarget,"initial.pak/updated"));
++  void Set(object o,string field,object? value)=>o.GetType().GetField(field,BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(o,value);
++  object? Invoke(object o,string method,params object?[] values)=>o.GetType().GetMethod(method,BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public)!.Invoke(o,values);
++  using(var properties=(Control)Activator.CreateInstance(T("TruckPropertiesTab"),new object?[]{(Func<string>)(()=>sender),null})!)
++  {
++   var rows=Call("TruckPropertiesStore","LoadRows",sender)!;var row=((IList)rows)[0]!;
++   ((Dictionary<string,decimal>)row.GetType().GetProperty("Draft")!.GetValue(row)!)["FuelCapacity"]=55;
++   Set(properties,"_rows",rows);Set(properties,"_loadedWorkspace",sender);Invoke(properties,"ExportPreview",renderTarget);Call("TruckPropertiesStore","Apply",renderTarget);
++   Check(File.ReadAllText(Updated(renderTarget,relative)).Contains("FuelCapacity=\"55\"")&&Hash(Updated(sender,relative))==senderUpdatedHash,"truck preview exports without staging or applying sender edits");
++  }
++  var xpStore=Activator.CreateInstance(T("RankXpStageStore"),new object?[]{W("xp-stage")})!;
++  Invoke(xpStore,"Stage",sender,"rankExp = [0, 100, 200]",new[]{0,250,500});
++  var owned=Activator.CreateInstance(T("OwnedRegionState"))!;
++  using(var xp=(Control)Activator.CreateInstance(T("ExperienceEditorTab"),new object?[]{(Func<string>)(()=>sender),owned})!)
++  {Set(xp,"_rankStageStore",xpStore);Invoke(xp,"ExportPreview",renderTarget);Check(File.ReadAllText(Updated(renderTarget,"[ps]/rank_settings.sso")).Contains("250")&&Invoke(xpStore,"Load",sender) is not null,"rank XP snapshot rendered without clearing sender stage");}
++  var rollback=W("rollback");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(rollback,"initial.pak/original_files"));var rollbackPrefs=W("rollback-prefs");Put(Path.Combine(rollbackPrefs,"truck-tiers.json"),"[]");
++  Call("SharedPreset","Stage",rollback,preset,maps);
++  using(var locked=new FileStream(Path.Combine(rollbackPrefs,"truck-tiers.json"),FileMode.Open,FileAccess.Read,FileShare.Read))
++   Reject(()=>Call("SharedPreset","Apply",rollback,maps,rollbackPrefs),"locked settings cause Apply rollback");
++  Check(!File.Exists(Updated(rollback,relative))&&!File.Exists(Path.Combine(rollback,"region-maps/updated/level_us_01_01.pak"))&&(bool)Call("SharedPreset","HasPending",rollback)!,"rollback restores earlier outputs and keeps staged snapshot");
++  var cropped=json.DeepClone();cropped["Files"]!.AsArray().Single(n=>(string?)n!["Area"]=="map")!["Path"]="level_us_01_01_crop.pak";
++  var croppedPath=W("cropped.snowpreset");using(var output=File.Create(croppedPath)){output.Write("SNOWPRESET1\n"u8);using var zip=new BrotliStream(output,CompressionLevel.Optimal);JsonSerializer.Serialize(zip,cropped);}
++  File.Copy(baselineMap,Path.Combine(maps,"level_us_01_01_crop.pak"));var croppedReceiver=W("cropped-receiver");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(croppedReceiver,"initial.pak/original_files"));Call("SharedPreset","Stage",croppedReceiver,croppedPath,maps);Check((bool)Call("SharedPreset","HasPending",croppedReceiver)!,"cropped map names supported");
++  Call("SharedPreset","Stage",other,preset,maps);
++  var pendingMethod=T("SharedPreset").GetMethod("Pending",BindingFlags.Public|BindingFlags.Static)!;
++  var pendingDelegate=Delegate.CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(string),pendingMethod.ReturnType),pendingMethod);
++  using(var panel=(Control)Activator.CreateInstance(T("StartChangesPanel"),new object[]{(Func<string>)(()=>other),new FlowLayoutPanel(),pendingDelegate,(Action)(()=>{}),(Func<Task>)(()=>Task.CompletedTask),(Func<Task>)(()=>Task.CompletedTask)})!)
++  using(var form=new Form {Size=new Size(1120,920)})
++  {
++   panel.Dock=DockStyle.Fill;form.Controls.Add(panel);form.ShowInTaskbar=false;form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-20000,-20000);form.Show();Application.DoEvents();
++   var refresh=(Task)Invoke(panel,"RefreshAsync")!;while(!refresh.IsCompleted){Application.DoEvents();Thread.Sleep(1);}refresh.GetAwaiter().GetResult();
++   form.PerformLayout();using var bitmap=new Bitmap(form.Width,form.Height);form.DrawToBitmap(bitmap,new Rectangle(Point.Empty,form.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"shared-preset-staged.png"));
++   var button=(Button)panel.GetType().GetField("_applyButton",BindingFlags.NonPublic|BindingFlags.Instance)!.GetValue(panel)!;
++   Check(button.Enabled,"Start enables Apply for imported snapshot after refresh");
++  }
++  var draftSender=W("draft-sender");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(draftSender,"initial.pak/original_files"));
++  Put(Original(draftSender,"[media]/classes/trucks/old_truck.xml"),"<Truck><TruckData TruckType=\"SCOUT\"/><GameData><UiDesc UiName=\"OLD\"/></GameData></Truck>");
++  Put(Original(draftSender,"[media]/classes/trucks/new_truck.xml"),"<Truck><TruckData TruckType=\"SCOUT\"/><GameData><UiDesc UiName=\"NEW\"/></GameData></Truck>");
++  byte[] DraftScene(){using var memory=new MemoryStream();using var writer=new BinaryWriter(memory);writer.Write(20190654u);writer.Write(0);writer.Write(0);void Str(string v){writer.Write((ushort)(v.Length+1));writer.Write(Encoding.ASCII.GetBytes(v));writer.Write((byte)0);}Str("old_truck");Str("PICKUP");foreach(var f in new float[]{1,0,0,0,0,1,0,0,0,0,1,0,100,10,200,1})writer.Write(f);writer.Write(true);for(int i=0;i<6;i++)writer.Write(float.MaxValue);writer.Write(0u);for(int i=0;i<7;i++)Str("");writer.Write(new byte[26]);var end=(int)memory.Length;writer.Write("tail"u8);var data=memory.ToArray();BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(4),end);BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(8),data.Length);return data;}
++  var draftMaps=W("draft-input-maps");Directory.CreateDirectory(draftMaps);var draftMap=Path.Combine(draftMaps,"level_us_01_01.pak");using(var zip=ZipFile.Open(draftMap,ZipArchiveMode.Create)){var e=zip.CreateEntry("[scene]/data_for_ssl.bin",CompressionLevel.NoCompression);using var stream=e.Open();stream.Write(DraftScene());}
++  var draftHash=Hash(draftMap);var catalog=Call("RegionTruckCatalogService","Load",draftSender,draftMaps,new Dictionary<string,string>(),new Dictionary<string,string>(),null,false)!;
++  var entry=((IEnumerable)catalog.GetType().GetProperty("Entries")!.GetValue(catalog)!).Cast<object>().Single();
++  var targetTruck=Activator.CreateInstance(T("CustomTruck"),new object[]{"new_truck","New","Scout",""})!;
++  Call("PendingTruckReplacements","Queue",draftSender,entry,targetTruck);
++  var draftPreset=W("draft.snowpreset");Call("SharedPreset","Export",draftSender,draftPreset,(Action<string>)(_=>{}),prefs);
++  Check(Hash(draftMap)==draftHash&&!Directory.Exists(Path.Combine(draftSender,"region-maps/updated"))&&((IEnumerable)Call("PendingTruckReplacements","LoadStaged",draftSender)!).Cast<object>().Count()==0,"export materializes map drafts without staging sender or changing external source map");
++  var draftReceiver=W("draft-receiver");Copy(Path.Combine(draftSender,"initial.pak/original_files"),Path.Combine(draftReceiver,"initial.pak/original_files"));Call("SharedPreset","Stage",draftReceiver,draftPreset,draftMaps);Call("SharedPreset","Apply",draftReceiver,draftMaps,W("draft-prefs"));
++  var draftOutput=Path.Combine(draftReceiver,"region-maps/updated/level_us_01_01.pak");var draftData=(byte[])Call("RegionTruckCatalogService","ReadMapData",draftOutput)!;
++  Check(Encoding.ASCII.GetString(draftData).Contains("new_truck")&&!Encoding.ASCII.GetString(draftData).Contains("old_truck"),"recipient applies concrete map draft from portable snapshot");
++  File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"results.json"),JsonSerializer.Serialize(new{PresetBytes=new FileInfo(preset).Length,InitialSha256=Hash(packed1),MapSha256=Hash(mapOutput),Scratch=scratch},new JsonSerializerOptions{WriteIndented=true}));
++ }
++}
++

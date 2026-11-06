@@ -1,0 +1,389 @@
+diff --git a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+index 52ca9e6..9381d30 100644
+--- a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
++++ b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+@@ -576,13 +576,20 @@ private FlowLayoutPanel? _groupList;
+         var panes = new List<(TileFlowPanel Tiles, Control? Pane)>();
+         if (_unsortedTiles is not null) panes.Add((_unsortedTiles, null));
+         panes.AddRange(_groupViews.Select(view => (view.Tiles, (Control?)view.Panel)));
+-        (TileFlowPanel Tiles, Control? Pane, Control Tile)? first = null;
++        (TileFlowPanel Tiles, Control? Pane, Control? Tile)? first = null;
+         var count = 0;
+         foreach (var (tiles, pane) in panes)
+         {
++            var view = _groupViews.FirstOrDefault(view => view.Tiles == tiles);
++            var titlePane = pane ?? tiles.Parent?.Parent;
++            var paneMatches = query.Length > 0 && string.Join(" ", titlePane?.Text, view?.State.Name, view?.State.Description)
++                .Contains(query, StringComparison.OrdinalIgnoreCase);
++            if (view is not null) view.Description.BackColor = paneMatches ? AppColors.Get("EngineMatch") : Color.Transparent;
++            else if (titlePane is not null) titlePane.BackColor = paneMatches ? AppColors.Get("EngineMatch") : SystemColors.Control;
++            if (paneMatches) { count++; first ??= (tiles, pane, null); }
+             foreach (var tile in tiles.Controls.OfType<SearchableTruckTile>())
+             {
+-                var matches = query.Length >= 3 &&
++                var matches = query.Length > 0 &&
+                     ((tile.Tag as string)?.Contains(query, StringComparison.OrdinalIgnoreCase) == true ||
+                      tile.Controls.OfType<Label>().Any(label => label.Text.Contains(query, StringComparison.OrdinalIgnoreCase)));
+                 tile.SearchMatch = matches;
+@@ -594,8 +601,8 @@ private FlowLayoutPanel? _groupList;
+         if (first is { } found)
+         {
+             if (found.Pane is not null) _groupList?.ScrollControlIntoView(found.Pane);
+-            found.Tiles.ScrollControlIntoView(found.Tile);
+-            _status.Text = $"{count} matching truck{(count == 1 ? "" : "s")}.";
++            if (found.Tile is not null) found.Tiles.ScrollControlIntoView(found.Tile);
++            _status.Text = $"{count} matching item{(count == 1 ? "" : "s")}.";
+         }
+         return count;
+     }
+diff --git a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+index 5d0bf0d..d9fd77e 100644
+--- a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
++++ b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+@@ -1,6 +1,6 @@
+ namespace SnowPakTool.Desktop;
+ 
+-/// <summary>A double tap of Shift opens an immediately focused search field.</summary>
++/// <summary>A double tap of Shift opens an immediately focused text search.</summary>
+ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+ {
+     private readonly Control _root;
+@@ -11,7 +11,9 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+     private readonly Label _hint;
+     private long _lastShiftRelease = -1000;
+     private bool _shiftOnly;
++    private bool _isOpen;
+     private Control? _previousFocus;
++    private Form? _hostForm;
+ 
+     public QuickSearchOverlay(Control root, Func<string, bool> find, Func<string, int> liveSearch)
+     {
+@@ -23,10 +25,10 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+             Size = new Size(340, 76), BorderStyle = BorderStyle.FixedSingle,
+             BackColor = SystemColors.Control, Visible = false, Padding = new Padding(8)
+         };
+-        _input = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search truck name, code or class..." };
++        _input = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search any text..." };
+         _hint = new Label
+         {
+-            Dock = DockStyle.Bottom, Height = 24, Text = "Type 3+ characters to search    Esc: close",
++            Dock = DockStyle.Bottom, Height = 24, Text = "Type to search    Esc: close",
+             TextAlign = ContentAlignment.MiddleLeft
+         };
+         _overlay.Controls.Add(_input);
+@@ -34,33 +36,21 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+         root.Controls.Add(_overlay);
+         root.SizeChanged += PositionOverlay;
+         root.VisibleChanged += RootVisibilityChanged;
++        root.ParentChanged += HostChanged;
++        root.HandleCreated += HostChanged;
+         _input.TextChanged += (_, _) =>
+         {
+             var count = _liveSearch(_input.Text);
+-            _hint.Text = _input.Text.Trim().Length < 3 ? "Type at least 3 characters to search." :
+-                count == 0 ? "No matching truck in the available panes." :
++            _hint.Text = _input.Text.Trim().Length == 0 ? "Type to search    Esc: close" :
++                count == 0 ? "No matching text in the current view." :
+                 $"{count} match{(count == 1 ? "" : "es")}    Enter: confirm    Esc: close";
+         };
+         _input.KeyDown += (_, e) =>
+         {
+             if (e.KeyCode is not (Keys.Enter or Keys.Escape)) return;
+-            e.SuppressKeyPress = true;
+-            e.Handled = true;
++            e.SuppressKeyPress = e.Handled = true;
+             if (e.KeyCode == Keys.Escape) Close();
+-            else if (_input.Text.Trim().Length < 3) _hint.Text = "Type at least 3 characters to search.";
+-            else
+-            {
+-                var query = _input.Text;
+-                // Restore focus before scrolling so focus restoration cannot undo the result.
+-                Close();
+-                if (!_find(query))
+-                {
+-                    Open();
+-                    _input.Text = query;
+-                    _input.SelectionStart = query.Length;
+-                    _hint.Text = "No matching truck in the available panes.";
+-                }
+-            }
++            else Confirm();
+         };
+         Application.AddMessageFilter(this);
+     }
+@@ -68,7 +58,23 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+     public bool PreFilterMessage(ref Message message)
+     {
+         const int KeyDown = 0x100, KeyUp = 0x101, SystemKeyDown = 0x104;
+-        if (!_root.Visible || _root.IsDisposed || !(_root.ContainsFocus || _root.FindForm()?.ContainsFocus == true)) return false;
++        if (_root.IsDisposed || !_root.Visible) return false;
++        if (_isOpen)
++        {
++            // Handle dialog keys before the form/grid consumes them, even if
++            // scrolling or editing moved focus away from the textbox.
++            if (message.Msg is KeyDown or SystemKeyDown && (Keys)message.WParam.ToInt32() == Keys.Escape)
++            { Close(); return true; }
++            if (message.Msg is KeyDown or SystemKeyDown && (Keys)message.WParam.ToInt32() == Keys.Enter && _input.ContainsFocus)
++            { Confirm(); return true; }
++            if (message.Msg is 0x201 or 0x204 or 0x207 or 0x20B or 0xA1 or 0xA4 or 0xA7 or 0xAB)
++            {
++                var target = Control.FromChildHandle(message.HWnd);
++                if (target is null || (target != _overlay && !_overlay.Contains(target)))
++                    Close(restoreFocus: false); // Preserve the original click and focus target.
++            }
++        }
++        if (!(_root.ContainsFocus || _root.FindForm()?.ContainsFocus == true)) return false;
+         if (message.Msg is not (KeyDown or KeyUp or SystemKeyDown)) return false;
+         var key = (Keys)message.WParam.ToInt32();
+         var shift = key is Keys.ShiftKey or Keys.LShiftKey or Keys.RShiftKey;
+@@ -100,22 +106,50 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+ 
+     private void Open()
+     {
+-        if (!_overlay.Visible) _previousFocus = FindFocused(_root.FindForm() ?? _root);
++        HostChanged(null, EventArgs.Empty);
++        if (!_isOpen) _previousFocus = FindFocused(_root.FindForm() ?? _root);
++        _isOpen = true;
+         _input.Clear();
+-        _hint.Text = "Type 3+ characters to search    Esc: close";
++        _hint.Text = "Type to search    Esc: close";
+         PositionOverlay(null, EventArgs.Empty);
+         _overlay.Show();
+         _overlay.BringToFront();
+         _input.Focus();
+     }
+ 
+-    private void Close()
++    private void Close(bool restoreFocus = true)
+     {
++        _isOpen = false;
++        _lastShiftRelease = -1000;
++        _shiftOnly = false;
+         _overlay.Hide();
+         _liveSearch(string.Empty);
+-        if (_previousFocus is { IsDisposed: false, CanFocus: true }) _previousFocus.Focus();
++        if (restoreFocus && _previousFocus is { IsDisposed: false, CanFocus: true }) _previousFocus.Focus();
+     }
+ 
++    private void Confirm()
++    {
++        if (_input.Text.Trim().Length == 0) { _hint.Text = "Type some text to search."; return; }
++        var query = _input.Text;
++        Close();
++        if (_find(query)) return;
++        Open();
++        _input.Text = query;
++        _input.SelectionStart = query.Length;
++        _hint.Text = "No matching text in the current view.";
++    }
++
++    private void HostChanged(object? sender, EventArgs e)
++    {
++        var form = _root.FindForm();
++        if (form == _hostForm) return;
++        if (_hostForm is not null) _hostForm.Deactivate -= HostDeactivated;
++        _hostForm = form;
++        if (_hostForm is not null) _hostForm.Deactivate += HostDeactivated;
++    }
++
++    private void HostDeactivated(object? sender, EventArgs e) { if (_isOpen) Close(restoreFocus: false); }
++
+     private static Control? FindFocused(Control root)
+     {
+         if (root.Focused) return root;
+@@ -132,7 +166,8 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+ 
+     private void RootVisibilityChanged(object? sender, EventArgs e)
+     {
+-        if (!_root.Visible) { _overlay.Hide(); _liveSearch(string.Empty); _lastShiftRelease = -1000; _shiftOnly = false; }
++        HostChanged(sender, e);
++        if (!_root.Visible && _isOpen) Close(restoreFocus: false);
+     }
+ 
+     public void Dispose()
+@@ -140,6 +175,9 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+         Application.RemoveMessageFilter(this);
+         _root.SizeChanged -= PositionOverlay;
+         _root.VisibleChanged -= RootVisibilityChanged;
++        _root.ParentChanged -= HostChanged;
++        _root.HandleCreated -= HostChanged;
++        if (_hostForm is not null) _hostForm.Deactivate -= HostDeactivated;
+         _overlay.Dispose();
+     }
+ }
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 0c7e23c..204cf62 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -24,7 +24,7 @@ The desktop project references the original `SnowPakTool` project and calls its
+ 
+ The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
+-The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: three or more characters highlight matches and scroll to the first; **Enter** selects a match and **Esc** closes the overlay. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
++The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: any nonempty text highlights matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
+ Region tiles retain their 150 × 210 size and are sorted by original release order: the base-game regions followed by seasons 1–19. Each tile has a region-name header, a representative map screenshot from [MapRunner](https://www.maprunner.info/), and a season/counts footer. Thumbnails are embedded for offline use; the source manifest is in `Assets/Regions/sources.json`. Unrecognized future region IDs sort after known releases and retain a text fallback.
+ 
+@@ -34,6 +34,8 @@ Confirmed placement exceptions take precedence over inferred task rules. The 17
+ 
+ The truck table's **Tires** and **Addons** columns show each placement's map equipment, resolving blank configuration fields from the active workspace's vehicle defaults. Tires display **Highway**, **All-terrain**, **Offroad**, **Mudtires**, **Ice** (chains), or **Custom** (a tire definition compatible with only that truck in the current workspace). Hover over Tires for the specific tire name, wheel family, tire ID, rim and default/override information. Parent wheel definitions are followed when checking compatibility. If a map references a missing tire variant, the category is inferred from its stored ID where possible and the tooltip identifies the unresolved variant; unreadable equipment remains **Unknown**. Addons include explicitly installed equipment and default addons, with a map addon replacing the stock addon in the same socket. Hover over Addons for full names, IDs and default/map origins. These describe map placements rather than changes in a player save.
+ 
++In this application, **visual addons** specifically means addon definitions stored in a folder whose name ends in `_tuning`. This user-defined grouping applies even to functional parts (such as diff locks or snorkels) placed in those folders. Each installed addon retains its source path, original game `Category`, map/default origin, and `IsVisual` flag in the catalog; the addon tooltip shows the grouping and category. Future requests to hide visual addons should use this folder-based flag rather than guessing from part names or gameplay effects.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index c2561a8..a54610b 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -204,7 +204,8 @@ internal sealed class RegionsTrucksTab : UserControl
+         foreach (var (code, tile) in _tiles)
+         {
+             var selected = _selectedRegions.Contains(code);
+-            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : Color.FromArgb(32, 38, 45);
++            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : tile is RegionTileButton { SearchMatch: true }
++                ? AppColors.Get("EngineMatch") : Color.FromArgb(32, 38, 45);
+             tile.ForeColor = tile.BackColor.GetBrightness() < 0.55f ? Color.White : Color.Black;
+             tile.FlatAppearance.BorderSize = selected ? 3 : 1;
+             tile.FlatAppearance.BorderColor = selected ? SystemColors.Highlight : Color.FromArgb(70, 80, 90);
+@@ -326,8 +327,9 @@ internal sealed class RegionsTrucksTab : UserControl
+     private bool FindTruck(string query)
+     {
+         if (SearchTrucks(query) == 0) return false;
+-        var first = _trucks.Rows.Cast<DataGridViewRow>().First(row => MatchesSearch(row, query.Trim()));
+-        _trucks.CurrentCell = first.Cells["Truck"];
++        var first = _trucks.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => MatchesSearch(row, query.Trim()));
++        if (first is not null) _trucks.CurrentCell = first.Cells["Truck"];
++        else _tiles.Values.OfType<RegionTileButton>().FirstOrDefault(tile => tile.SearchMatch)?.Focus();
+         return true;
+     }
+ 
+@@ -339,13 +341,25 @@ internal sealed class RegionsTrucksTab : UserControl
+         foreach (DataGridViewRow row in _trucks.Rows)
+             row.DefaultCellStyle.BackColor = matching.Contains(row) ? AppColors.Get("EngineMatch") : Color.Empty;
+         if (matches.Length > 0 && _trucks.IsHandleCreated) _trucks.FirstDisplayedScrollingRowIndex = matches[0].Index;
+-        return matches.Length;
++        var regionMatches = new List<RegionTileButton>();
++        foreach (var tile in _tiles.Values.OfType<RegionTileButton>())
++        {
++            tile.SearchMatch = _searchQuery.Length > 0 && string.Join(" ", tile.RegionName, tile.ReleaseLabel, tile.Summary, tile.Tag)
++                .Contains(_searchQuery, StringComparison.CurrentCultureIgnoreCase);
++            if (tile.SearchMatch) regionMatches.Add(tile);
++        }
++        RefreshTiles();
++        if (regionMatches.Count > 0 && _regions.IsHandleCreated) _regions.ScrollControlIntoView(regionMatches[0]);
++        return matches.Length + regionMatches.Count;
+     }
+ 
+-    private static bool MatchesSearch(DataGridViewRow row, string query) => query.Length >= 3
++    private static bool MatchesSearch(DataGridViewRow row, string query) => query.Length > 0
+         && row.DataBoundItem is DataRowView view && view["Entry"] is RegionTruckEntry entry
+-        && string.Join(" ", entry.Truck, entry.TruckCode, entry.Class, entry.Region, entry.Map, entry.MapCode,
+-            entry.Task, entry.PlacementId, entry.Tires, entry.Addons).Contains(query, StringComparison.CurrentCultureIgnoreCase);
++        && string.Join(" ", row.Cells.Cast<DataGridViewCell>().Where(cell => cell.OwningColumn?.Visible == true)
++                .Select(cell => Convert.ToString(cell.FormattedValue)).Append(entry.MapCode).Append(entry.TireDetails)
++                .Append(entry.AddonDetails).Append(entry.Evidence).Append(entry.Source)
++                .Append($"{entry.X:0.##}, {entry.Y:0.##}, {entry.Z:0.##}"))
++            .Contains(query, StringComparison.CurrentCultureIgnoreCase);
+ 
+     private void ShowDetails()
+     {
+diff --git a/src/SnowPakTool.Desktop/RegionTileButton.cs b/src/SnowPakTool.Desktop/RegionTileButton.cs
+index fbc511a..474cf8f 100644
+--- a/src/SnowPakTool.Desktop/RegionTileButton.cs
++++ b/src/SnowPakTool.Desktop/RegionTileButton.cs
+@@ -11,6 +11,8 @@ internal sealed class RegionTileButton : Button
+     internal string ReleaseLabel { get; init; } = "";
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal string Summary { get; set; } = "";
++    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
++    internal bool SearchMatch { get; set; }
+     // Cached by RegionTileAssets and shared by every tile for this region.
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal Image? Thumbnail { get; init; }
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index b027d32..e436a45 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -8,7 +8,8 @@ namespace SnowPakTool.Desktop;
+ internal sealed record RegionTruckEntry(string RegionCode, string Region, string MapCode, string Map,
+     string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
+     float X, float Y, float Z, string Evidence, string Source,
+-    string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false);
++    string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null);
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment);
+ 
+@@ -98,7 +99,7 @@ internal static class RegionTruckCatalogService
+                     entries.Add(new(regionCode, region, map, mapName, placement.TruckCode, metadata.Name,
+                         metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
+                         placement.Id, placement.X, placement.Y, placement.Z, evidence, source,
+-                        equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails));
++                        equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index b3df930..ce800f8 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -8,7 +8,14 @@ internal sealed record MapTruckEquipment(bool Parsed, IReadOnlyList<string> Addo
+ {
+     public static readonly MapTruckEquipment Unknown = new(false, [], "", "", "");
+ }
+-internal sealed record TruckEquipmentSummary(string Tires, string TireDetails, string Addons, string AddonDetails);
++internal sealed record InstalledAddonInfo(string Id, string Name, string Category, string SourcePath, bool IsVisual, string Origin)
++{
++    // User-defined UI grouping: "visual addons" means *_tuning folders,
++    // including functional parts that the game stores in those folders.
++    public string Group => IsVisual ? "Visual addons (_tuning)" : "Other addons";
++}
++internal sealed record TruckEquipmentSummary(string Tires, string TireDetails, string Addons, string AddonDetails,
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null);
+ 
+ /// <summary>Resolves per-placement equipment against the active workspace's vehicle defaults and wheel definitions.</summary>
+ internal sealed class TruckEquipmentCatalog
+@@ -16,6 +23,7 @@ internal sealed class TruckEquipmentCatalog
+     private sealed record Definition(string Path, XElement Xml, string Parent);
+     private sealed record Tire(string Identity, string Name, string Category);
+     private readonly IReadOnlyDictionary<string, string> _names;
++    private readonly string _workspace;
+     private readonly List<string> _warnings;
+     private readonly Dictionary<string, string> _files;
+     private readonly Dictionary<string, Definition?> _definitions = new(StringComparer.OrdinalIgnoreCase);
+@@ -24,6 +32,7 @@ internal sealed class TruckEquipmentCatalog
+     public TruckEquipmentCatalog(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
+     {
+         _names = names;
++        _workspace = workspace;
+         _warnings = warnings;
+         _files = WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
+             .Where(path => path.Replace('\\', '/').Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)
+@@ -73,13 +82,24 @@ internal sealed class TruckEquipmentCatalog
+             installed.Add(addon);
+         }
+         var addonLabels = installed.Select(id => (Id: id, Name: AddonName(id))).ToArray();
++        var addonInfo = addonLabels.Select(item =>
++        {
++            var definitions = FileChain(item.Id).ToArray();
++            var path = definitions.FirstOrDefault()?.Path;
++            var source = path is null ? "" : WorkspaceOriginals.GetRelativePath(_workspace, path);
++            var visual = source.Replace('\\', '/').Split('/').Any(part => part.EndsWith("_tuning", StringComparison.OrdinalIgnoreCase));
++            var gameCategory = definitions.Select(definition => (string?)definition.Xml.Element("GameData")?.Attribute("Category"))
++                .FirstOrDefault(value => value is not null) ?? "";
++            return new InstalledAddonInfo(item.Id, item.Name, gameCategory, source, visual, mapAddons.Contains(item.Id) ? "map" : "vehicle default");
++        }).ToArray();
+         var duplicateNames = addonLabels.GroupBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+             .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
+         string Label((string Id, string Name) item) => duplicateNames.Contains(item.Name) ? $"{item.Name} ({item.Id})" : item.Name;
+         return new(category, tireDetails,
+             installed.Count == 0 ? "None" : string.Join(", ", addonLabels.Select(Label)),
+             installed.Count == 0 ? "No addons installed in the map record or vehicle defaults."
+-                : string.Join("\r\n", addonLabels.Select(item => $"{item.Name} — {item.Id} [{(mapAddons.Contains(item.Id) ? "map" : "vehicle default")}]")));
++                : string.Join("\r\n", addonInfo.Select(item => $"{item.Name} — {item.Id} [{item.Origin}; {item.Group}; category: {item.Category}]\r\n  {item.SourcePath}")),
++            addonInfo);
+     }
+ 
+     private static string DefaultWheel(IEnumerable<Definition> chain, string attribute) => chain

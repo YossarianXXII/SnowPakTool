@@ -1,0 +1,346 @@
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -206,10 +206,13 @@
+         randomizerTabs.TabPages.AddRange([upgradesPage, mapUpgradesPage]);
+         editorTabs.TabPages.Add(trucksCargoPage);
+         tabs.TabPages.AddRange([unpackPage, planningPage, randomizerPage, editorsPage]);
++        var presetBrowsing = new PresetBrowseMode(planningPage, randomizerPage, editorsPage);
++        Disposed += (_, _) => presetBrowsing.Dispose();
+         void LockSharedSnapshot()
+         {
+             var locked = !string.IsNullOrWhiteSpace(_workspacePath.Text) && SharedPreset.HasPending(_workspacePath.Text.Trim());
+-            planningPage.Enabled = randomizerPage.Enabled = editorsPage.Enabled = !locked;
++            presetBrowsing.SetReadOnly(locked);
++            Text = locked ? "SnowPakTool — Workspace Editor (preset staged: read-only)" : "SnowPakTool — Workspace Editor";
+             _unpackButton.Enabled = !locked;
+             discardShared.Enabled = locked;
+         }
+@@ -278,6 +281,7 @@
+                 }
+                 else if (selectedPage == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+                 else if (selectedPage == mapUpgradesPage) await _mapUpgradesTab.EnsureLoadedAsync();
++                presetBrowsing.Refresh();
+                 RefreshPendingCount();
+             }
+             catch (Exception ex) { if (!IsDisposed) AppendLog($"Page loading failed: {ex.Message}"); }
+--- a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
++++ b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+@@ -446,7 +446,7 @@
+         control.MouseDown += (_, e) => mouseDown = e.Location;
+         control.MouseMove += (_, e) =>
+         {
+-            if (canDrag?.Invoke() == false || (e.Button & MouseButtons.Left) == 0 ||
++            if (PresetBrowseMode.IsReadOnly(control) || canDrag?.Invoke() == false || (e.Button & MouseButtons.Left) == 0 ||
+                 Math.Abs(e.X - mouseDown.X) < SystemInformation.DragSize.Width / 2 &&
+                 Math.Abs(e.Y - mouseDown.Y) < SystemInformation.DragSize.Height / 2)
+                 return;
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -451,6 +451,7 @@
+ 
+     private async void OpenReplacement(int rowIndex)
+     {
++        if (PresetBrowseMode.IsReadOnly(this)) return;
+         if (rowIndex < 0 || rowIndex >= _trucks.Rows.Count || _loadedWorkspace is null
+             || _trucks.Rows[rowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry) return;
+         using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks, _catalog?.EquipmentCatalog);
+--- a/src/SnowPakTool.Desktop/EngineEditTab.cs
++++ b/src/SnowPakTool.Desktop/EngineEditTab.cs
+@@ -1142,6 +1142,7 @@
+ 
+     private void OpenRawFile(string path)
+     {
++        if (PresetBrowseMode.IsReadOnly(_compatibilityGrid)) return;
+         try
+         {
+             path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path);
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -1361,6 +1361,7 @@
+ 
+     private void OpenRawFile(string path)
+     {
++        if (PresetBrowseMode.IsReadOnly(_winchGrid)) return;
+         try
+         {
+             path = WorkspaceOriginals.PrepareForEdit(_getWorkspacePath(), path);
+--- a/src/SnowPakTool.Desktop/TruckReplacementCell.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementCell.cs
+@@ -23,7 +23,7 @@
+         base.Paint(graphics, clipBounds, cellBounds, rowIndex, cellState, value, formattedValue, errorText, style, advancedBorderStyle, paintParts);
+         if (rowIndex < 0 || !paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
+         var button = ButtonBounds(cellBounds);
+-        var state = DataGridView?.Enabled == false ? PushButtonState.Disabled : PushButtonState.Normal;
++        var state = DataGridView is { } grid && (!grid.Enabled || PresetBrowseMode.IsReadOnly(grid)) ? PushButtonState.Disabled : PushButtonState.Normal;
+         ButtonRenderer.DrawButton(graphics, button, state);
+         TextRenderer.DrawText(graphics, "⇄", cellStyle.Font, button, SystemColors.ControlText,
+             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+@@ -32,11 +32,14 @@
+     protected override void OnMouseClick(DataGridViewCellMouseEventArgs e)
+     {
+         base.OnMouseClick(e);
++        if (DataGridView is { } grid && PresetBrowseMode.IsReadOnly(grid)) return;
+         if (e.Button == MouseButtons.Left && e.RowIndex >= 0 && ButtonBounds(new Rectangle(Point.Empty, Size)).Contains(e.Location)) Open?.Invoke(e.RowIndex);
+     }
+ 
+     protected override void OnKeyDown(KeyEventArgs e, int rowIndex)
+     {
++        if (DataGridView is { } grid && PresetBrowseMode.IsReadOnly(grid) && (e.KeyCode == Keys.F4 || e.Alt && e.KeyCode == Keys.Down))
++        { e.Handled = e.SuppressKeyPress = true; return; }
+         if (e.KeyCode == Keys.F4 || (e.Alt && e.KeyCode == Keys.Down))
+         { e.Handled = e.SuppressKeyPress = true; Open?.Invoke(rowIndex); }
+         else base.OnKeyDown(e, rowIndex);
+--- a/src/SnowPakTool.Desktop/RegionProgressionTab.cs
++++ b/src/SnowPakTool.Desktop/RegionProgressionTab.cs
+@@ -95,7 +95,12 @@
+         _regions = _getRegions();
+         ReadTiers();
+         var order = RegionProgressionService.AppendNew(_state.Order, _regions.Select(region => region.Code));
+-        if (!order.SequenceEqual(_state.Order, StringComparer.OrdinalIgnoreCase) && !Commit(Copy(_state, order))) return;
++        if (!order.SequenceEqual(_state.Order, StringComparer.OrdinalIgnoreCase))
++        {
++            // New regions can be displayed without persisting a changed plan.
++            if (PresetBrowseMode.IsReadOnly(this)) _state = Copy(_state, order);
++            else if (!Commit(Copy(_state, order))) return;
++        }
+         RenderTiles();
+         RefreshActions();
+         _status.Text = _regions.Count == 0 ? "Open an extracted workspace to list regions." :
+@@ -155,7 +160,7 @@
+ 
+     private void RefreshActions()
+     {
+-        var editable = !_loadFailed && !_state.IsFinalized;
++        var editable = !_loadFailed && !_state.IsFinalized && !PresetBrowseMode.IsReadOnly(this);
+         _randomize.Enabled = editable && _regions.Count > 0;
+         _restore.Enabled = editable && _regions.Count > 0 && _previous is not null;
+         _finalize.Enabled = !_loadFailed && (_state.IsFinalized || _regions.Count > 0);
+@@ -171,7 +176,7 @@
+ 
+     private bool Commit(RegionProgressionState candidate)
+     {
+-        if (_loadFailed) return false;
++        if (_loadFailed || PresetBrowseMode.IsReadOnly(this)) return false;
+         try { _store.Save(candidate); _state = candidate; return true; }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+         {
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -646,6 +646,7 @@
+ 
+     private void SaveProgressionSettings()
+     {
++        if (PresetBrowseMode.IsReadOnly(this)) return;
+         if (_loadingProgressionSettings || _rankSettingsPath is null || string.IsNullOrWhiteSpace(_loadedWorkspace)) return;
+         var settingsPath = WorkspaceOriginals.GetMetadataPath(_loadedWorkspace, "progression-settings.json");
+         var settings = new ProgressionSettings
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@
+ 
+ **Start → Save shared preset… / Load shared preset…** shares the complete gameplay setup in a versioned `.snowpreset` file: current truck/engine/winch/frame-addon/XP previews, staged edits, map-truck drafts and applied map edits, upgrade results, ownership, truck groups/tiers, region difficulty/progression, randomizer rules and workspace planning settings. Export renders drafts in an isolated workspace without applying or clearing the sender's edits. Randomization choices are stored as concrete results; loading never rerolls. The file contains Brotli-compressed copy/literal differences against preserved originals, rather than full PAKs or unchanged assets. Machine paths, installed game archives, player saves, window settings and caches are excluded.
+ 
+-Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. When local previews, pending edits, drafts, applied changes or another staged preset exist, Load shows a resizable, sortable review of the local changes that will be replaced: applied file edits, staged editor values, unsaved previews, map drafts, upgrade plans, an existing staged preset, and changed planning/settings. The table lists targets, before/after local values, and the preset outcome; hover for full values or copy selected rows. Cancel keeps the current setup. Replace with preset stages the preset as a complete replacement; old pending edits are ignored while it is staged. Apply backs up and clears superseded pending stores and local outputs absent from the preset, so they cannot leak into the shared result. Discarding before Apply retains existing saved work. Original-file compatibility checks still apply. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
++Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. When local previews, pending edits, drafts, applied changes or another staged preset exist, Load shows a resizable, sortable review of the local changes that will be replaced: applied file edits, staged editor values, unsaved previews, map drafts, upgrade plans, an existing staged preset, and changed planning/settings. The table lists targets, before/after local values, and the preset outcome; hover for full values or copy selected rows. Cancel keeps the current setup. Replace with preset stages the preset as a complete replacement; old pending edits are ignored while it is staged. Apply backs up and clears superseded pending stores and local outputs absent from the preset, so they cannot leak into the shared result. Discarding before Apply retains existing saved work. Original-file compatibility checks still apply. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. All tabs remain available for read-only browsing while the snapshot is staged: scrolling, selection, sorting, header filters, region filters, logs and tooltips stay usable. Editing controls, setup checkboxes, drag-and-drop, randomization/reset/staging buttons and raw-file editing are disabled until the preset is applied or discarded. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
+ 
+ The same preset applied to matching originals produces the same initial and map contents. Initial PAK packing uses ordinal cache-entry ordering and fixed ZIP timestamps/attributes, so the same app build also produces byte-identical archives across workspace paths, file modification times and system cultures. For the sender to reproduce the complete exported preview, stage and apply all included previews/drafts, or load that same preset into a clean workspace. Automated checks cover cross-workspace initial/map SHA-256 equality, compact deltas, preview capture, staging/restart reads, baseline conflicts, malformed presets and rollback after a locked-file failure. Runtime behavior still requires in-game verification.
+ 
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/PresetBrowseMode.cs
+@@ -0,0 +1,147 @@
++using System.Runtime.CompilerServices;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>Locks setup mutations without disabling navigation, selection or scrolling.</summary>
++internal sealed class PresetBrowseMode : IDisposable
++{
++    private static readonly ConditionalWeakTable<Control, PresetBrowseMode> Scopes = new();
++    private sealed class State(Control control)
++    {
++        public Control Control { get; } = control;
++        public bool Enabled { get; set; } = control.Enabled;
++        public bool AllowDrop { get; set; } = control.AllowDrop;
++        public bool? TextReadOnly { get; set; } = (control as TextBoxBase)?.ReadOnly;
++        public bool AddRows { get; set; } = (control as DataGridView)?.AllowUserToAddRows ?? false;
++        public bool DeleteRows { get; set; } = (control as DataGridView)?.AllowUserToDeleteRows ?? false;
++        public Dictionary<DataGridViewColumn, bool> Columns { get; } = [];
++    }
++    private readonly Control[] _roots;
++    private readonly Dictionary<Control, State> _states = [];
++    private bool _locked, _applying, _disposed;
++
++    public PresetBrowseMode(params Control[] roots)
++    {
++        _roots = roots;
++        foreach (var root in roots) { Scopes.Add(root, this); Watch(root); }
++    }
++
++    public static bool IsReadOnly(Control control)
++    {
++        for (Control? current = control; current is not null; current = current.Parent)
++            if (Scopes.TryGetValue(current, out var scope) && scope._locked && !scope._disposed) return true;
++        return false;
++    }
++
++    public void SetReadOnly(bool value)
++    {
++        if (_disposed) return;
++        if (_locked == value) { Refresh(); return; }
++        if (value)
++            foreach (var state in _states.Values)
++            {
++                state.Enabled = state.Control.Enabled; state.AllowDrop = state.Control.AllowDrop;
++                state.TextReadOnly = (state.Control as TextBoxBase)?.ReadOnly;
++                if (state.Control is DataGridView grid)
++                {
++                    state.AddRows = grid.AllowUserToAddRows; state.DeleteRows = grid.AllowUserToDeleteRows;
++                    foreach (DataGridViewColumn column in grid.Columns) state.Columns[column] = column.ReadOnly;
++                }
++            }
++        _locked = value;
++        Refresh();
++    }
++
++    public void Refresh()
++    {
++        if (_disposed || _applying) return;
++        foreach (var state in _states.Values.ToArray()) Apply(state);
++    }
++
++    private static bool ViewColumn(DataGridViewColumn column) => column.Name == "SelectTruck";
++    private static bool ViewAction(Control control)
++    {
++        var text = control.Text.Trim();
++        if (control is RegionTileButton) return true; // Region selection filters the map view.
++        if (control is CheckBox) return text.StartsWith("Show ", StringComparison.OrdinalIgnoreCase) || text == "Select all visible";
++        if (control is not Button) return false;
++        return new[] { "Reload", "Refresh", "Show ", "Hide ", "Order by ", "Columns", "Browse" }
++            .Any(prefix => text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
++            || text is "Select all regions" or "Clear selection" || text.EndsWith('▾');
++    }
++
++    private static bool Disable(Control control) => control is ButtonBase ? !ViewAction(control)
++        : control is ComboBox or NumericUpDown or TrackBar or CheckedListBox;
++
++    private void Watch(Control control)
++    {
++        if (_disposed || _states.ContainsKey(control)) return;
++        var state = new State(control); _states.Add(control, state);
++        control.Disposed += (_, _) => _states.Remove(control);
++        control.ControlAdded += (_, e) => { if (e.Control is not null) Watch(e.Control); };
++        control.EnabledChanged += (_, _) =>
++        {
++            if (_disposed || _applying || !_locked || !Disable(control)) return;
++            state.Enabled = control.Enabled; Apply(state);
++        };
++        control.TextChanged += (_, _) => { if (_locked && control is ButtonBase) Apply(state); };
++        control.Layout += (_, _) => { if (_locked) Apply(state); };
++        if (control is TextBoxBase text)
++            text.ReadOnlyChanged += (_, _) =>
++            {
++                if (_disposed || _applying || !_locked) return;
++                state.TextReadOnly = text.ReadOnly; Apply(state);
++            };
++        if (control is DataGridView grid)
++        {
++            foreach (DataGridViewColumn column in grid.Columns) state.Columns[column] = column.ReadOnly;
++            grid.ColumnAdded += (_, e) => { state.Columns[e.Column] = e.Column.ReadOnly; Apply(state); };
++            grid.ColumnRemoved += (_, e) => state.Columns.Remove(e.Column);
++            grid.ColumnStateChanged += (_, e) =>
++            {
++                if (_disposed || _applying || !_locked || e.StateChanged != DataGridViewElementStates.ReadOnly) return;
++                state.Columns[e.Column] = e.Column.ReadOnly; Apply(state);
++            };
++            grid.CellBeginEdit += (_, e) => { if (_locked && !ViewColumn(grid.Columns[e.ColumnIndex])) e.Cancel = true; };
++            grid.UserDeletingRow += (_, e) => { if (_locked) e.Cancel = true; };
++            grid.AllowUserToAddRowsChanged += (_, _) =>
++            { if (_locked && !_applying) { state.AddRows = grid.AllowUserToAddRows; Apply(state); } };
++            grid.AllowUserToDeleteRowsChanged += (_, _) =>
++            { if (_locked && !_applying) { state.DeleteRows = grid.AllowUserToDeleteRows; Apply(state); } };
++        }
++        foreach (Control child in control.Controls) Watch(child);
++        Apply(state);
++    }
++
++    private void Apply(State state)
++    {
++        var control = state.Control;
++        if (_disposed || _applying || control.IsDisposed) return;
++        _applying = true;
++        try
++        {
++            if (Disable(control)) control.Enabled = !_locked && state.Enabled;
++            control.AllowDrop = !_locked && state.AllowDrop;
++            if (control is TextBoxBase text && state.TextReadOnly is { } readOnly) text.ReadOnly = _locked || readOnly;
++            if (control is DataGridView grid)
++            {
++                grid.AllowUserToAddRows = !_locked && state.AddRows;
++                grid.AllowUserToDeleteRows = !_locked && state.DeleteRows;
++                foreach (DataGridViewColumn column in grid.Columns)
++                {
++                    if (!state.Columns.TryGetValue(column, out var readOnlyColumn)) state.Columns[column] = readOnlyColumn = column.ReadOnly;
++                    column.ReadOnly = _locked && !ViewColumn(column) || readOnlyColumn;
++                }
++            }
++        }
++        finally { _applying = false; }
++    }
++
++    public void Dispose()
++    {
++        if (_disposed) return;
++        SetReadOnly(false); _disposed = true;
++        foreach (var root in _roots) Scopes.Remove(root);
++        _states.Clear();
++    }
++}
+--- a/.checks/SharedPreset/Program.cs
++++ b/.checks/SharedPreset/Program.cs
+@@ -168,6 +168,46 @@
+    using(var bitmap=new Bitmap(overwriteDialog.Width,overwriteDialog.Height)){overwriteDialog.DrawToBitmap(bitmap,new Rectangle(Point.Empty,overwriteDialog.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"preset-overwrite-review.png"));}
+    ((Button)overwriteDialog.CancelButton!).PerformClick();Check(overwriteDialog.DialogResult==DialogResult.No&&Hash(Updated(sender,relative))==reviewBefore,"Cancel closes review without discarding or staging work");
+   }
++  using(var browseForm=new Form {Size=new Size(1120,800),ShowInTaskbar=false,StartPosition=FormStartPosition.Manual,Location=new Point(-20000,-20000)})
++  using(var navigation=new TabControl{Dock=DockStyle.Fill})
++  {
++   var planning=new TabPage("Planning");var randomizer=new TabPage("Randomizer");var editors=new TabPage("Editors");navigation.TabPages.AddRange(new[]{planning,randomizer,editors});browseForm.Controls.Add(navigation);
++   var innerNavigation=new TabControl{Dock=DockStyle.Fill};var truckPage=new TabPage("Truck properties");var addonPage=new TabPage("Addons");innerNavigation.TabPages.AddRange(new[]{truckPage,addonPage});editors.Controls.Add(innerNavigation);
++   var toolbar=new FlowLayoutPanel{Dock=DockStyle.Top,AutoSize=true};var mutate=new Button{Text="Stage changes",AutoSize=true};var reload=new Button{Text="Reload properties",AutoSize=true};var filter=new Button{Text="Columns ▾",AutoSize=true};var show=new CheckBox{Text="Show changed only",AutoSize=true};var ownership=new CheckBox{Text="Select all regions",AutoSize=true};var slider=new TrackBar();toolbar.Controls.AddRange(new Control[]{mutate,reload,filter,show,ownership,slider});truckPage.Controls.Add(toolbar);
++   var browseGrid=new DataGridView{Dock=DockStyle.Fill,AllowUserToAddRows=false,AllowUserToDeleteRows=false};browseGrid.Columns.Add("Truck","Truck");browseGrid.Columns.Add("FuelCapacity","Fuel capacity");browseGrid.Columns.Add(new DataGridViewCheckBoxColumn{Name="SelectTruck",HeaderText="Select"});browseGrid.Rows.Add("Test truck",30,false);truckPage.Controls.Add(browseGrid);toolbar.BringToFront();
++   var notes=new TextBox{Text="Planning notes",Multiline=true,Dock=DockStyle.Fill,ScrollBars=ScrollBars.Vertical};planning.Controls.Add(notes);var tiles=new FlowLayoutPanel{AllowDrop=true,Dock=DockStyle.Bottom,Height=100,AutoScroll=true};planning.Controls.Add(tiles);
++   using(var mode=(IDisposable)Activator.CreateInstance(T("PresetBrowseMode"),new object[]{new Control[]{planning,randomizer,editors}})!)
++   {
++    Invoke(mode,"SetReadOnly",true);browseForm.Show();Application.DoEvents();
++    foreach(var page in new[]{planning,randomizer,editors}){navigation.SelectedTab=page;Application.DoEvents();Check(navigation.SelectedTab==page&&page.Enabled,"staged preset permits browsing "+page.Text);}
++    innerNavigation.SelectedTab=addonPage;Check(innerNavigation.SelectedTab==addonPage,"staged preset permits sub-tab navigation");innerNavigation.SelectedTab=truckPage;
++    Check(browseGrid.Enabled&&notes.Enabled&&tiles.Enabled&&notes.ReadOnly&&!tiles.AllowDrop,"browsing stays enabled while notes and drag-and-drop are read-only");
++    Check(!mutate.Enabled&&!ownership.Enabled&&!slider.Enabled&&reload.Enabled&&filter.Enabled&&show.Enabled,"mutation controls disabled while reload, columns and view filters remain active");
++    Check(browseGrid.Columns["FuelCapacity"].ReadOnly&&!browseGrid.Columns["SelectTruck"].ReadOnly,"property edits blocked while view-selection checkboxes remain usable");
++    browseGrid.CurrentCell=browseGrid.Rows[0].Cells["FuelCapacity"];Check(!browseGrid.BeginEdit(false),"keyboard editing cannot start in read-only browsing");
++    var mutations=0;mutate.Click+=(_,_)=>mutations++;mutate.PerformClick();Check(mutations==0,"disabled Stage button cannot mutate the staged setup");
++    mutate.Enabled=true;Check(!mutate.Enabled,"asynchronous refresh cannot re-enable mutation buttons");
++    browseGrid.Columns["FuelCapacity"].ReadOnly=false;Check(browseGrid.Columns["FuelCapacity"].ReadOnly,"table refresh cannot re-enable property cells");
++    notes.ReadOnly=false;Check(notes.ReadOnly,"refresh cannot make planning text editable");
++    browseGrid.AllowUserToAddRows=true;browseGrid.AllowUserToDeleteRows=true;Check(!browseGrid.AllowUserToAddRows&&!browseGrid.AllowUserToDeleteRows,"read-only browsing also blocks row insertion and deletion");
++    var late=new Button{Text="Randomize upgrades"};randomizer.Controls.Add(late);var lateGrid=new DataGridView();randomizer.Controls.Add(lateGrid);lateGrid.Columns.Add("Price","Price");Check(!late.Enabled&&lateGrid.Columns["Price"].ReadOnly,"lazily created controls and columns inherit browsing restrictions");
++    var descendant=new Panel();tiles.Controls.Add(descendant);Check((bool)Call("PresetBrowseMode","IsReadOnly",descendant)!,"raw-edit and drag guards recognize descendant controls");
++    browseGrid.Sort(browseGrid.Columns["Truck"],System.ComponentModel.ListSortDirection.Ascending);browseGrid.CurrentCell=browseGrid.Rows[0].Cells["Truck"];Check(browseGrid.CurrentCell!=null,"read-only tables retain sorting and row selection");
++    using(var bitmap=new Bitmap(browseForm.Width,browseForm.Height)){browseForm.DrawToBitmap(bitmap,new Rectangle(Point.Empty,browseForm.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"preset-read-only-browsing.png"));}
++    Invoke(mode,"SetReadOnly",false);Check(mutate.Enabled&&ownership.Enabled&&slider.Enabled&&!notes.ReadOnly&&tiles.AllowDrop&&!browseGrid.Columns["FuelCapacity"].ReadOnly,"applying or discarding restores editing and drag-and-drop");
++   }
++  }
++  var regionListType=typeof(List<>).MakeGenericType(T("CustomTruck"));var regions=(IList)Activator.CreateInstance(regionListType)!;regions.Add(Activator.CreateInstance(T("CustomTruck"),new object[]{"us_01","Michigan","Base game",""}));
++  var regionResultType=typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck"));var regionDelegateType=typeof(Func<>).MakeGenericType(regionResultType);var regionDelegate=System.Linq.Expressions.Expression.Lambda(regionDelegateType,System.Linq.Expressions.Expression.Constant(regions,regionResultType)).Compile();
++  var progressionFile=W("browse-progression.json");var progressionStore=Activator.CreateInstance(T("RegionProgressionStore"),new object[]{progressionFile})!;
++  using(var progressionTab=(Control)Activator.CreateInstance(T("RegionProgressionTab"),new object?[]{regionDelegate,progressionStore,null})!)
++  using(var progressionMode=(IDisposable)Activator.CreateInstance(T("PresetBrowseMode"),new object[]{new Control[]{progressionTab}})!)
++  {Invoke(progressionMode,"SetReadOnly",true);Invoke(progressionTab,"RefreshRegions");Check(!File.Exists(progressionFile),"browsing region progression does not auto-save a new play order");var tiles=(Control)progressionTab.GetType().GetField("_tiles",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(progressionTab)!;Check(tiles.Controls.Count==1,"read-only progression still displays newly discovered regions");}
++  using(var cellGrid=new DataGridView{AllowUserToAddRows=false})
++  {
++   var replacementCell=(DataGridViewCell)Activator.CreateInstance(T("TruckReplacementCell"))!;var opened=0;replacementCell.GetType().GetProperty("Open")!.SetValue(replacementCell,(Action<int>)(_=>opened++));cellGrid.Columns.Add(new DataGridViewColumn(replacementCell){Name="Truck"});cellGrid.Rows.Add("Test truck");
++   using var cellMode=(IDisposable)Activator.CreateInstance(T("PresetBrowseMode"),new object[]{new Control[]{cellGrid}})!;Invoke(cellMode,"SetReadOnly",true);var key=new KeyEventArgs(Keys.F4);Invoke(cellGrid.Rows[0].Cells[0],"OnKeyDown",key,0);Check(opened==0&&key.SuppressKeyPress,"read-only map cells block replacement popup keyboard shortcuts");
++  }
+   File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"results.json"),JsonSerializer.Serialize(new{PresetBytes=new FileInfo(preset).Length,InitialSha256=Hash(packed1),MapSha256=Hash(mapOutput),Scratch=scratch},new JsonSerializerOptions{WriteIndented=true}));
+  }
+ }

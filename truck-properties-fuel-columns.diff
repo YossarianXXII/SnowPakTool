@@ -1,0 +1,201 @@
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 060d064..681a9a5 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -16,6 +16,9 @@ internal sealed class TruckPropertiesTab : UserControl
+     };
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 4) };
+     private readonly ToolTip _tips = new();
++    private readonly TrackBar _fuelMultiplier = new() { Minimum = 1, Maximum = 6, Value = 2, TickFrequency = 1, SmallChange = 1, LargeChange = 1, Width = 150, Height = 38, AutoSize = false, AccessibleName = "Fuel capacity multiplier" };
++    private readonly Label _fuelMultiplierValue = new() { Text = "×1.0", AutoSize = true, Margin = new Padding(4, 8, 8, 0) };
++    private readonly ContextMenuStrip _columnsMenu = new();
+     private List<TruckPropertyRow> _rows = [];
+     private string? _loadedWorkspace;
+     private bool _updating;
+@@ -34,7 +37,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.Controls.Add(new Label { AutoSize = true, Padding = new Padding(0, 0, 0, 8),
+-            Text = "Edit truck values, then stage changes and apply them from Start. Amber = staged or edited; green = applied. Blank values are not explicitly defined and are left unchanged." }, 0, 0);
++            Text = "Edit individual values or multiply all fuel capacities, then stage and apply from Start. Changed values show the original in parentheses. Amber = edited/staged; green = applied. Blank values stay unchanged." }, 0, 0);
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
+         AddButton(toolbar, "Reload properties", async () => await EnsureLoadedAsync(true));
+         AddButton(toolbar, "Order by tier", () => { _grid.EndEdit(); _grid.Sort(_grid.Columns["Tier"]!, ListSortDirection.Ascending); });
+@@ -58,18 +61,15 @@ internal sealed class TruckPropertiesTab : UserControl
+         });
+         layout.Controls.Add(toolbar, 0, 1);
+         var bulk = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
+-        bulk.Controls.Add(new Label { Text = "Adjust all trucks:", AutoSize = true, Margin = new Padding(4, 8, 8, 4) });
+-        foreach (var spec in TruckPropertiesStore.Specs)
+-        {
+-            bulk.Controls.Add(new Label { Text = spec.Label, AutoSize = true, Margin = new Padding(8, 8, 0, 4) });
+-            foreach (var direction in new[] { -1, 1 })
+-            {
+-                var button = AddButton(bulk, direction < 0 ? "−" : "+", () => AdjustAll(spec, direction));
+-                button.AutoSize = false; button.Size = new Size(30, 27);
+-                button.AccessibleName = $"{(direction < 0 ? "Decrease" : "Increase")} all {spec.Label} by {spec.Step:N0}";
+-                _tips.SetToolTip(button, button.AccessibleName + $" (range {spec.Minimum:N0}–{spec.Maximum:N0})");
+-            }
+-        }
++        bulk.Controls.Add(new Label { Text = "Fuel multiplier", AutoSize = true, Margin = new Padding(4, 8, 0, 4) });
++        bulk.Controls.Add(_fuelMultiplier);
++        bulk.Controls.Add(_fuelMultiplierValue);
++        _fuelMultiplier.ValueChanged += (_, _) => _fuelMultiplierValue.Text = "×" + (_fuelMultiplier.Value / 2m).ToString("0.0", CultureInfo.CurrentCulture);
++        _tips.SetToolTip(_fuelMultiplier, "0.5× to 3× in 0.5 steps. Moving the slider only selects the factor.");
++        var multiply = AddButton(bulk, "Multiply all fuel", MultiplyFuel);
++        _tips.SetToolTip(multiply, "Multiply the current displayed fuel capacities. Round to whole litres; repeated clicks multiply again. Individual cells remain editable. Stage changes to keep the result.");
++        var columns = AddButton(bulk, "Columns ▾", () => { });
++        columns.Click += (_, _) => _columnsMenu.Show(columns, new Point(0, columns.Height));
+         layout.Controls.Add(bulk, 0, 2);
+         layout.Controls.Add(_grid, 0, 3);
+         layout.Controls.Add(_status, 0, 4);
+@@ -83,7 +83,20 @@ internal sealed class TruckPropertiesTab : UserControl
+             column.ReadOnly = !TruckPropertiesStore.Specs.Any(spec => spec.Attribute == name);
+             column.SortMode = DataGridViewColumnSortMode.Automatic;
+             if (!column.ReadOnly) { column.ValueType = typeof(decimal); column.DefaultCellStyle.Format = "N0"; }
++            column.Visible = name != "DiffLock";
++            var item = new ToolStripMenuItem(title) { CheckOnClick = true, Checked = column.Visible, Name = name };
++            item.CheckedChanged += (_, _) => { HideHover(); column.Visible = item.Checked; };
++            _columnsMenu.Items.Add(item);
+         }
++        _grid.CellFormatting += FormatValue;
++        _grid.EditingControlShowing += (_, e) =>
++        {
++            if (_grid.CurrentCell is { Value: decimal value } && e.Control is TextBox editor)
++            {
++                editor.Text = value.ToString(CultureInfo.CurrentCulture);
++                editor.SelectAll();
++            }
++        };
+         _grid.Columns["Regions"]!.DefaultCellStyle.NullValue = "Unknown — load maps in Map trucks";
+         _grid.CellValidating += ValidateCell;
+         _grid.CellValueChanged += ValueChanged;
+@@ -111,7 +124,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         _grid.Scroll += (_, _) => HideHover();
+         VisibleChanged += (_, _) => { if (!Visible) HideHover(); };
+         AppColors.Changed += RefreshColors;
+-        Disposed += (_, _) => { HideHover(); _tips.Dispose(); AppColors.Changed -= RefreshColors; };
++        Disposed += (_, _) => { HideHover(); _tips.Dispose(); _columnsMenu.Dispose(); AppColors.Changed -= RefreshColors; };
+         RefreshColors(this, EventArgs.Empty);
+     }
+ 
+@@ -235,7 +248,19 @@ internal sealed class TruckPropertiesTab : UserControl
+         var cell = row.Cells[spec.Attribute];
+         cell.Style.BackColor = draft != data.Current[spec.Attribute] ? Color.LightGoldenrodYellow
+             : data.Original.TryGetValue(spec.Attribute, out var original) && draft != original ? Color.Honeydew : AppColors.Get("Surface");
+-        cell.ToolTipText = $"Original: {(data.Original.TryGetValue(spec.Attribute, out var baseline) ? baseline.ToString("N0") : "undefined")}\nIn files: {data.Current[spec.Attribute]:N0}\nStep: {spec.Step:N0}; range {spec.Minimum:N0}–{spec.Maximum:N0}";
++        cell.ToolTipText = $"Original: {(data.Original.TryGetValue(spec.Attribute, out var baseline) ? baseline.ToString("N0") : "undefined")}\nIn files: {data.Current[spec.Attribute]:N0}\nRange: {spec.Minimum:N0}–{spec.Maximum:N0}";
++    }
++
++    private void FormatValue(object? sender, DataGridViewCellFormattingEventArgs e)
++    {
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || e.Value is not decimal value
++            || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
++        var attribute = _grid.Columns[e.ColumnIndex].Name;
++        if (data.Original.TryGetValue(attribute, out var original) && value != original && !_grid[e.ColumnIndex, e.RowIndex].IsInEditMode)
++        {
++            e.Value = $"{value:N0} ({original:N0})";
++            e.FormattingApplied = true;
++        }
+     }
+ 
+     private void ValidateCell(object? sender, DataGridViewCellValidatingEventArgs e)
+@@ -259,11 +284,14 @@ internal sealed class TruckPropertiesTab : UserControl
+         data.Draft[spec.Attribute] = value; PaintValue(_grid.Rows[e.RowIndex], spec); UpdateStatus();
+     }
+ 
+-    private void AdjustAll(TruckPropertySpec spec, int direction)
++    private void MultiplyFuel()
+     {
+         if (!_grid.EndEdit() || !Ready()) return;
++        var spec = TruckPropertiesStore.Specs.Single(spec => spec.Attribute == "FuelCapacity");
++        var factor = _fuelMultiplier.Value / 2m;
+         foreach (var row in _rows)
+-            if (row.Draft.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = Math.Clamp(value + direction * spec.Step, spec.Minimum, spec.Maximum);
++            if (row.Draft.TryGetValue(spec.Attribute, out var value))
++                row.Draft[spec.Attribute] = Math.Clamp(decimal.Round(value * factor, 0, MidpointRounding.AwayFromZero), spec.Minimum, spec.Maximum);
+         ShowRows();
+     }
+ 
+diff --git a/README.md b/README.md
+index 013a4e7..8dfe55a 100644
+--- a/README.md
++++ b/README.md
+@@ -22,7 +22,7 @@ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab h
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-**Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells or use the −/+ glyphs to adjust all explicitly defined values (10 L fuel, 1 rank, 1,000 price), bounded to the displayed ranges. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
++**Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells individually. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to whole litres (halves away from zero), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+ The **Planning** tab contains **Truck tiers** and **Region difficulty**, alongside ownership and truck groups. **Region difficulty** ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+diff --git a/.checks/truck-properties/Program.cs b/.checks/truck-properties/Program.cs
+index 544d00d..a6ea395 100644
+--- a/.checks/truck-properties/Program.cs
++++ b/.checks/truck-properties/Program.cs
+@@ -83,19 +83,51 @@ internal static class Program
+         Check(Convert.ToString(row.Cells["Regions"].Value) == "Michigan / Black River (replacement) [pending]", "obtainable region follows current randomized replacement");
+         var unknown = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "unknown");
+         Check(unknown.Cells["FuelCapacity"].ReadOnly && unknown.Cells["FuelCapacity"].Value is null, "undefined numeric values remain blank and uneditable");
+-        var spec = ((Array)T("TruckPropertiesStore").GetField("Specs", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!).GetValue(0)!;
+-        Call(tab, "AdjustAll", spec, 1);
++        Check(!All(tab).OfType<Button>().Any(button => button.Text is "+" or "−"), "old bulk adjustment buttons removed");
++        var slider = (TrackBar)Field(tab, "_fuelMultiplier");
++        Check(slider.Minimum == 1 && slider.Maximum == 6 && slider.Value == 2 && slider.SmallChange == 1, "fuel multiplier selects 0.5–3 in 0.5 steps, default 1");
++        slider.Value = 3;
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 90, "moving the slider does not edit or stage fuel");
++        grid.CurrentCell = row.Cells["FuelCapacity"];
++        Check(grid.BeginEdit(false) && grid.EditingControl is TextBox, "individual fuel editing remains available");
++        var editor = (TextBox)grid.EditingControl!;
++        Check(editor.Text == "90", "editing shows the raw number without original-value annotation");
++        editor.Text = "99";
++        Check(grid.EndEdit() && Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 99, "individual fuel edit commits a numeric value");
++        grid.CurrentCell = row.Cells["Truck"];
++        Check(Convert.ToString(row.Cells["FuelCapacity"].FormattedValue) == "99 (80)" && row.Cells["FuelCapacity"].Style.BackColor == Color.LightGoldenrodYellow,
++            "changed fuel is highlighted and displays preserved original in parentheses");
++        Call(tab, "MultiplyFuel");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+-        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 100, "bulk fuel step adds 10 L");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 149, "1.5 multiplier applies to current individual value and rounds half litres away from zero");
++        Check(Convert.ToDecimal(row.Cells["UnlockByRank"].Value) == 1 && Convert.ToDecimal(row.Cells["Price"].Value) == 3000
++            && grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "unknown").Cells["FuelCapacity"].Value is null,
++            "fuel multiplier preserves other properties and undefined fuel");
++        row.Cells["FuelCapacity"].Value = 100000m; slider.Value = 6; Call(tab, "MultiplyFuel");
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 100000, "multiplier respects fuel capacity upper limit");
+         Call(tab, "RestoreDraft"); Call(tab, "ShowRows");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+         Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 90 && File.ReadAllText(updated) == source, "revert unstaged edits restores staged snapshot without writing files");
+-        Call(tab, "AdjustAll", spec, 1);
++        slider.Value = 1; Call(tab, "MultiplyFuel");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 45, "0.5 multiplier halves current fuel capacity");
++        var menu = (ContextMenuStrip)Field(tab, "_columnsMenu");
++        var differential = menu.Items.Cast<ToolStripMenuItem>().Single(item => item.Name == "DiffLock");
++        Check(!grid.Columns["DiffLock"]!.Visible && !differential.Checked && menu.Items.Cast<ToolStripMenuItem>().Where(item => item != differential).All(item => item.Checked),
++            "Differential Lock alone starts hidden with an unchecked column checkbox");
++        differential.PerformClick();
++        Check(grid.Columns["DiffLock"]!.Visible && differential.Checked, "column dropdown reveals Differential Lock");
++        differential.PerformClick();
++        Check(!grid.Columns["DiffLock"]!.Visible, "column dropdown hides Differential Lock again");
++        row.Cells["FuelCapacity"].Value = 100m;
+         Call(tab, "Stage"); row.Cells["FuelCapacity"].Value = 110m;
+         Call(tab, "SavePendingChanges");
+         Check(File.ReadAllText(updated).Contains("FuelCapacity=\"100\""), "Apply uses explicit staged snapshot and excludes later preview");
+         Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToString(row.Cells["FuelCapacity"].FormattedValue) == "100 (80)" && row.Cells["FuelCapacity"].Style.BackColor == Color.Honeydew,
++            "applied fuel retains original-value annotation and applied highlight");
+         All(tab).OfType<Button>().Single(button => button.Text == "Order by tier").PerformClick();
+         Check(grid.SortedColumn?.Name == "Tier", "tier sort wired to table");
+         grid.Rows[0].Cells["Tier"].Value = "S"; grid.Rows[1].Cells["Tier"].Value = "SS";
+@@ -107,6 +139,8 @@ internal static class Program
+         Call(tab, "Stage");
+         All(tab).OfType<Button>().Single(button => button.Text == "Revert staged changes").PerformClick();
+         Check(((IList)Store("LoadPending", workspace)!).Count == 0, "revert staged changes clears persistent intent");
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        row.Cells["FuelCapacity"].Value = 160m;
+         tab.PerformLayout(); using var bitmap = new Bitmap(tab.Width, tab.Height); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size));
+         bitmap.Save(Path.Combine(AppContext.BaseDirectory, "truck-properties-preview.png"));
+         if (args.Length > 0)

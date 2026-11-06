@@ -1,0 +1,650 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 9667d7b..a8673ba 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -191,6 +191,9 @@ internal sealed class MainForm : Form
+             catch (Exception ex) { AppendLog($"Workspace preload failed: {ex.Message}"); }
+         };
+         Controls.Add(tabs);
++        var search = new CurrentTabSearch(() => tabs.SelectedTab);
++        search.Attach(this);
++        Disposed += (_, _) => search.Dispose();
+         _openButton.Enabled = false;
+         _packButton.Enabled = false;
+     }
+diff --git a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+index d9fd77e..c55c6e7 100644
+--- a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
++++ b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+@@ -28,7 +28,7 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+         _input = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search any text..." };
+         _hint = new Label
+         {
+-            Dock = DockStyle.Bottom, Height = 24, Text = "Type to search    Esc: close",
++            Dock = DockStyle.Bottom, Height = 24, Text = "Type 3+ characters    Esc: close",
+             TextAlign = ContentAlignment.MiddleLeft
+         };
+         _overlay.Controls.Add(_input);
+@@ -40,8 +40,9 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+         root.HandleCreated += HostChanged;
+         _input.TextChanged += (_, _) =>
+         {
+-            var count = _liveSearch(_input.Text);
+-            _hint.Text = _input.Text.Trim().Length == 0 ? "Type to search    Esc: close" :
++            var ready = _input.Text.Trim().Length >= CurrentTabSearch.MinimumLength;
++            var count = _liveSearch(ready ? _input.Text : "");
++            _hint.Text = !ready ? "Type at least 3 characters to search." :
+                 count == 0 ? "No matching text in the current view." :
+                 $"{count} match{(count == 1 ? "" : "es")}    Enter: confirm    Esc: close";
+         };
+@@ -110,7 +111,7 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+         if (!_isOpen) _previousFocus = FindFocused(_root.FindForm() ?? _root);
+         _isOpen = true;
+         _input.Clear();
+-        _hint.Text = "Type to search    Esc: close";
++        _hint.Text = "Type 3+ characters    Esc: close";
+         PositionOverlay(null, EventArgs.Empty);
+         _overlay.Show();
+         _overlay.BringToFront();
+@@ -129,7 +130,7 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+ 
+     private void Confirm()
+     {
+-        if (_input.Text.Trim().Length == 0) { _hint.Text = "Type some text to search."; return; }
++        if (_input.Text.Trim().Length < CurrentTabSearch.MinimumLength) { _hint.Text = "Type at least 3 characters to search."; return; }
+         var query = _input.Text;
+         Close();
+         if (_find(query)) return;
+@@ -149,6 +150,7 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+     }
+ 
+     private void HostDeactivated(object? sender, EventArgs e) { if (_isOpen) Close(restoreFocus: false); }
++    public void Dismiss() => Close(restoreFocus: false);
+ 
+     private static Control? FindFocused(Control root)
+     {
+diff --git a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+index 9381d30..f3d3eda 100644
+--- a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
++++ b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+@@ -29,8 +29,6 @@ private FlowLayoutPanel? _groupList;
+         var wheelFilter = new DirectionalWheelFilter(this);
+         Application.AddMessageFilter(wheelFilter);
+         Disposed += (_, _) => Application.RemoveMessageFilter(wheelFilter);
+-        var search = new QuickSearchOverlay(this, FindTruck, SearchTrucks);
+-        Disposed += (_, _) => search.Dispose();
+         RefreshOwnedTrucks();
+     }
+ 
+@@ -568,45 +566,6 @@ private FlowLayoutPanel? _groupList;
+         UpdateUnsortedPaneWidth();
+     }
+ 
+-    private bool FindTruck(string query) => SearchTrucks(query) > 0;
+-
+-    private int SearchTrucks(string query)
+-    {
+-        query = query.Trim();
+-        var panes = new List<(TileFlowPanel Tiles, Control? Pane)>();
+-        if (_unsortedTiles is not null) panes.Add((_unsortedTiles, null));
+-        panes.AddRange(_groupViews.Select(view => (view.Tiles, (Control?)view.Panel)));
+-        (TileFlowPanel Tiles, Control? Pane, Control? Tile)? first = null;
+-        var count = 0;
+-        foreach (var (tiles, pane) in panes)
+-        {
+-            var view = _groupViews.FirstOrDefault(view => view.Tiles == tiles);
+-            var titlePane = pane ?? tiles.Parent?.Parent;
+-            var paneMatches = query.Length > 0 && string.Join(" ", titlePane?.Text, view?.State.Name, view?.State.Description)
+-                .Contains(query, StringComparison.OrdinalIgnoreCase);
+-            if (view is not null) view.Description.BackColor = paneMatches ? AppColors.Get("EngineMatch") : Color.Transparent;
+-            else if (titlePane is not null) titlePane.BackColor = paneMatches ? AppColors.Get("EngineMatch") : SystemColors.Control;
+-            if (paneMatches) { count++; first ??= (tiles, pane, null); }
+-            foreach (var tile in tiles.Controls.OfType<SearchableTruckTile>())
+-            {
+-                var matches = query.Length > 0 &&
+-                    ((tile.Tag as string)?.Contains(query, StringComparison.OrdinalIgnoreCase) == true ||
+-                     tile.Controls.OfType<Label>().Any(label => label.Text.Contains(query, StringComparison.OrdinalIgnoreCase)));
+-                tile.SearchMatch = matches;
+-                if (!matches) continue;
+-                count++;
+-                first ??= (tiles, pane, tile);
+-            }
+-        }
+-        if (first is { } found)
+-        {
+-            if (found.Pane is not null) _groupList?.ScrollControlIntoView(found.Pane);
+-            if (found.Tile is not null) found.Tiles.ScrollControlIntoView(found.Tile);
+-            _status.Text = $"{count} matching item{(count == 1 ? "" : "s")}.";
+-        }
+-        return count;
+-    }
+-
+     private static Panel CreateTile(CustomTruck truck)
+     {
+         var tile = new SearchableTruckTile
+@@ -798,7 +757,7 @@ private FlowLayoutPanel? _groupList;
+ }
+ 
+ 
+-internal sealed class SearchableTruckTile : Panel
++internal sealed class SearchableTruckTile : Panel, ISearchHighlight
+ {
+     private bool _searchMatch;
+     public event EventHandler? SearchMatchChanged;
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index d590dea..538c502 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -37,7 +37,6 @@ internal sealed class RegionsTrucksTab : UserControl
+     private bool _loading;
+     private bool _updatingTable;
+     private bool _savingAvailability;
+-    private string _searchQuery = "";
+ 
+     public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath, RegionTruckAvailabilityStore? availabilityStore = null)
+     {
+@@ -91,7 +90,7 @@ internal sealed class RegionsTrucksTab : UserControl
+         _showMission.CheckedChanged += (_, _) => ApplyFilter();
+         _trucks.CurrentCellChanged += (_, _) => ShowDetails();
+         _trucks.DataBindingComplete += (_, _) => { ConfigureAvailabilityCells(); ShowDetails(); };
+-        _trucks.Sorted += (_, _) => { ConfigureAvailabilityCells(); SearchTrucks(_searchQuery); };
++        _trucks.Sorted += (_, _) => ConfigureAvailabilityCells();
+         _trucks.CellBeginEdit += (_, e) =>
+         {
+             e.Cancel = _trucks.Columns[e.ColumnIndex].Name != "Availability"
+@@ -105,8 +104,6 @@ internal sealed class RegionsTrucksTab : UserControl
+                 _trucks.CommitEdit(DataGridViewDataErrorContexts.Commit);
+         };
+         _trucks.CellValueChanged += AvailabilityChanged;
+-        var search = new QuickSearchOverlay(this, FindTruck, SearchTrucks);
+-        Disposed += (_, _) => search.Dispose();
+         AppColors.Changed += PaletteChanged;
+         Disposed += (_, _) => AppColors.Changed -= PaletteChanged;
+         PaletteChanged(this, EventArgs.Empty);
+@@ -204,8 +201,7 @@ internal sealed class RegionsTrucksTab : UserControl
+         foreach (var (code, tile) in _tiles)
+         {
+             var selected = _selectedRegions.Contains(code);
+-            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : tile is RegionTileButton { SearchMatch: true }
+-                ? AppColors.Get("EngineMatch") : Color.FromArgb(32, 38, 45);
++            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : Color.FromArgb(32, 38, 45);
+             tile.ForeColor = tile.BackColor.GetBrightness() < 0.55f ? Color.White : Color.Black;
+             tile.FlatAppearance.BorderSize = selected ? 3 : 1;
+             tile.FlatAppearance.BorderColor = selected ? SystemColors.Highlight : Color.FromArgb(70, 80, 90);
+@@ -243,7 +239,6 @@ internal sealed class RegionsTrucksTab : UserControl
+             + "Double-tap Shift to search. Unverified rows are always visible; use their Availability dropdown to resolve them.";
+         if (_catalog.MapsRead == 0) _status.Text = "No supported map files found. Choose the folder containing level_*.pak or extracted level folders.";
+         ShowDetails();
+-        SearchTrucks(_searchQuery);
+     }
+ 
+     private void ConfigureAvailabilityCells()
+@@ -324,44 +319,6 @@ internal sealed class RegionsTrucksTab : UserControl
+         }
+     }
+ 
+-    private bool FindTruck(string query)
+-    {
+-        if (SearchTrucks(query) == 0) return false;
+-        var first = _trucks.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => MatchesSearch(row, query.Trim()));
+-        if (first is not null) _trucks.CurrentCell = first.Cells["Truck"];
+-        else _tiles.Values.OfType<RegionTileButton>().FirstOrDefault(tile => tile.SearchMatch)?.Focus();
+-        return true;
+-    }
+-
+-    private int SearchTrucks(string query)
+-    {
+-        _searchQuery = query.Trim();
+-        var matches = _trucks.Rows.Cast<DataGridViewRow>().Where(row => MatchesSearch(row, _searchQuery)).ToArray();
+-        var matching = matches.ToHashSet();
+-        foreach (DataGridViewRow row in _trucks.Rows)
+-            row.DefaultCellStyle.BackColor = matching.Contains(row) ? AppColors.Get("EngineMatch") : Color.Empty;
+-        if (matches.Length > 0 && _trucks.IsHandleCreated) _trucks.FirstDisplayedScrollingRowIndex = matches[0].Index;
+-        var regionMatches = new List<RegionTileButton>();
+-        foreach (var tile in _tiles.Values.OfType<RegionTileButton>())
+-        {
+-            tile.SearchMatch = _searchQuery.Length > 0 && string.Join(" ", tile.RegionName, tile.ReleaseLabel, tile.Summary, tile.Tag)
+-                .Contains(_searchQuery, StringComparison.CurrentCultureIgnoreCase);
+-            if (tile.SearchMatch) regionMatches.Add(tile);
+-        }
+-        RefreshTiles();
+-        if (regionMatches.Count > 0 && _regions.IsHandleCreated) _regions.ScrollControlIntoView(regionMatches[0]);
+-        return matches.Length + regionMatches.Count;
+-    }
+-
+-    private static bool MatchesSearch(DataGridViewRow row, string query) => query.Length > 0
+-        && row.DataBoundItem is DataRowView view && view["Entry"] is RegionTruckEntry entry
+-        && string.Join(" ", row.Cells.Cast<DataGridViewCell>().Where(cell => cell.OwningColumn?.Visible == true)
+-                .Select(cell => Convert.ToString(cell.FormattedValue)).Append(entry.MapCode).Append(entry.TireDetails)
+-                .Append(entry.AddonDetails).Append(entry.FrameAddonDetails).Append(entry.Evidence).Append(entry.Source)
+-                .Append(string.Join(" ", (entry.InstalledAddons ?? []).Select(item => $"{item.Id} {item.Name} {item.Category} {item.SourcePath} {item.Group}")))
+-                .Append($"{entry.X:0.##}, {entry.Y:0.##}, {entry.Z:0.##}"))
+-            .Contains(query, StringComparison.CurrentCultureIgnoreCase);
+-
+     private void ShowDetails()
+     {
+         _details.Clear();
+diff --git a/src/SnowPakTool.Desktop/RegionTileButton.cs b/src/SnowPakTool.Desktop/RegionTileButton.cs
+index 474cf8f..a89d96c 100644
+--- a/src/SnowPakTool.Desktop/RegionTileButton.cs
++++ b/src/SnowPakTool.Desktop/RegionTileButton.cs
+@@ -3,7 +3,7 @@ using System.ComponentModel;
+ namespace SnowPakTool.Desktop;
+ 
+ /// <summary>A keyboard-selectable region card using the same dimensions and header style as truck tiles.</summary>
+-internal sealed class RegionTileButton : Button
++internal sealed class RegionTileButton : Button, ISearchHighlight, ISearchTextContent
+ {
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal string RegionName { get; init; } = "";
+@@ -13,6 +13,8 @@ internal sealed class RegionTileButton : Button
+     internal string Summary { get; set; } = "";
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal bool SearchMatch { get; set; }
++    bool ISearchHighlight.SearchMatch { get => SearchMatch; set { SearchMatch = value; Invalidate(); } }
++    IEnumerable<string?> ISearchTextContent.GetSearchText() => [RegionName, ReleaseLabel, Summary];
+     // Cached by RegionTileAssets and shared by every tile for this region.
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal Image? Thumbnail { get; init; }
+@@ -25,12 +27,14 @@ internal sealed class RegionTileButton : Button
+     protected override void OnPaint(PaintEventArgs e)
+     {
+         var graphics = e.Graphics;
+-        graphics.Clear(BackColor);
++        var backgroundColor = SearchMatch ? AppColors.Get("EngineMatch") : BackColor;
++        var textColor = SearchMatch ? SystemColors.ControlText : ForeColor;
++        graphics.Clear(backgroundColor);
+         var border = Math.Max(1, FlatAppearance.BorderSize);
+         var inner = new Rectangle(border, border, Math.Max(1, Width - 2 * border), Math.Max(1, Height - 2 * border));
+         var header = new Rectangle(inner.X, inner.Y, inner.Width, 30);
+         using var headerFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8.5f, FontStyle.Bold);
+-        TextRenderer.DrawText(graphics, RegionName, headerFont, header, ForeColor,
++        TextRenderer.DrawText(graphics, RegionName, headerFont, header, textColor,
+             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+ 
+         var footerHeight = 24 + 14 * Math.Max(1, Summary.Split('\n').Length);
+@@ -48,11 +52,11 @@ internal sealed class RegionTileButton : Button
+ 
+         var release = new Rectangle(inner.X + 2, picture.Bottom + 2, inner.Width - 4, 15);
+         using var releaseFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 7.5f, FontStyle.Bold);
+-        TextRenderer.DrawText(graphics, ReleaseLabel, releaseFont, release, ForeColor,
++        TextRenderer.DrawText(graphics, ReleaseLabel, releaseFont, release, textColor,
+             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+         var summary = new Rectangle(inner.X + 2, release.Bottom, inner.Width - 4, inner.Bottom - release.Bottom);
+         using var summaryFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8f);
+-        TextRenderer.DrawText(graphics, Summary, summaryFont, summary, ForeColor,
++        TextRenderer.DrawText(graphics, Summary, summaryFont, summary, textColor,
+             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+         using var pen = new Pen(FlatAppearance.BorderColor, border);
+         graphics.DrawRectangle(pen, border / 2f, border / 2f, Width - border, Height - border);
+diff --git a/src/SnowPakTool.Desktop/TrucksCargoTab.cs b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index afcf426..5044884 100644
+--- a/src/SnowPakTool.Desktop/TrucksCargoTab.cs
++++ b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -5,7 +5,6 @@ namespace SnowPakTool.Desktop;
+ internal sealed class TrucksCargoTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+-    private readonly TextBox _search = new() { Width = 260, PlaceholderText = "Search cargo, type, variant or DLC…" };
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
+     private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+     private readonly DataGridView _cargo = CreateGrid();
+@@ -25,7 +24,6 @@ internal sealed class TrucksCargoTab : UserControl
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+         toolbar.Controls.Add(new Label { Text = "Trucks-Cargo", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+-        toolbar.Controls.Add(_search);
+         var reload = new Button { Text = "Reload cargo", AutoSize = true };
+         toolbar.Controls.Add(reload);
+         layout.Controls.Add(toolbar, 0, 0);
+@@ -38,7 +36,6 @@ internal sealed class TrucksCargoTab : UserControl
+         _properties.Columns.Add("Value", "Value");
+         _properties.Columns.Add("Source", "Source file");
+         _properties.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+-        _search.TextChanged += (_, _) => ApplyFilter();
+         _cargo.CurrentCellChanged += (_, _) => ShowProperties();
+         _cargo.DataBindingComplete += (_, _) => ShowProperties();
+         reload.Click += async (_, _) =>
+@@ -90,9 +87,7 @@ internal sealed class TrucksCargoTab : UserControl
+     private void ApplyFilter()
+     {
+         if (_catalog is null) return;
+-        var query = _search.Text.Trim();
+-        var visible = _catalog.Entries.Where(entry => string.Join(" ", entry.Name, entry.Type, entry.Variant,
+-            entry.Content, entry.Description, entry.TypeFile, entry.AddonFile).Contains(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
++        var visible = _catalog.Entries;
+         var table = new DataTable();
+         foreach (var column in new[] { "Cargo", "Cargo type", "Variant", "Content" }) table.Columns.Add(column);
+         foreach (var column in new[] { "Cargo length (slots)", "Body mass sum (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
+@@ -108,7 +103,7 @@ internal sealed class TrucksCargoTab : UserControl
+             if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
+         }
+         _cargo.Columns["Cargo value"]!.DefaultCellStyle.Format = "0.###";
+-        _status.Text = $"{visible.Length} / {_catalog.Entries.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
++        _status.Text = $"{visible.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
+             + "Blank = not defined. Log cargo length uses carrier slots.";
+         if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} file(s) could not be read (see details).";
+         ShowProperties();
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 7ca3574..053a273 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -2,6 +2,8 @@
+ 
+ A small Windows Forms interface over the original SnowPakTool source classes. The workflow keeps the source PAK intact, extracts both the outer PAK and its `initial.cache_block`, opens the workspace for manual edits, and creates a new PAK at a selected output path.
+ 
++All desktop tabs use one shared text search: double-tap **Shift**, then enter at least **3 characters**. Matching text is highlighted in the current tab and its selected sub-tab, including control labels/values, table headers/cells, tooltips and attached detail data. Inactive tabs are excluded. Search never filters rows or changes checkbox/dropdown values. **Enter** brings the first match into view and focuses it. **Esc**, an outside click, changing tabs or switching windows dismisses the popup and clears highlights. Results refresh when current-tab data changes.
++
+ ## Run
+ 
+ ### Double-click the published app
+@@ -22,9 +24,9 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+-The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
++The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
+-The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: any nonempty text highlights matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
++The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: at least three characters highlight matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
+ Region tiles retain their 150 × 210 size and are sorted by original release order: the base-game regions followed by seasons 1–19. Each tile has a region-name header, a representative map screenshot from [MapRunner](https://www.maprunner.info/), and a season/counts footer. Thumbnails are embedded for offline use; the source manifest is in `Assets/Regions/sources.json`. Unrecognized future region IDs sort after known releases and retain a text fallback.
+ 
+diff --git a/src/SnowPakTool.Desktop/CurrentTabSearch.cs b/src/SnowPakTool.Desktop/CurrentTabSearch.cs
+new file mode 100644
+index 0000000..5a8c78b
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/CurrentTabSearch.cs
+@@ -0,0 +1,279 @@
++using System.Collections;
++using System.Data;
++using System.Globalization;
++using System.Reflection;
++
++namespace SnowPakTool.Desktop;
++
++internal interface ISearchHighlight
++{
++    bool SearchMatch { get; set; }
++}
++
++internal interface ISearchTextContent
++{
++    IEnumerable<string?> GetSearchText();
++}
++
++/// <summary>One text search for every page: selected sub-tabs, controls, tables and their attached data.</summary>
++internal sealed class CurrentTabSearch : IDisposable
++{
++    internal const int MinimumLength = 3;
++    private sealed record Hit(Action Highlight, Action Restore, Action<bool> Navigate);
++    private readonly Func<Control?> _getScope;
++    private readonly List<Hit> _hits = [];
++    private readonly HashSet<Control> _watched = [];
++    private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 100 };
++    private QuickSearchOverlay? _popup;
++    private string _query = "";
++    private bool _disposed;
++
++    public CurrentTabSearch(Func<Control?> getScope)
++    {
++        _getScope = getScope;
++        _refresh.Tick += (_, _) => { _refresh.Stop(); if (_query.Length >= MinimumLength) Search(_query); };
++    }
++
++    public void Attach(Control owner)
++    {
++        if (_popup is not null) throw new InvalidOperationException("Search is already attached.");
++        _popup = new QuickSearchOverlay(owner, Find, Search);
++        Watch(owner);
++    }
++
++    public int Search(string query)
++    {
++        Clear();
++        _query = query.Trim();
++        if (_query.Length < MinimumLength || _getScope() is not { IsDisposed: false } scope) return 0;
++        Visit(scope);
++        foreach (var hit in _hits) hit.Highlight();
++        if (_hits.Count > 0) _hits[0].Navigate(false);
++        return _hits.Count;
++    }
++
++    public bool Find(string query)
++    {
++        if (Search(query) == 0) return false;
++        _hits[0].Navigate(true);
++        return true;
++    }
++
++    public void Clear()
++    {
++        _refresh.Stop();
++        foreach (var hit in _hits) hit.Restore();
++        _hits.Clear();
++        _query = "";
++    }
++
++    private bool Matches(string? text) => text?.Contains(_query, StringComparison.CurrentCultureIgnoreCase) == true;
++
++    private void Visit(Control control)
++    {
++        if (control.IsDisposed || !control.Visible) return;
++        if (control is TabControl tabs)
++        {
++            if (tabs.SelectedTab is not null) Visit(tabs.SelectedTab);
++            return; // Never index inactive tab pages or their values.
++        }
++        if (control is DataGridView grid) { VisitGrid(grid); return; }
++        if (control is ISearchHighlight highlight)
++        {
++            if (ControlStrings(control, includeChildren: true).Any(Matches))
++            {
++                var previous = highlight.SearchMatch;
++                _hits.Add(new(() => highlight.SearchMatch = true,
++                    () => { if (!control.IsDisposed) highlight.SearchMatch = previous; }, focus => Reveal(control, focus)));
++            }
++            return;
++        }
++        if (ControlStrings(control, includeChildren: false).Any(Matches)) AddControl(control);
++        foreach (Control child in control.Controls) Visit(child);
++    }
++
++    private static IEnumerable<string?> ControlStrings(Control control, bool includeChildren)
++    {
++        yield return control.Text;
++        yield return control.AccessibleName;
++        yield return control.AccessibleDescription;
++        foreach (var text in ValueStrings(control.Tag)) yield return text;
++        if (control is ISearchTextContent custom)
++            foreach (var text in custom.GetSearchText()) yield return text;
++        if (control is ComboBox combo)
++            foreach (var item in combo.Items) yield return combo.GetItemText(item);
++        if (control is ListBox list)
++            foreach (var item in list.Items) yield return list.GetItemText(item);
++        if (includeChildren)
++            foreach (Control child in control.Controls)
++                if (child.Visible)
++                    foreach (var text in ControlStrings(child, true)) yield return text;
++    }
++
++    private static IEnumerable<string?> ValueStrings(object? value, int depth = 0)
++    {
++        if (value is null or DBNull || depth > 6) yield break;
++        if (value is string text) { yield return text; yield break; }
++        if (value is IFormattable formatted) { yield return formatted.ToString(null, CultureInfo.CurrentCulture); yield break; }
++        if (value is DataRowView row)
++        {
++            foreach (var item in row.Row.ItemArray)
++                foreach (var part in ValueStrings(item, depth + 1)) yield return part;
++            yield break;
++        }
++        if (value is IEnumerable items)
++        {
++            foreach (var item in items)
++                foreach (var part in ValueStrings(item, depth + 1)) yield return part;
++            yield break;
++        }
++        // Only inspect our data records, never arbitrary UI/native object graphs.
++        if (value.GetType().Namespace != typeof(CurrentTabSearch).Namespace) yield break;
++        foreach (var property in value.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
++            if (property.CanRead && property.GetIndexParameters().Length == 0)
++                foreach (var part in ValueStrings(property.GetValue(value), depth + 1)) yield return part;
++    }
++
++    private void AddControl(Control control)
++    {
++        var previous = control.BackColor;
++        var previousText = control.ForeColor;
++        var themedButton = control is ButtonBase button && button.UseVisualStyleBackColor;
++        var color = AppColors.Get("EngineMatch");
++        _hits.Add(new(() => { control.BackColor = color; control.ForeColor = SystemColors.ControlText; },
++            () =>
++            {
++                if (control.IsDisposed || control.BackColor != color) return;
++                control.BackColor = previous;
++                if (control.ForeColor == SystemColors.ControlText) control.ForeColor = previousText;
++                if (control is ButtonBase restoreButton) restoreButton.UseVisualStyleBackColor = themedButton;
++            },
++            focus =>
++            {
++                Reveal(control, focus);
++                if (focus && control is TextBoxBase text && text.Text.IndexOf(_query, StringComparison.CurrentCultureIgnoreCase) is var index && index >= 0)
++                { text.Select(index, _query.Length); text.ScrollToCaret(); }
++            }));
++    }
++
++    private void VisitGrid(DataGridView grid)
++    {
++        foreach (DataGridViewColumn column in grid.Columns)
++            if (column.Visible && grid.ColumnHeadersVisible && (Matches(column.HeaderText) || Matches(column.HeaderCell.ToolTipText)))
++                AddCell(grid, column.HeaderCell, null, column.Index);
++        foreach (DataGridViewRow row in grid.Rows)
++        {
++            if (row.IsNewRow || !row.Visible) continue;
++            var foundCell = false;
++            foreach (DataGridViewCell cell in row.Cells)
++            {
++                if (cell.OwningColumn?.Visible != true) continue;
++                if (Matches(Convert.ToString(cell.FormattedValue, CultureInfo.CurrentCulture)) || Matches(cell.ToolTipText))
++                { AddCell(grid, cell, row, cell.ColumnIndex); foundCell = true; }
++            }
++            if (foundCell) continue;
++            var metadata = ValueStrings(row.DataBoundItem).Concat(ValueStrings(row.Tag))
++                .Concat(row.Cells.Cast<DataGridViewCell>().Where(cell => cell.OwningColumn?.Visible == false).SelectMany(cell => ValueStrings(cell.Value)));
++            if (metadata.Any(Matches) && row.Cells.Cast<DataGridViewCell>().FirstOrDefault(cell => cell.OwningColumn?.Visible == true) is { } first)
++                AddCell(grid, first, row, first.ColumnIndex);
++        }
++    }
++
++    private void AddCell(DataGridView grid, DataGridViewCell cell, DataGridViewRow? row, int column)
++    {
++        var color = AppColors.Get("EngineMatch");
++        var previous = cell.Style.BackColor;
++        var previousText = cell.Style.ForeColor;
++        var themedHeaders = grid.EnableHeadersVisualStyles;
++        _hits.Add(new(() =>
++            {
++                if (row is null) grid.EnableHeadersVisualStyles = false;
++                cell.Style.BackColor = color;
++                cell.Style.ForeColor = SystemColors.ControlText;
++            },
++            () =>
++            {
++                if (grid.IsDisposed) return;
++                if (cell.Style.BackColor == color) { cell.Style.BackColor = previous; cell.Style.ForeColor = previousText; }
++                if (row is null) grid.EnableHeadersVisualStyles = themedHeaders;
++            }, focus =>
++            {
++                if (grid.IsDisposed || !grid.IsHandleCreated) return;
++                Reveal(grid, false);
++                if (row is { Index: >= 0, Visible: true })
++                {
++                    if (!row.Frozen && grid.DisplayedRowCount(true) > 0) grid.FirstDisplayedScrollingRowIndex = row.Index;
++                    if (focus) grid.CurrentCell = row.Cells[column];
++                }
++                if (column < grid.Columns.Count && grid.DisplayedColumnCount(true) > 0
++                    && grid.Columns[column] is { Visible: true, Frozen: false })
++                    grid.FirstDisplayedScrollingColumnIndex = column;
++                if (focus) grid.Focus();
++            }));
++    }
++
++    private static void Reveal(Control control, bool focus)
++    {
++        if (control.IsDisposed) return;
++        for (var parent = control.Parent; parent is not null; parent = parent.Parent)
++            if (parent is ScrollableControl { AutoScroll: true } scroll) scroll.ScrollControlIntoView(control);
++        if (focus && control.CanFocus) control.Focus();
++    }
++
++    private void Watch(Control control)
++    {
++        if (!_watched.Add(control)) return;
++        control.ControlAdded += ControlAdded;
++        control.TextChanged += ContentChanged;
++        control.Disposed += ControlDisposed;
++        if (control is TabControl tabs) tabs.SelectedIndexChanged += TabChanged;
++        if (control is DataGridView grid)
++        {
++            grid.DataBindingComplete += GridBound;
++            grid.Sorted += ContentChanged;
++            grid.CellValueChanged += GridCellChanged;
++            grid.RowsAdded += GridRowsAdded;
++            grid.RowsRemoved += GridRowsRemoved;
++        }
++        foreach (Control child in control.Controls) Watch(child);
++    }
++
++    private void ControlAdded(object? sender, ControlEventArgs e) { if (e.Control is not null) Watch(e.Control); ContentChanged(sender, e); }
++    private void ControlDisposed(object? sender, EventArgs e) { if (sender is Control control) Unwatch(control); }
++    private void TabChanged(object? sender, EventArgs e) { if (sender is Control { Visible: true }) { _popup?.Dismiss(); Clear(); } }
++    private void GridBound(object? sender, DataGridViewBindingCompleteEventArgs e) => ContentChanged(sender, e);
++    private void GridCellChanged(object? sender, DataGridViewCellEventArgs e) => ContentChanged(sender, e);
++    private void GridRowsAdded(object? sender, DataGridViewRowsAddedEventArgs e) => ContentChanged(sender, e);
++    private void GridRowsRemoved(object? sender, DataGridViewRowsRemovedEventArgs e) => ContentChanged(sender, e);
++    private void ContentChanged(object? sender, EventArgs e)
++    {
++        if (!_disposed && _query.Length >= MinimumLength && sender is Control control && _getScope() is { } scope
++            && (control == scope || scope.Contains(control))) { _refresh.Stop(); _refresh.Start(); }
++    }
++
++    public void Dispose()
++    {
++        if (_disposed) return;
++        _disposed = true;
++        _popup?.Dispose();
++        Clear();
++        _refresh.Dispose();
++        foreach (var control in _watched.ToArray()) Unwatch(control);
++        _watched.Clear();
++    }
++
++    private void Unwatch(Control control)
++    {
++        _watched.Remove(control);
++        control.ControlAdded -= ControlAdded;
++        control.TextChanged -= ContentChanged;
++        control.Disposed -= ControlDisposed;
++        if (control is TabControl tabs) tabs.SelectedIndexChanged -= TabChanged;
++        if (control is not DataGridView grid) return;
++        grid.DataBindingComplete -= GridBound;
++        grid.Sorted -= ContentChanged;
++        grid.CellValueChanged -= GridCellChanged;
++        grid.RowsAdded -= GridRowsAdded;
++        grid.RowsRemoved -= GridRowsRemoved;
++    }
++}
+diff --git a/README.md b/README.md
+index 4e5ab47..456c317 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,8 @@ but require a bit of special handling to create.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 
++All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
++
+ Run it from the repository root with:
+ 
+ ```powershell

@@ -1,0 +1,128 @@
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,8 @@
+ * Packing/unpacking _initial.pak\initial.cache_block_ (various game data: UI layout, settings, translations, etc.)
+ 
+ ### SnowPakTool Desktop UI
++
++**Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+ **Start → Map files** groups truck/equipment changes (obtainable, mission and manual) across maps into one summary per region and state. Applied and pending rows retain their distinct colors. Summaries show change/map counts without replacement identities; hover to see the contributing map IDs and counts. Map repair and other metadata warnings remain separate rows. **Discard selected pending changes** discards the staged changes represented by that region summary in one atomic update; other regions, applied assignments and unstaged drafts remain intact. Pending badges and Apply still count/use individual changes.
+ 
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -5,6 +5,7 @@
+ 
+ internal sealed class StartChangesPanel : UserControl
+ {
++    private sealed record PakChangeGroup(string TruckCode, IReadOnlyList<WorkspaceChange> Changes);
+     private sealed record MapChangeGroup(string RegionCode, IReadOnlyList<WorkspaceChange> Changes);
+ 
+     private readonly Func<string> _workspace;
+@@ -82,6 +83,12 @@
+         };
+         _maps.CurrentCellChanged += (_, _) => _discardMap.Enabled = _maps.CurrentRow?.DataBoundItem is DataRowView row
+             && row["Entry"] is MapChangeGroup group && group.Changes.Any(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0);
++        _pak.CellToolTipTextNeeded += (_, e) =>
++        {
++            if (e.RowIndex < 0 || _pak.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not PakChangeGroup group) return;
++            e.ToolTipText = string.Join(Environment.NewLine, group.Changes.Select(change =>
++                $"{change.Target}{Environment.NewLine}{change.Property}: {change.Before} → {change.After}"));
++        };
+         _maps.CellToolTipTextNeeded += (_, e) =>
+         {
+             if (e.RowIndex < 0 || _maps.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not MapChangeGroup group) return;
+@@ -98,19 +105,20 @@
+         if (InvokeRequired)
+         { await InvokeAsync(async (CancellationToken _) => { await RefreshAsync(); }); return; }
+         var request = ++_request; var workspace = _workspace().Trim();
+-        if (_displayedWorkspace != workspace) { Bind(_pak, []); BindMaps([], new Dictionary<string, string>()); _displayedWorkspace = workspace; }
++        if (_displayedWorkspace != workspace) { BindPak([], new Dictionary<string, (string Name, string Class)>()); BindMaps([], new Dictionary<string, string>()); _displayedWorkspace = workspace; }
+         _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
+-        if (!Directory.Exists(workspace)) { Bind(_pak, []); BindMaps([], new Dictionary<string, string>()); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
++        if (!Directory.Exists(workspace)) { BindPak([], new Dictionary<string, (string Name, string Class)>()); BindMaps([], new Dictionary<string, string>()); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
+         _status.Text = "Comparing files…"; _refresh.Enabled = false;
+         try
+         {
+             var pending = _pendingPak(workspace);
+-            var result = await Task.Run(() => (Pak: WorkspaceChangeAudit.PakFiles(workspace), Maps: WorkspaceChangeAudit.MapFiles(workspace)));
++            var result = await Task.Run(() => (Pak: WorkspaceChangeAudit.PakFiles(workspace), Maps: WorkspaceChangeAudit.MapFiles(workspace),
++                Trucks: RegionTruckCatalogService.LoadTrucks(workspace, WorkspaceDataCache.GetLocalizedNames(workspace), [])));
+             if (IsDisposed) return;
+             await InvokeAsync(() =>
+             {
+                 if (request != _request || workspace != _workspace().Trim()) return;
+-                Bind(_pak, result.Pak.Concat(pending).ToArray()); BindMaps(result.Maps, WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase));
++                BindPak(result.Pak.Concat(pending).ToArray(), result.Trucks); BindMaps(result.Maps, WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase));
+                 _savePakButton.Enabled = pending.Count > 0;
+                 _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
+                 _repairMaps.Enabled = result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
+@@ -135,14 +143,60 @@
+         BackgroundColor = AppColors.Get("Surface"), ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold) },
+         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowTemplate = { Height = 26 } };
+ 
+-    private static void Bind(DataGridView grid, IReadOnlyList<WorkspaceChange> changes)
+-    {
+-        var data = new DataTable(); foreach (var column in new[] { "State", "File / target", "Change", "Before", "After" }) data.Columns.Add(column);
+-        data.Columns.Add("Entry", typeof(WorkspaceChange));
+-        foreach (var change in changes) data.Rows.Add(change.State, change.Target, change.Property, change.Before, change.After, change);
+-        TableHeaderBehavior.Attach(grid);
+-        grid.DataSource = data; grid.Columns["Entry"]!.Visible = false; grid.Columns["State"]!.FillWeight = 45;
+-        PaintRows(grid);
++    private void BindPak(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, (string Name, string Class)> trucks)
++    {
++        string Truck(WorkspaceChange change)
++        {
++            var path = change.Target.Replace('\\', '/');
++            var match = Regex.Match(path, @"(?:^|/)classes/trucks/([^/]+)\.xml$", RegexOptions.IgnoreCase);
++            var code = match.Groups[1].Value;
++            return trucks.ContainsKey(code) ? code : "";
++        }
++        var groups = changes.Select((change, index) => (Change: change, Code: Truck(change), Index: index))
++            .GroupBy(item => (item.Change.State, Key: item.Code.Length > 0 ? "truck:" + item.Code.ToLowerInvariant() : "entry:" + item.Index))
++            .Select(group => new PakChangeGroup(group.First().Code, group.Select(item => item.Change).ToArray()));
++        var data = new DataTable();
++        foreach (var column in new[] { "State", "File / target", "Change" }) data.Columns.Add(column);
++        data.Columns.Add("Entry", typeof(PakChangeGroup));
++        foreach (var group in groups)
++        {
++            var first = group.Changes[0];
++            var target = group.TruckCode.Length > 0 ? trucks[group.TruckCode].Name : first.Target;
++            var parts = group.Changes.Select(change => BriefPakChange(change, group.TruckCode.Length > 0 ? target : "")).ToArray();
++            var summary = string.Join("; ", parts.Take(3)) + (parts.Length > 3 ? $"; +{parts.Length - 3} more" : "");
++            data.Rows.Add(first.State, target, summary, group);
++        }
++        TableHeaderBehavior.Attach(_pak);
++        _pak.DataSource = data; _pak.Columns["Entry"]!.Visible = false;
++        _pak.Columns["State"]!.FillWeight = 35;
++        _pak.Columns["File / target"]!.HeaderText = "Truck / target";
++        _pak.Columns["File / target"]!.FillWeight = 90;
++        _pak.Columns["Change"]!.HeaderText = "Summary";
++        _pak.Columns["Change"]!.FillWeight = 220;
++        PaintRows(_pak);
++    }
++
++    private static string BriefPakChange(WorkspaceChange change, string truckName)
++    {
++        var property = change.Property;
++        foreach (var separator in new[] { ": ", " / " })
++            if (truckName.Length > 0 && property.StartsWith(truckName + separator, StringComparison.OrdinalIgnoreCase)) property = property[(truckName.Length + separator.Length)..];
++        var attribute = Regex.Match(property, @"/@([^/]+)$").Groups[1].Value;
++        property = attribute switch
++        {
++            "FuelCapacity" => "Fuel capacity (L)", "Price" => "Price", "UnlockByRank" => "Unlock rank",
++            "UnlockByExploration" => "Unlock by exploration", "UiName" => "Name",
++            "Type" when property.Contains("EngineSocket", StringComparison.Ordinal) => "Engine compatibility",
++            "Type" when property.Contains("WinchUpgradeSocket", StringComparison.Ordinal) => "Winch compatibility",
++            "Default" when property.Contains("EngineSocket", StringComparison.Ordinal) => "Default engine",
++            "Default" when property.Contains("WinchUpgradeSocket", StringComparison.Ordinal) => "Default winch",
++            _ when attribute.Length > 0 => Regex.Replace(attribute, @"([a-z])([A-Z])", "$1 $2"),
++            _ => property
++        };
++        var before = Regex.Replace(change.Before, @"\s+", " ").Trim();
++        var after = Regex.Replace(change.After, @"\s+", " ").Trim();
++        return before.Length + after.Length > 64 || before.Contains("<", StringComparison.Ordinal) || after.Contains("<", StringComparison.Ordinal)
++            ? property + " updated" : $"{property}: {before} → {after}";
+     }
+ 
+     private void BindMaps(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, string> regionNames)

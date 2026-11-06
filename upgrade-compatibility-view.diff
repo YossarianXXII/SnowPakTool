@@ -1,0 +1,226 @@
+diff --git "a/.checks\\UpgradeCompatibilityBaseline\\README.md" b/README.md
+index 4b16f4f..af5f68b 100644
+--- "a/.checks\\UpgradeCompatibilityBaseline\\README.md"
++++ b/README.md
+@@ -18,7 +18,7 @@ A **slot-based upgrade preview trial** is available in **Randomizer → Upgrades
+ 
+ **Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+-**Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows original/preview names, types, compatible truck IDs, source zone and change state. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions remove preview assignments only. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Upgrade Stage/Apply is disabled in this trial.** No XML, SSO, map archive or installed game file is changed by randomizing/resetting upgrades; trial previews are not added to Start's staged changes.
++**Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions remove preview assignments only. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Upgrade Stage/Apply is disabled in this trial.** No XML, SSO, map archive or installed game file is changed by randomizing/resetting upgrades; trial previews are not added to Start's staged changes.
+ 
+ **Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+diff --git "a/.checks\\UpgradeCompatibilityBaseline\\MapUpgradesTab.cs" b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+index a288a92..a98f495 100644
+--- "a/.checks\\UpgradeCompatibilityBaseline\\MapUpgradesTab.cs"
++++ b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+@@ -2,7 +2,7 @@ using System.Data;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed class MapUpgradesTab : UserControl
++internal sealed partial class MapUpgradesTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Func<bool, Task<UpgradeTrialCatalog>>? _getCatalog;
+@@ -28,6 +28,7 @@ internal sealed class MapUpgradesTab : UserControl
+     private UpgradeTrialDraft? _draft;
+     private string? _selectionWorkspace;
+     private bool _loading;
++    private IReadOnlyDictionary<string, string> _truckNames = new Dictionary<string, string>();
+ 
+     public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath,
+         Func<bool, Task<UpgradeTrialCatalog>>? getCatalog = null)
+@@ -53,9 +54,9 @@ internal sealed class MapUpgradesTab : UserControl
+         layout.Controls.Add(_status, 0, 3);
+         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500), SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6 };
+         var headers = TableHeaderBehavior.Attach(_upgrades); headers.Changed += () => { UpdateButtons(); ShowDetails(); };
+-        foreach (var name in new[] { "Region", "Map", "Original upgrade", "Upgrade", "Type", "Compatible truck IDs", "Placement ID", "Upgrade ID", "Change state" })
++        foreach (var name in new[] { "Region", "Map", "Compatible trucks", "Upgrade", "Type", "Placement ID", "Upgrade ID", "Change state" })
+             _upgrades.Columns.Add(new DataGridViewTextBoxColumn { Name = name, HeaderText = name, DataPropertyName = name,
+-                Width = name is "Upgrade" or "Original upgrade" ? 200 : name is "Compatible truck IDs" or "Placement ID" or "Upgrade ID" ? 260 : 145,
++                Width = name == "Compatible trucks" ? 420 : name == "Upgrade" ? 280 : name is "Placement ID" or "Upgrade ID" ? 260 : 145,
+                 SortMode = DataGridViewColumnSortMode.Automatic });
+         split.Panel1.Controls.Add(_upgrades); split.Panel2.Controls.Add(_details); layout.Controls.Add(split, 0, 4); Controls.Add(layout);
+         _status.Text = "Open this tab to read upgrade pickups from the original level settings. Preview only; game files stay unchanged.";
+@@ -66,6 +67,7 @@ internal sealed class MapUpgradesTab : UserControl
+         _resetRegions.Click += (_, _) => Reset(_catalog?.AllSlots.Where(s => _selectedRegions.Contains(s.Region)) ?? []);
+         _resetAll.Click += (_, _) => Reset(_catalog?.AllSlots ?? []);
+         _upgrades.CurrentCellChanged += (_, _) => ShowDetails();
++        InitializeCompatibilityHover();
+         AppColors.Changed += PaletteChanged;
+         Disposed += (_, _) => { AppColors.Changed -= PaletteChanged; _tips.Dispose(); };
+         TextAreaStyle.Mark(_details); UpdateButtons();
+@@ -88,8 +90,11 @@ internal sealed class MapUpgradesTab : UserControl
+         try
+         {
+             var catalog = await _getCatalog(force);
++            var truckNames = await Task.Run(() => RegionTruckCatalogService.LoadTrucks(workspace,
++                WorkspaceDataCache.GetLocalizedNames(workspace), new List<string>())
++                .ToDictionary(t => t.Key, t => t.Value.Name, StringComparer.OrdinalIgnoreCase));
+             if (IsDisposed || !workspace.Equals(_getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
+-            _catalog = catalog; _draft = UpgradeTrialStore.Load(workspace);
++            _catalog = catalog; _draft = UpgradeTrialStore.Load(workspace); _truckNames = truckNames;
+             _source.Text = Path.Combine(WorkspaceOriginals.GetOriginalRoot(workspace), "[ps]");
+             if (!workspace.Equals(_selectionWorkspace, StringComparison.OrdinalIgnoreCase))
+             { _selectedRegions.Clear(); _selectedRegions.UnionWith(catalog.AllSlots.Select(s => s.Region)); _selectionWorkspace = workspace; }
+@@ -132,8 +137,9 @@ internal sealed class MapUpgradesTab : UserControl
+             _catalog.Parts.TryGetValue(id, out var part); _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
+             var state = assignment is null ? "Original" : assignment.Path == UpgradeSelectionPath.Fixed ? "Fixed"
+                 : id == slot.OriginalUpgradeId ? "Unchanged" : _draft?.InputStamp == _catalog.Stamp ? "Draft" : "Draft (inputs changed)";
+-            table.Rows.Add(regions.TryGetValue(slot.Region, out var region) ? region.Name : slot.Region, slot.Map, original?.Name ?? slot.OriginalUpgradeId,
+-                part?.Name ?? id, part?.Definition.Kind.ToString() ?? "Unresolved", string.Join(", ", part?.Definition.CompatibleTrucks ?? []), slot.Zone, id, state, slot);
++            table.Rows.Add(regions.TryGetValue(slot.Region, out var region) ? region.Name : slot.Region, slot.Map,
++                string.Join(", ", TruckNames(part)), $"{part?.Name ?? id} ({original?.Name ?? slot.OriginalUpgradeId})",
++                part?.Definition.Kind.ToString() ?? "Unresolved", slot.Zone, id, state, slot);
+         }
+         _upgrades.DataSource = table;
+         foreach (DataGridViewRow row in _upgrades.Rows)
+@@ -167,11 +173,15 @@ internal sealed class MapUpgradesTab : UserControl
+         var assignment = _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot).Equals(UpgradeTrialService.Key(slot), StringComparison.OrdinalIgnoreCase));
+         var id = assignment?.UpgradeId ?? slot.OriginalUpgradeId;
+         _catalog.Parts.TryGetValue(id, out var part);
+-        _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nPreview ID: {id}\r\nDefinition: {part?.Source}\r\nCompatible trucks: {string.Join(", ", part?.Definition.CompatibleTrucks ?? [])}"
++        _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
++        _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nPreview ID: {id}\r\nDefinition: {part?.Source}\r\nNew compatible trucks: {string.Join(", ", TruckNames(part))}\r\nOriginal compatible trucks: {string.Join(", ", TruckNames(original))}"
+             + (assignment is null ? "" : $"\r\nSelection: {assignment.Path}; {assignment.Relation}; fallback={assignment.Fallback}; reused={assignment.Reused}")
+             + "\r\nPreview only. No game files have been changed."
+             + (_catalog.Warnings.Count == 0 ? "" : "\r\nSource warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
++    private string[] TruckNames(UpgradeTrialPart? part) => (part?.Definition.CompatibleTrucks ?? [])
++        .Select(code => _truckNames.GetValueOrDefault(code, code)).Distinct(StringComparer.OrdinalIgnoreCase)
++        .Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
+     private void PaletteChanged(object? sender, EventArgs e) => RefreshTiles();
+     private void RefreshTiles()
+     {
+diff --git a/src/SnowPakTool.Desktop/MapUpgradesHover.cs b/src/SnowPakTool.Desktop/MapUpgradesHover.cs
+new file mode 100644
+index 0000000..065f0b6
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/MapUpgradesHover.cs
+@@ -0,0 +1,124 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed partial class MapUpgradesTab
++{
++    private readonly System.Windows.Forms.Timer _compatibilityHoverTimer = new() { Interval = 350 };
++    private UpgradeDistributionSlot? _hoverSlot;
++    private UpgradeCompatibilityPreview? _compatibilityPreview;
++
++    private void InitializeCompatibilityHover()
++    {
++        _upgrades.CellMouseEnter += (_, e) => ScheduleCompatibilityHover(e.RowIndex, e.ColumnIndex);
++        _upgrades.CellMouseMove += (_, e) => ScheduleCompatibilityHover(e.RowIndex, e.ColumnIndex);
++        _upgrades.CellMouseLeave += (_, _) => HideCompatibilityHover();
++        _upgrades.MouseLeave += (_, _) => HideCompatibilityHover();
++        _upgrades.CellMouseDown += (_, _) => HideCompatibilityHover();
++        _upgrades.Scroll += (_, _) => HideCompatibilityHover();
++        _upgrades.Sorted += (_, _) => HideCompatibilityHover();
++        _upgrades.DataSourceChanged += (_, _) => HideCompatibilityHover();
++        _upgrades.ColumnWidthChanged += (_, _) => HideCompatibilityHover();
++        _upgrades.CellToolTipTextNeeded += (_, e) =>
++        {
++            if (e.ColumnIndex >= 0 && _upgrades.Columns[e.ColumnIndex].Name == "Compatible trucks") e.ToolTipText = "";
++        };
++        VisibleChanged += (_, _) => { if (!Visible) HideCompatibilityHover(); };
++        EnabledChanged += (_, _) => { if (!Enabled) HideCompatibilityHover(); };
++        _compatibilityHoverTimer.Tick += (_, _) => ShowCompatibilityHover();
++        Disposed += (_, _) => { HideCompatibilityHover(); _compatibilityHoverTimer.Dispose(); };
++    }
++
++    private UpgradeDistributionSlot? CompatibilitySlotAt(int row, int column) => row >= 0 && row < _upgrades.Rows.Count
++        && column >= 0 && column < _upgrades.Columns.Count && _upgrades.Columns[column].Name == "Compatible trucks"
++        && _upgrades.Rows[row].DataBoundItem is DataRowView view ? view["Slot"] as UpgradeDistributionSlot : null;
++
++    private void ScheduleCompatibilityHover(int row, int column)
++    {
++        var slot = CompatibilitySlotAt(row, column);
++        if (ReferenceEquals(slot, _hoverSlot)) return;
++        HideCompatibilityHover();
++        if (slot is null || _loading) return;
++        _hoverSlot = slot; _compatibilityHoverTimer.Interval = 350; _compatibilityHoverTimer.Start();
++    }
++
++    private void ShowCompatibilityHover()
++    {
++        if (_hoverSlot is null || _catalog is null || !Visible || !Enabled || _loading
++            || FindForm() is not { ContainsFocus: true } owner)
++        { HideCompatibilityHover(); return; }
++        var point = _upgrades.PointToClient(Cursor.Position);
++        var hit = _upgrades.HitTest(point.X, point.Y);
++        if (!ReferenceEquals(CompatibilitySlotAt(hit.RowIndex, hit.ColumnIndex), _hoverSlot))
++        { HideCompatibilityHover(); return; }
++        if (_compatibilityPreview is not null) return;
++        var assignment = _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot) == UpgradeTrialService.Key(_hoverSlot));
++        _catalog.Parts.TryGetValue(assignment?.UpgradeId ?? _hoverSlot.OriginalUpgradeId, out var current);
++        _catalog.Parts.TryGetValue(_hoverSlot.OriginalUpgradeId, out var original);
++        _compatibilityPreview = new UpgradeCompatibilityPreview(current?.Name ?? assignment?.UpgradeId ?? _hoverSlot.OriginalUpgradeId,
++            TruckNames(current), original?.Name ?? _hoverSlot.OriginalUpgradeId, TruckNames(original));
++        _compatibilityPreview.PlaceNear(Cursor.Position);
++        _compatibilityPreview.Show(owner);
++        _compatibilityPreview.PlaceNear(Cursor.Position);
++        _compatibilityHoverTimer.Interval = 100;
++    }
++
++    private void HideCompatibilityHover()
++    {
++        _compatibilityHoverTimer.Stop(); _hoverSlot = null;
++        var preview = _compatibilityPreview; _compatibilityPreview = null; preview?.Dispose();
++    }
++}
++
++internal sealed class UpgradeCompatibilityPreview : Form
++{
++    internal UpgradeCompatibilityPreview(string current, string[] currentTrucks, string original, string[] originalTrucks)
++    {
++        FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
++        AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = AutoScaleMode.Dpi;
++        BackColor = SystemColors.Info; ForeColor = SystemColors.InfoText;
++        AccessibleName = "New and original upgrade compatibility";
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(10) };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        var width = Math.Min(720, Screen.FromPoint(Cursor.Position).WorkingArea.Width - 40);
++        var columnWidth = width / 2 - 24;
++        var newText = currentTrucks.Length == 0 ? "No compatible trucks" : string.Join(Environment.NewLine, currentTrucks);
++        var oldText = originalTrucks.Length == 0 ? "No compatible trucks" : string.Join(Environment.NewLine, originalTrucks);
++        var flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
++        var height = Math.Max(TextRenderer.MeasureText(newText, Font, new Size(columnWidth, int.MaxValue), flags).Height,
++            TextRenderer.MeasureText(oldText, Font, new Size(columnWidth, int.MaxValue), flags).Height);
++        ClientSize = new Size(width, Math.Min(height + 86, Screen.FromPoint(Cursor.Position).WorkingArea.Height - 50));
++        AddColumn(0, "New upgrade: " + current, newText);
++        AddColumn(1, "Original upgrade: " + original, oldText);
++        Controls.Add(layout);
++        void AddColumn(int column, string title, string trucks)
++        {
++            layout.Controls.Add(new Label { Text = title, Dock = DockStyle.Fill, Padding = new Padding(3), UseMnemonic = false }, column, 0);
++            layout.Controls.Add(new Label { Text = trucks, Dock = DockStyle.Fill, Padding = new Padding(3), UseMnemonic = false }, column, 1);
++        }
++    }
++    protected override bool ShowWithoutActivation => true;
++    protected override CreateParams CreateParams
++    {
++        get { var p = base.CreateParams; p.ExStyle |= 0x00000020 | 0x00000080 | 0x08000000; return p; }
++    }
++    protected override void WndProc(ref Message message)
++    {
++        if (message.Msg == 0x0084) { message.Result = (IntPtr)(-1); return; }
++        base.WndProc(ref message);
++    }
++    protected override void OnPaint(PaintEventArgs e)
++    {
++        base.OnPaint(e); ControlPaint.DrawBorder(e.Graphics, ClientRectangle, SystemColors.WindowFrame, ButtonBorderStyle.Solid);
++    }
++    internal void PlaceNear(Point cursor)
++    {
++        var area = Screen.FromPoint(cursor).WorkingArea;
++        var x = cursor.X + 18; var y = cursor.Y + 20;
++        if (x + Width > area.Right) x = cursor.X - Width - 18;
++        if (y + Height > area.Bottom) y = cursor.Y - Height - 20;
++        Location = new Point(Math.Clamp(x, area.Left, Math.Max(area.Left, area.Right - Width)),
++            Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - Height)));
++    }
++}

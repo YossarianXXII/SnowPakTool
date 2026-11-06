@@ -1,0 +1,40 @@
+--- TierListStore.cs
++++ TierListStore.cs
+@@ -11,6 +11,18 @@
+ 
+     public static Color ColorFor(string name) => AppColors.Get($"Tier{name}");
+ 
++    public static string DescriptionFor(string name) => name switch
++    {
++        "SS" => "Completely overpowered",
++        "S" => "Excellent picks, fleet mainstays",
++        "A" => "Great in most areas, all-rounders and brutes",
++        "B" => "Good in most areas or as early trucks",
++        "C" => "Can be decent but will lag behind quickly",
++        "D" => "There are better options",
++        "FX" => "Screw these. Very circumstantial. Use only if you like torture.",
++        _ => string.Empty
++    };
++
+     public static List<GroupState> Load()
+     {
+         List<GroupState>? saved = null;
+@@ -23,6 +35,7 @@
+         return Names.Select(name => new GroupState
+         {
+             Name = name,
++            Description = DescriptionFor(name),
+             TruckCodes = saved?.FirstOrDefault(tier => tier.Name == name)?.TruckCodes ?? []
+         }).ToList();
+     }
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -113,7 +113,7 @@
+         else
+         {
+             section.Tiles.WrapContents = false;
+-            section.Panel.Text = string.Empty;
++            section.Panel.Text = state.Description;
+             var content = (TableLayoutPanel)section.Header.Parent!;
+             content.Controls.Remove(section.Header);
+             content.Controls.Remove(section.Tiles);

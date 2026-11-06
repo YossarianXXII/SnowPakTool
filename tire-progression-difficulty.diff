@@ -1,0 +1,363 @@
+diff --git a/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs b/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
+index 37fd4b7..6fe3b75 100644
+--- a/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
++++ b/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
+@@ -13,18 +13,21 @@ internal static class ObtainableTruckRandomizer
+ 
+     public static void Randomize(string workspace, RegionTruckCatalog catalog, IReadOnlySet<string> ownedRegions,
+         IReadOnlyList<CustomTruck> ownedTrucks, RegionProgressionState progression, IReadOnlyList<GroupState> truckTiers,
+-        IReadOnlyList<GroupState> regionTiers, IProgress<string> progress, int? seed = null)
++        IReadOnlyList<GroupState> regionTiers, IProgress<string> progress, int? seed = null,
++        ProgressionDifficulty tireDifficulty = ProgressionDifficulty.Normal)
+         => Randomize(workspace, catalog, ownedRegions, ownedTrucks, progression, truckTiers, regionTiers,
+-            new RandomizationLogProgress(entry => { if (!entry.IsDetail) progress.Report(entry.Message); }), seed);
++            new RandomizationLogProgress(entry => { if (!entry.IsDetail) progress.Report(entry.Message); }), seed, tireDifficulty);
+ 
+     public static void Randomize(string workspace, RegionTruckCatalog catalog, IReadOnlySet<string> ownedRegions,
+         IReadOnlyList<CustomTruck> ownedTrucks, RegionProgressionState progression, IReadOnlyList<GroupState> truckTiers,
+-        IReadOnlyList<GroupState> regionTiers, IProgress<RandomizationLogEntry> log, int? seed = null)
++        IReadOnlyList<GroupState> regionTiers, IProgress<RandomizationLogEntry> log, int? seed = null,
++        ProgressionDifficulty tireDifficulty = ProgressionDifficulty.Normal)
+     {
+         void Summary(string message) => log.Report(new(message));
+         void Detail(string message) => log.Report(new(message, IsDetail: true));
+         if (!progression.IsFinalized || progression.Order.Count == 0)
+             throw new InvalidOperationException("Finalize Region progression before randomizing obtainable trucks.");
++        if (!Enum.IsDefined(tireDifficulty)) throw new ArgumentOutOfRangeException(nameof(tireDifficulty));
+         var equipment = catalog.EquipmentCatalog ?? throw new InvalidOperationException("Load map and equipment data before randomizing.");
+         var quality = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+         foreach (var tier in truckTiers)
+@@ -92,9 +95,8 @@ internal static class ObtainableTruckRandomizer
+                 { kept++; Detail($"{label}: preserved an existing edit."); continue; }
+                 if (entry.RawEquipment is not { Parsed: true } || entry.PlacementIndex < 0) { Skip("placement equipment could not be read"); continue; }
+                 var random = PlacementRandom(runSeed, entry.StablePlacementKey);
+-                var preferred = tier switch { 0 => 0, 1 => 1, 2 or 3 => 2, _ => 3 };
+-                var requested = tier == 3 ? random.NextDouble() < 0.5 ? 2 : 3 : preferred;
+-                if (random.NextDouble() < 0.15) requested = Math.Clamp(requested + (random.Next(2) == 0 ? -1 : 1), 0, 3);
++                var tireWeights = TruckTireRandomization.Weights(position, progression.Order.Count, tier, tireDifficulty);
++                var requested = TruckTireRandomization.Draw(tireWeights, random.NextDouble());
+                 var heavyDuty = SameClass(SourceClass(entry), "HEAVY_DUTY");
+                 var targetQuality = position / (double)Math.Max(1, progression.Order.Count - 1) * 6;
+                 var candidates = trucks.Where(truck => SameClass(truck.Class, SourceClass(entry))
+@@ -156,8 +158,8 @@ internal static class ObtainableTruckRandomizer
+                             Detail($"{label}: limited HEAVY_DUTY → OFFROAD exception used to improve variety; within one target tier and the one-in-five saved assignment cap.");
+                         }
+                     }
+-                    if (preferred != requested)
+-                        Detail($"{label}: tire category {TireLabel(preferred)} → {TireLabel(requested)} (difficulty variation).");
++                    Detail($"{label}: requested {TireLabel(requested)} tires (progression {position + 1}/{progression.Order.Count}, region tier {new[] { "D", "C", "B", "A", "S" }[tier]}, tire difficulty {tireDifficulty}; "
++                        + string.Join(", ", tireWeights.Select((weight, category) => $"{TireLabel(category)} {weight.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}%")) + ").");
+                     var actualTires = equipment.ConfiguredTireCategory(configuration);
+                     if (fallback)
+                         Detail($"{label}: tire category {TireLabel(requested)} → {actualTires} (requested category is not supported by the selected truck; nearest compatible category used).");
+@@ -210,3 +212,42 @@ internal static class ObtainableTruckRandomizer
+         return new Random(BinaryPrimitives.ReadInt32LittleEndian(bytes));
+     }
+ }
++
++/// <summary>Per-placement tire odds: play order leads, region tier nudges, and tire difficulty controls the reward curve.</summary>
++internal static class TruckTireRandomization
++{
++    public static double[] Weights(int position, int regionCount, int regionDifficulty, ProgressionDifficulty difficulty)
++    {
++        if (regionCount < 1 || position < 0 || position >= regionCount || regionDifficulty is < 0 or > 4 || !Enum.IsDefined(difficulty))
++            throw new ArgumentOutOfRangeException(nameof(position));
++        // The first region keeps these exact odds in every difficulty, including single-region progressions.
++        if (position == 0) return [99, 1, 0, 0];
++        var progress = position / (double)(regionCount - 1);
++        // Region difficulty contributes gradually so an early S region cannot bypass the starting tire progression.
++        var strength = 0.8 * progress + 0.2 * (regionDifficulty / 4.0) * Math.Sqrt(progress);
++        double[][] anchors = difficulty switch
++        {
++            ProgressionDifficulty.Easy => [[99, 1, 0, 0], [25, 45, 25, 5], [5, 15, 45, 35], [0, 5, 25, 70]],
++            ProgressionDifficulty.Hard => [[99, 1, 0, 0], [60, 30, 9, 1], [25, 35, 30, 10], [10, 25, 35, 30]],
++            _ => [[99, 1, 0, 0], [35, 50, 14, 1], [10, 25, 50, 15], [3, 12, 40, 45]]
++        };
++        var scaled = Math.Clamp(strength, 0, 1) * 3;
++        var lower = Math.Min((int)scaled, 2);
++        var fraction = scaled - lower;
++        return Enumerable.Range(0, 4).Select(category => anchors[lower][category] * (1 - fraction) + anchors[lower + 1][category] * fraction).ToArray();
++    }
++
++    public static int Draw(double[] weights, double roll)
++    {
++        if (weights.Length != 4 || weights.Any(weight => !double.IsFinite(weight) || weight < 0)
++            || Math.Abs(weights.Sum() - 100) > 0.000001 || !double.IsFinite(roll) || roll is < 0 or >= 1)
++            throw new ArgumentOutOfRangeException(nameof(weights));
++        var remaining = roll * 100;
++        for (var category = 0; category < weights.Length; category++)
++        {
++            if (remaining < weights[category]) return category;
++            remaining -= weights[category];
++        }
++        return Array.FindLastIndex(weights, weight => weight > 0);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+index bff1c8e..7a5a06b 100644
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -8,16 +8,18 @@ internal sealed class TruckRandomizationTab : UserControl
+         "Replace trucks with trucks from the same class, including the custom Farming tractor class. When HEAVY_DUTY variety is limited, allow a rare, similarly ranked OFFROAD replacement (18% chance when eligible, capped at one per five saved HEAVY_DUTY assignments).",
+         "Prefer different replacement trucks and keep duplicate trucks to a minimum.",
+         "Use the truck tier list and player-defined region progression: favor lower-rated trucks in earlier regions and top-rated trucks in later regions. Allow fuzzy variation: a moderate chance for an SS truck to appear one or two regions earlier, and a very low chance for it to appear many regions earlier.",
+-        "Choose tires using the player-defined region difficulty tier list: Highway in easier regions, then Allterrain, Offroad, and Mudtires in the hardest regions, where compatible. Allow some variation and use the first (smallest) tires in the chosen group.",
++        "Roll tires separately for each truck using finalized region progression, region difficulty tier and the separate tire difficulty. The first region requests 99% Highway / 1% All-terrain; better tires become more likely later. Hard still allows 30% Mudtires in the final S-tier region. Use the nearest compatible category, smallest size and first variant.",
+         "If the original truck has any of the following addons installed, the replacement must support and have those addons installed too: Sideboard Bed, Saddle High, Saddle Low, Avto-23 Heavy Crane, Van Body Addon, Log Carrier Front, Short logging frame, Seismic Vibrator Module, or Metal Detector Module Frame."
+     ];
+ 
+-    private readonly TruckRandomizationRuleStore _store = new();
++    private readonly TruckRandomizationRuleStore _store;
+     private readonly ToolTip _actionTips = new();
+     private readonly Font _glyphFont = new("Segoe MDL2 Assets", 10f);
+     private readonly TruckRandomizationRules _rules;
+     private readonly Func<IProgress<RandomizationLogEntry>, Task>? _runObtainable;
+     private readonly List<RandomizationLogEntry> _logEntries = [];
++    private readonly List<RadioButton> _tireDifficultyOptions = [];
++    public ProgressionDifficulty TireDifficulty => _rules.TireDifficulty;
+     private readonly CheckBox _showDetails = new() { Text = "Show detailed logs", AutoSize = true, Checked = false, Margin = new Padding(8, 6, 0, 0) };
+     private readonly Button _randomize = new() { Text = "Randomize obtainable trucks", AutoSize = true };
+     private readonly TextBox _messages = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, MaxLength = int.MaxValue };
+@@ -25,8 +27,11 @@ internal sealed class TruckRandomizationTab : UserControl
+ 
+     public TruckRandomizationTab() : this(null) { }
+ 
+-    public TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable)
++    public TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable) : this(runObtainable, new TruckRandomizationRuleStore()) { }
++
++    internal TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable, TruckRandomizationRuleStore store)
+     {
++        _store = store;
+         _runObtainable = runObtainable;
+         _randomize.Enabled = runObtainable is not null;
+         _randomize.Click += async (_, _) => await RandomizeAsync();
+@@ -140,11 +145,34 @@ internal sealed class TruckRandomizationTab : UserControl
+         if (title == "Obtainable")
+         {
+             var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++            var tireOptions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 8, 0) };
++            tireOptions.Controls.Add(new Label { Text = "Tire difficulty", AutoSize = true, Margin = new Padding(0, 7, 8, 0) });
++            foreach (var difficulty in new[] { ProgressionDifficulty.Easy, ProgressionDifficulty.Normal, ProgressionDifficulty.Hard })
++            {
++                var radio = new RadioButton { Text = difficulty.ToString(), AutoSize = true, Checked = _rules.TireDifficulty == difficulty, Margin = new Padding(0, 6, 8, 0) };
++                _actionTips.SetToolTip(radio, "Easy gives better tires sooner. Hard favors weaker tires; late S-tier regions still have a 30% Mudtires chance. First region: 99% Highway, where compatible. Existing assignments stay fixed.");
++                radio.CheckedChanged += (_, _) =>
++                {
++                    if (!radio.Checked || _rules.TireDifficulty == difficulty) return;
++                    var previous = _rules.TireDifficulty;
++                    _rules.TireDifficulty = difficulty;
++                    try { _store.Save(_rules); _status.Text = $"Tire difficulty saved: {difficulty}. Applies to newly randomized placements; saved assignments stay fixed."; }
++                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
++                    {
++                        _rules.TireDifficulty = previous;
++                        foreach (var option in _tireDifficultyOptions) option.Checked = option.Text == previous.ToString();
++                        _status.Text = "Could not save tire difficulty: " + ex.Message;
++                    }
++                };
++                _tireDifficultyOptions.Add(radio);
++                tireOptions.Controls.Add(radio);
++            }
++            actions.Controls.Add(tireOptions);
+             actions.Controls.Add(_randomize);
+             actions.Controls.Add(_showDetails);
+             actions.Controls.Add(new Label
+             {
+-                Text = "Results and reset: Game data → Regions-Trucks. Apply maps from Start.", AutoSize = true,
++                Text = "Each truck rolls tires using progression + region tier. First region: 99% Highway, where compatible. Results/reset: Game data → Regions-Trucks. Apply maps from Start.", AutoSize = true,
+                 Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(400, 0)
+             });
+             layout.Controls.Add(actions, 0, 2);
+@@ -160,6 +188,7 @@ internal sealed class TruckRandomizationTab : UserControl
+     {
+         if (_runObtainable is null || !_randomize.Enabled) return;
+         _randomize.Enabled = false;
++        foreach (var option in _tireDifficultyOptions) option.Enabled = false;
+         _logEntries.Clear();
+         _messages.Clear();
+         AddMessage(new("Preparing owned regions and trucks…"));
+@@ -173,7 +202,11 @@ internal sealed class TruckRandomizationTab : UserControl
+         }
+         catch (InvalidOperationException ex) { AddMessage(new("Error: " + ex.Message)); }
+         catch (Exception) { AddMessage(new("Error: could not read or save the randomization plan. Check the workspace and reload map data.")); }
+-        finally { if (!_randomize.IsDisposed) _randomize.Enabled = true; }
++        finally
++        {
++            if (!_randomize.IsDisposed) _randomize.Enabled = true;
++            foreach (var option in _tireDifficultyOptions) if (!option.IsDisposed) option.Enabled = true;
++        }
+     }
+ 
+     private void AddMessage(RandomizationLogEntry entry)
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs b/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
+index cd772d0..c099ac4 100644
+--- a/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
+@@ -4,6 +4,7 @@ namespace SnowPakTool.Desktop;
+ 
+ internal sealed class TruckRandomizationRules
+ {
++    public ProgressionDifficulty TireDifficulty { get; set; } = ProgressionDifficulty.Normal;
+     public List<string> Obtainable { get; set; } = [.. TruckRandomizationTab.DefaultObtainableRules];
+     public List<string> Missions { get; set; } = [];
+ }
+@@ -22,6 +23,9 @@ internal sealed class TruckRandomizationRuleStore
+         var rules = JsonSerializer.Deserialize<TruckRandomizationRules>(File.ReadAllText(_path))
+             ?? throw new JsonException("The saved rule list is empty.");
+         Validate(rules);
++        const string previousTireRule = "Choose tires using the player-defined region difficulty tier list: Highway in easier regions, then Allterrain, Offroad, and Mudtires in the hardest regions, where compatible. Allow some variation and use the first (smallest) tires in the chosen group.";
++        var tireRuleIndex = rules.Obtainable.IndexOf(previousTireRule);
++        if (tireRuleIndex >= 0) rules.Obtainable[tireRuleIndex] = TruckRandomizationTab.DefaultObtainableRules[4];
+         return rules;
+     }
+ 
+@@ -36,7 +40,7 @@ internal sealed class TruckRandomizationRuleStore
+ 
+     private static void Validate(TruckRandomizationRules rules)
+     {
+-        if (rules.Obtainable is null || rules.Missions is null ||
++        if (!Enum.IsDefined(rules.TireDifficulty) || rules.Obtainable is null || rules.Missions is null ||
+             rules.Obtainable.Concat(rules.Missions).Any(string.IsNullOrWhiteSpace))
+             throw new JsonException("Each pane must contain a list of non-empty rules.");
+     }
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 524a37c..a59f9b0 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -455,7 +455,9 @@ internal sealed class MainForm : Form
+         var truckTiers = TierListStore.Load();
+         var regionTiers = RegionTierListStore.Load();
+         var catalog = await _regionsTrucksTab.GetRandomizationCatalogAsync();
+-        await Task.Run(() => ObtainableTruckRandomizer.Randomize(workspace, catalog, ownedRegions, ownedTrucks, progression, truckTiers, regionTiers, progress));
++        var tireDifficulty = _truckRandomizationTab.TireDifficulty;
++        await Task.Run(() => ObtainableTruckRandomizer.Randomize(workspace, catalog, ownedRegions, ownedTrucks, progression, truckTiers, regionTiers, progress,
++            tireDifficulty: tireDifficulty));
+         await _regionsTrucksTab.RefreshChangesAsync();
+     }
+ 
+diff --git a/README.md b/README.md
+index 4451f30..dc80fe8 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,8 @@ The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. Th
+ 
+ ANK MK38 Civilian (`ank_mk38_ht`) is included in the base truck catalog even though its XML is stored under `_dlc/dlc_6` without a truck entitlement entry. It appears in Tier lists → Truck → Unsorted until ranked, and shares that assignment with Truck properties. Its tier is independent of the regular ANK MK38.
+ 
++Tire randomization has its own saved **Easy / Normal / Hard** selector in Randomizer → Truck-Randomization → Obtainable, independent of Region progression difficulty. Every new placement rolls independently. The first region in the finalized order requests 99% Highway and 1% All-terrain in every mode, even if it is ranked S or is the only region. Later tire weights blend progression position (80%) with region difficulty (up to 20%, introduced gradually), interpolating from Highway toward better categories. Easy grants better tires sooner; Hard keeps weaker tires in the mix. In the final S-tier region, Highway / All-terrain / Offroad / Mudtires odds are 0/5/25/70% on Easy, 3/12/40/45% on Normal, and 10/25/35/30% on Hard. Truck compatibility can change the actual category to the nearest supported one; the smallest supported size and first variant are still used. Detailed logs show the position, region tier, tire difficulty, requested odds and any fallback without naming replacement trucks. Existing saved/pending assignments stay fixed; use Regions-Trucks reset before rerandomizing them under different settings. Changing tire difficulty does not change the finalized region order or apply map files. The former unedited default tire-rule note is updated when loaded; custom notes and empty lists are preserved.
++
+ Run it from the repository root with:
+ 
+ ```powershell
+diff --git a/.checks/RuleEditor/RuleEditor.csproj b/.checks/RuleEditor/RuleEditor.csproj
+index 871d03e..d4cf7bd 100644
+--- a/.checks/RuleEditor/RuleEditor.csproj
++++ b/.checks/RuleEditor/RuleEditor.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/></ItemGroup></Project>
+diff --git a/.checks/RegionsTrucksRegression/ObtainableRandomizerChecks.cs b/.checks/RegionsTrucksRegression/ObtainableRandomizerChecks.cs
+index c35a332..2e4f4ed 100644
+--- a/.checks/RegionsTrucksRegression/ObtainableRandomizerChecks.cs
++++ b/.checks/RegionsTrucksRegression/ObtainableRandomizerChecks.cs
+@@ -104,7 +104,7 @@ internal static class ObtainableRandomizerChecks
+   File.WriteAllText(legacyPath,JsonSerializer.Serialize(new[]{new PendingTruckReplacement("legacy",source,new("good","Secret choice one","Heavy-duty"),DateTimeOffset.UtcNow)}));
+   Check(PendingTruckReplacements.Load(legacy).Count==1,"legacy pending array remains readable");PendingTruckReplacements.Discard(legacy,"legacy");Check(PendingTruckReplacements.Load(legacy).Count==0,"legacy plan migrated safely on write");
+   var detailed=new List<RandomizationLogEntry>();
+-  ObtainableTruckRandomizer.Randomize(root,Load(),new HashSet<string>{"us_01"},[new("highway_only","Hidden choice","Heavy-duty")],progression,
++  ObtainableTruckRandomizer.Randomize(root,Load(),new HashSet<string>{"us_01"},[new("highway_only","Hidden choice","Heavy-duty")],new RegionProgressionState{IsFinalized=true,Order=["us_02","ru_02","us_01"]},
+    [new(){Name="FX",TruckCodes=["highway_only"]}],[new(){Name="S",TruckCodes=["us_01"]}],new RandomizationLogProgress(detailed.Add),44);
+   Check(detailed.Any(item=>item.IsDetail&&item.Message.Contains("→ Highway")&&item.Message.Contains("requested category is not supported")),"detailed tire fallback identifies requested and actual categories with reason");
+   Check(detailed.FindIndex(item=>item.IsDetail&&item.Message.Contains("→ Highway"))<detailed.FindIndex(item=>!item.IsDetail&&item.Message.Contains("complete")),"tire detail emitted before region completion");
+diff --git a/.checks/TireProgression/Program.cs b/.checks/TireProgression/Program.cs
+new file mode 100644
+index 0000000..bd8f0db
+--- /dev/null
++++ b/.checks/TireProgression/Program.cs
+@@ -0,0 +1,78 @@
++using System.Reflection;
++using System.Text.Json;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    private static object Difficulty(string value) => Enum.Parse(T("ProgressionDifficulty"), value);
++    private static object? Call(object obj, string method, params object[] args) => obj.GetType().GetMethod(method, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(obj, args);
++    private static double[] Weights(int position, int count, int tier, string difficulty) => (double[])T("TruckTireRandomization").GetMethod("Weights")!.Invoke(null, new object[] { position, count, tier, Difficulty(difficulty) })!;
++    private static int Draw(double[] weights, double roll) => (int)T("TruckTireRandomization").GetMethod("Draw")!.Invoke(null, new object[] { weights, roll })!;
++    private static double Mean(double[] weights) => weights.Select((weight, index) => weight * index / 100).Sum();
++    private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static IEnumerable<Control> All(Control parent) => parent.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(All(child)));
++    private static object Property(object obj, string name) => obj.GetType().GetProperty(name)!.GetValue(obj)!;
++    [STAThread] private static void Main()
++    {
++        foreach (var count in new[] { 1, 2, 19 })
++            foreach (var mode in new[] { "Easy", "Normal", "Hard" })
++                for (var tier = 0; tier < 5; tier++)
++                    if (!Weights(0, count, tier, mode).SequenceEqual(new double[] { 99, 1, 0, 0 })) throw new Exception("first-region odds");
++        Check(true, "first region is exactly 99% Highway / 1% All-terrain for every tier/mode, including single-region orders");
++        foreach (var mode in new[] { "Easy", "Normal", "Hard" })
++            for (var tier = 0; tier < 5; tier++)
++            {
++                var previous = -1.0;
++                for (var position = 0; position < 19; position++)
++                {
++                    var weights = Weights(position, 19, tier, mode);
++                    if (weights.Any(weight => weight < 0) || Math.Abs(weights.Sum() - 100) > 0.000001 || Mean(weights) < previous - 0.000001) throw new Exception("invalid or non-monotonic probability curve");
++                    previous = Mean(weights);
++                }
++            }
++        Check(true, "all curves stay normalized and steadily improve tires as progression advances");
++        for (var position = 1; position < 19; position++)
++        {
++            for (var tier = 0; tier < 5; tier++)
++                if (!(Mean(Weights(position, 19, tier, "Easy")) > Mean(Weights(position, 19, tier, "Normal")) && Mean(Weights(position, 19, tier, "Normal")) > Mean(Weights(position, 19, tier, "Hard")))) throw new Exception("difficulty ordering");
++            if (Mean(Weights(position, 19, 4, "Normal")) <= Mean(Weights(position, 19, 0, "Normal"))) throw new Exception("region difficulty contribution");
++        }
++        Check(true, "tire difficulty and region tier both influence odds independently of progression position");
++        Check(Weights(18, 19, 4, "Easy")[3] == 70 && Weights(18, 19, 4, "Normal")[3] == 45 && Weights(18, 19, 4, "Hard")[3] == 30,
++            "late S regions retain 70/45/30% Mudtires chances for Easy/Normal/Hard");
++        var first = Weights(0, 19, 4, "Hard");
++        var draws = Enumerable.Range(0, 10000).Select(index => Draw(first, (index + 0.5) / 10000)).ToArray();
++        Check(draws.Count(category => category == 0) == 9900 && draws.Count(category => category == 1) == 100, "weighted draw implements the exact first-region 99/1 split");
++        var random = new Random(42);
++        var middle = Weights(9, 19, 2, "Normal");
++        Check(Enumerable.Range(0, 500).Select(_ => Draw(middle, random.NextDouble())).Distinct().Count() == 4, "independent per-truck draws produce multiple tire categories within the same region/map");
++        var fixture = Path.Combine(AppContext.BaseDirectory, "fixtures", Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(fixture);
++        var path = Path.Combine(fixture, "rules.json");
++        var store = Activator.CreateInstance(T("TruckRandomizationRuleStore"), path)!;
++        File.WriteAllText(path, "{\"Obtainable\":[\"Custom rule\"],\"Missions\":[]}");
++        var rules = Call(store, "Load")!;
++        Check(Property(rules, "TireDifficulty").ToString() == "Normal", "old settings default to Normal without losing notes");
++        rules.GetType().GetProperty("TireDifficulty")!.SetValue(rules, Difficulty("Hard"));
++        Call(store, "Save", rules);
++        var saved = File.ReadAllText(path);
++        Check(Property(Call(store, "Load")!, "TireDifficulty").ToString() == "Hard" && saved.Contains("Custom rule"), "tire difficulty persists with existing editable rules");
++        rules.GetType().GetProperty("TireDifficulty")!.SetValue(rules, Enum.ToObject(T("ProgressionDifficulty"), 999));
++        var refused = false;
++        try { Call(store, "Save", rules); } catch (TargetInvocationException ex) when (ex.InnerException is JsonException) { refused = true; }
++        Check(refused && File.ReadAllText(path) == saved, "invalid difficulty cannot overwrite settings");
++        File.WriteAllText(path, "{\"Obtainable\":[],\"Missions\":[]}");
++        using var tab = (Control)Activator.CreateInstance(T("TruckRandomizationTab"), BindingFlags.Instance | BindingFlags.NonPublic, null, new object?[] { null, store }, null)!;
++        tab.Size = new Size(1120, 740); tab.CreateControl(); tab.PerformLayout();
++        var choices = All(tab).OfType<RadioButton>().ToArray();
++        Check(choices.Length == 3 && choices.Single(choice => choice.Checked).Text == "Normal", "separate Easy/Normal/Hard selector defaults correctly");
++        choices.Single(choice => choice.Text == "Hard").Checked = true;
++        Check(Property(tab, "TireDifficulty").ToString() == "Hard" && Property(Call(store, "Load")!, "TireDifficulty").ToString() == "Hard", "selector updates both saved settings and the run's difficulty value");
++        var list = (System.Collections.IList)Property(Call(store, "Load")!, "Obtainable");
++        Check(list.Count == 0, "empty editable rule lists stay empty when saving difficulty");
++        using var bitmap = new Bitmap(tab.Width, tab.Height); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size));
++        bitmap.Save(Path.Combine(AppContext.BaseDirectory, "tire-difficulty-preview.png"));
++        Console.WriteLine("All progression/tire-difficulty checks passed using isolated settings.");
++    }
++}
+diff --git a/.checks/TireProgression/TireProgression.csproj b/.checks/TireProgression/TireProgression.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/TireProgression/TireProgression.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

@@ -1,0 +1,178 @@
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index feff58d..1dbbc30 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -34,21 +34,7 @@ internal static class RegionTruckCatalogService
+         var tasks = LoadTasks(workspace, names, warnings);
+         var equipmentCatalog = new TruckEquipmentCatalog(workspace, names, warnings);
+         var models = new TruckModelIndex(trucks.Keys);
+-        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+-        foreach (var pak in Directory.EnumerateFiles(mapDirectory, "level_*.pak", SearchOption.TopDirectoryOnly))
+-            if (MapCode.IsMatch(Path.GetFileNameWithoutExtension(pak))) sources[Path.GetFileNameWithoutExtension(pak)] = pak;
+-        // Extracted map data takes precedence over its archive, without extracting or writing game assets.
+-        var extractedDirectories = Directory.EnumerateDirectories(mapDirectory, "level_*", SearchOption.TopDirectoryOnly)
+-            .Append(mapDirectory);
+-        foreach (var directory in extractedDirectories)
+-        {
+-            var match = MapCode.Match(Path.GetFileName(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
+-            if (!match.Success) continue;
+-            var bin = Path.Combine(directory, "[scene]", "data_for_ssl.bin");
+-            if (File.Exists(bin)) sources[match.Value] = bin;
+-        }
+-        foreach (var (map, source) in TruckReplacementStore.SavedMaps(workspace))
+-            if (sources.ContainsKey(map)) sources[map] = source;
++        var sources = MapSources(workspace, mapDirectory);
+         var entries = new List<RegionTruckEntry>();
+         var mapsRead = 0;
+         foreach (var (map, source) in sources.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+@@ -119,6 +105,47 @@ internal static class RegionTruckCatalogService
+         return new(PendingTruckReplacements.Preview(workspace, entries.Select(availabilityStore.Apply).ToArray(), equipmentCatalog), warnings.ToArray(), mapsRead, equipmentCatalog);
+     }
+ 
++    internal static Dictionary<string, string> MapSources(string workspace, string mapDirectory)
++    {
++        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        // The selected folder supplies maps that have not yet been backed up in this workspace.
++        if (Directory.Exists(mapDirectory))
++        {
++            foreach (var pak in Directory.EnumerateFiles(mapDirectory, "level_*.pak"))
++                if (MapCode.IsMatch(Path.GetFileNameWithoutExtension(pak))) sources[Path.GetFileNameWithoutExtension(pak)] = pak;
++            foreach (var directory in Directory.EnumerateDirectories(mapDirectory, "level_*").Append(mapDirectory))
++            {
++                var match = MapCode.Match(Path.GetFileName(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
++                var bin = Path.Combine(directory, "[scene]", "data_for_ssl.bin");
++                if (match.Success && File.Exists(bin)) sources[match.Value] = bin;
++            }
++        }
++        // A preserved original is the baseline even when the installed game map has since changed.
++        var backups = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "backups");
++        if (Directory.Exists(backups))
++            foreach (var directory in Directory.EnumerateDirectories(backups, "level_*"))
++            {
++                var map = Path.GetFileName(directory);
++                if (!MapCode.IsMatch(map)) continue;
++                var original = Path.Combine(directory, "original.pak");
++                if (!File.Exists(original)) original = Path.Combine(directory, "original.bin");
++                if (File.Exists(original)) sources[map] = original;
++            }
++        foreach (var (map, source) in TruckReplacementStore.SavedMaps(workspace)) sources[map] = source;
++        return sources;
++    }
++
++    internal static string SourceStamp(string workspace, string mapDirectory)
++    {
++        var paths = MapSources(workspace, mapDirectory).OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => pair.Value)
++            .Append(WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "pending-replacements.json"));
++        return string.Join("\n", paths.Select(path =>
++        {
++            var file = new FileInfo(path);
++            return file.Exists ? $"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}" : file.FullName + "|missing";
++        }));
++    }
++
+     internal static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, IReadOnlySet<string> truckCodes)
+         => ReadPlacements(data, new TruckModelIndex(truckCodes));
+ 
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 849593a..f38c127 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -35,6 +35,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     private RegionTruckCatalog? _catalog;
+     private string? _loadedWorkspace;
+     private string? _loadedMapFolder;
++    private string? _loadedSourceStamp;
+     private bool _loading;
+     private bool _updatingTable;
+     private bool _savingAvailability;
+@@ -126,12 +127,18 @@ internal sealed class RegionsTrucksTab : UserControl
+         var workspace = _getWorkspacePath().Trim();
+         if (_mapFolder.Text.Length == 0) _mapFolder.Text = RegionTruckCatalogService.FindMapDirectory(_getPakPath());
+         var mapFolder = _mapFolder.Text.Trim();
++        if (workspace.Length == 0 || !Directory.Exists(workspace))
++        { ClearCatalog(); _status.Text = "Choose an extracted workspace on the Start tab."; return; }
++        string sourceStamp;
++        try { sourceStamp = RegionTruckCatalogService.SourceStamp(workspace, mapFolder); }
++        catch (Exception ex) { ClearCatalog(); _status.Text = "Could not inspect map sources: " + ex.Message; return; }
+         if (!force && workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase)
+             && mapFolder.Equals(_loadedMapFolder, StringComparison.OrdinalIgnoreCase)
++            && sourceStamp == _loadedSourceStamp
+             && _catalog?.EquipmentCatalog?.IsCurrent(workspace) == true) return;
+         ClearCatalog();
+-        if (workspace.Length == 0 || !Directory.Exists(workspace)) { _status.Text = "Choose an extracted workspace on the Start tab."; return; }
+-        if (mapFolder.Length == 0 || !Directory.Exists(mapFolder)) { _status.Text = "Choose a map folder containing level_*.pak archives or extracted maps."; return; }
++        if (!Directory.Exists(mapFolder) && RegionTruckCatalogService.MapSources(workspace, mapFolder).Count == 0)
++        { _status.Text = "Choose a map folder or provide backed-up maps in the workspace."; return; }
+         _loading = true;
+         _reload.Enabled = _browse.Enabled = false;
+         _mapFolder.ReadOnly = true;
+@@ -150,6 +157,7 @@ internal sealed class RegionsTrucksTab : UserControl
+             _catalog = catalog;
+             _loadedWorkspace = workspace;
+             _loadedMapFolder = mapFolder;
++            _loadedSourceStamp = sourceStamp;
+             BuildRegionTiles();
+             ApplyFilter();
+         }
+@@ -164,7 +172,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     private void ClearCatalog()
+     {
+         _catalog = null;
+-        _loadedWorkspace = _loadedMapFolder = null;
++        _loadedWorkspace = _loadedMapFolder = _loadedSourceStamp = null;
+         _trucks.DataSource = null;
+         _details.Clear();
+         foreach (var tile in _tiles.Values) tile.Dispose();
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 76703d6..3a421c8 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -410,10 +410,35 @@ internal static class Program
+         var pendingAgain = committed.Entries.Single(entry => entry.PlacementId == "AWARD");
+         PendingTruckReplacements.Queue(workspace, pendingAgain, new("test_truck", "Test truck", "Scout"));
+         StartPanelRegression(workspace);
++        BackupSourceRegression(workspace, maps, pak, committed.Entries[0].Source);
+         string mediaFor(string root) => Path.Combine(WorkspaceOriginals.GetUpdatedRoot(root), "[media]", "classes", "trucks");
+         Console.WriteLine("PASS: replacement saving, byte-identical backups, repeat revisions, task/discovery identity, stale rejection, overlay reload and unrelated archive content.");
+     }
+ 
++    private static void BackupSourceRegression(string workspace, string maps, string baseline, string updated)
++    {
++        foreach (var pending in PendingTruckReplacements.Load(workspace)) PendingTruckReplacements.Discard(workspace, pending.Key);
++        var backup = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "backups", "level_us_01_01", "original.pak");
++        Directory.CreateDirectory(Path.GetDirectoryName(backup)!); File.Copy(baseline, backup, overwrite: true);
++        var installed = Path.Combine(maps, "level_us_01_01.pak");
++        File.Copy(updated, installed, overwrite: true); // Simulate installing the changed fixture map.
++        RegionTruckCatalog Load(string folder) => RegionTruckCatalogService.Load(workspace, folder, new Dictionary<string, string>(), new Dictionary<string, string>());
++        var withUpdate = Load(maps);
++        Check(withUpdate.Entries.Single(row => row.PlacementId.Length == 0) is { TruckCode: "test_truck_second" } row && row.Source == updated,
++            "Workspace update overrides its original backup");
++        var stamp = RegionTruckCatalogService.SourceStamp(workspace, maps);
++        File.Delete(updated); // Only this run's generated fixture output is removed.
++        Check(stamp != RegionTruckCatalogService.SourceStamp(workspace, maps), "Deleting an update invalidates the Regions-Trucks source cache");
++        var restored = Load(maps).Entries.Single(row => row.PlacementId.Length == 0);
++        Check(restored.TruckCode == "test_truck" && restored.Source == backup,
++            "Deleting an update restores the backed-up truck even if the installed map still has the replacement");
++        Check(Load(Path.Combine(maps, "missing-folder")).Entries.Count == 5, "Workspace backups load without installed maps");
++        var bin = Path.Combine(Path.GetDirectoryName(backup)!, "original.bin");
++        File.WriteAllBytes(bin, RegionTruckCatalogService.ReadMapData(backup)!); File.Delete(backup);
++        Check(Load(maps).Entries.All(row => row.Source == bin && row.TruckCode == "test_truck"), "Extracted original.bin is also a workspace baseline");
++        Console.WriteLine("PASS: backup precedence over installed replacements, update overrides, deletion/cache invalidation and workspace-only originals.");
++    }
++
+     private static void CheckSceneSplice(byte[] before, byte[] after)
+     {
+         TruckReplacementStore.ValidateScene(after);
+diff --git a/README.md b/README.md
+index 71efa04..3136025 100644
+--- a/README.md
++++ b/README.md
+@@ -28,6 +28,8 @@ The UI uses the original SnowPakTool cache-block and PAK writer classes and writ
+ 
+ Map truck replacements are queued in the popup and written from **Start → Map files**. The map writer updates both scene size boundaries, preserves the PAK entry order and each entry's compression method, and copies unrelated ZIP records unchanged. Original maps and previous edited versions remain backed up under `workspace/region-maps/backups`. **Repair saved maps** rebuilds outputs produced by the older writer using their original archive layout, while retaining the selected trucks. Repair verifies the unchanged scene payload and unrelated archive contents before replacing a workspace output; it never writes installed game files. Reload and review any pending replacements after repairing their source map.
+ 
++Regions-Trucks uses `workspace/region-maps/backups/<map>/original.pak` (or `original.bin`) as the baseline whenever present. Saved workspace maps override that baseline and pending replacements override the displayed rows. Deleting an updated map therefore restores the backed-up placements on reload or when returning to the tab. Maps without a workspace backup are read from the selected map folder. Workspace backups and updates can also be used without the installed map folder.
++
+ As an example, here's how to increase first and third person FOV slider ranges (they're normally limited to 130 max):
+ 
+ ```bat

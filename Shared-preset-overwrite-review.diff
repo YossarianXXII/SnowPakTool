@@ -1,0 +1,294 @@
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -448,19 +448,21 @@
+         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+         try
+         {
+-            var replace = _truckPropertiesTab.HasPresetPreview || _truckEditTab.HasPresetPreview || _experienceTab.HasPresetPreview
+-                || SharedPreset.HasPending(workspace) || PendingPakChanges(workspace).Count > 0
+-                || PendingTruckReplacements.Load(workspace).Count > 0 || UpgradeTrialStore.Load(workspace) is not null
+-                || Directory.Exists(WorkspaceOriginals.GetUpdatedRoot(workspace))
+-                    && Directory.EnumerateFiles(WorkspaceOriginals.GetUpdatedRoot(workspace), "*", SearchOption.AllDirectories).Any()
+-                || TruckReplacementStore.SavedMaps(workspace).Any();
+-            if (replace && MessageBox.Show(this,
+-                "This workspace has local edits, pending changes, randomizer drafts, or a staged shared preset.\n\n" +
+-                "Replace them with the loaded preset? Existing pending work will be ignored while the preset is staged. " +
+-                "Apply pending changes will replace local edits and drafts, including edits absent from the preset, and keep backups in preset-history. " +
+-                "Discarding the shared preset before Apply keeps the existing work.\n\nContinue loading?",
+-                "Replace local changes with shared preset?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+-                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
++            var preset = SharedPreset.Read(dialog.FileName);
++            var editorChanges = _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
++                .Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
++                .Concat(AddonExplorationStore.Pending(workspace)).Concat(UpgradeChanges.Pending(workspace))
++                .Concat(_truckPropertiesTab.PresetPreviewChanges()).Concat(_truckEditTab.PresetPreviewChanges())
++                .Concat(_experienceTab.PresetPreviewChanges()).ToArray();
++            IReadOnlyList<PresetOverwriteItem>? overwritten = null;
++            if (!await RunBusyAsync("Listing local changes replaced by the preset…", () =>
++                overwritten = PresetOverwriteReview.Build(workspace, preset, editorChanges))) return;
++            var replace = overwritten!.Count > 0;
++            if (replace)
++            {
++                using var review = new PresetOverwriteReviewDialog(Path.GetFileName(dialog.FileName), overwritten);
++                if (review.ShowDialog(this) != DialogResult.Yes) return;
++            }
+             var mapFolder = _regionsTrucksTab.PresetMapFolder;
+             await RunBusyAsync("Checking preset baselines and staging shared changes…", () =>
+             {
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -505,6 +505,11 @@
+ 
+     internal bool HasPresetPreview => _loadedWorkspace == _getWorkspace().Trim() && DraftValues(true).Count > 0;
+ 
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => !HasPresetPreview ? [] : DraftValues(true).Select(e =>
++        new WorkspaceChange("Preview", WorkspaceOriginals.GetCurrentPath(_loadedWorkspace!, e.RelativeFile),
++            e.TruckName + " / " + e.Attribute, e.Before.ToString(CultureInfo.InvariantCulture),
++            e.RemoveAttribute ? "Remove explicit value (inherit)" : e.After.ToString(CultureInfo.InvariantCulture)));
++
+     internal void ExportPreview(string destination)
+     {
+         if (_loadedWorkspace != _getWorkspace().Trim()) return;
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -670,6 +670,8 @@
+ 
+     internal bool HasPresetPreview => _addonsTab.HasPresetPreview || _frameAddonsTab.HasPresetPreview;
+ 
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => _addonsTab.PresetPreviewChanges().Concat(_frameAddonsTab.PresetPreviewChanges());
++
+     internal void ExportPreview(string destination)
+     {
+         _engineEditTab.ExportPreview(destination);
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -326,6 +326,17 @@
+     internal bool HasPresetPreview => _loadedWorkspace == _getWorkspacePath().Trim()
+         && (_fuelRows.Values.Any(r => r.Draft != r.Current) || _explorationRows.Values.Any(r => r.Draft != r.Current));
+ 
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges()
++    {
++        if (_loadedWorkspace != _getWorkspacePath().Trim()) yield break;
++        foreach (var (source, row) in _fuelRows.Where(p => p.Value.Draft != p.Value.Current))
++            yield return new("Preview", WorkspaceOriginals.GetCurrentPath(_loadedWorkspace!, source), row.Name + " / Fuel capacity",
++                row.Current.ToString(CultureInfo.InvariantCulture), row.Draft.ToString(CultureInfo.InvariantCulture));
++        foreach (var row in _explorationRows.Values.Where(r => r.Draft != r.Current))
++            yield return new("Preview", WorkspaceOriginals.GetCurrentPath(_loadedWorkspace!, row.Identity.Source),
++                row.Identity.Name + " / " + row.Identity.Attribute, row.Current ?? "Inherited", row.Draft ?? "Inherited");
++    }
++
+     internal void ExportFuelPreview(string destination)
+     {
+         if (_loadedWorkspace != _getWorkspacePath().Trim() || !_frameAddonsOnly) return;
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -832,6 +832,14 @@
+ 
+     internal bool HasPresetPreview => _loadedWorkspace == _getWorkspacePath().Trim() && IsDirty;
+ 
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges()
++    {
++        if (!HasPresetPreview || _rankSettingsPath is null) return [];
++        if (!TryReadGridValues(out var preview))
++            return [new("Preview", _rankSettingsPath, "Rank XP", "Current rank XP", "Unfinished / invalid preview values")];
++        return [new("Preview", _rankSettingsPath, "Rank XP", string.Join(", ", _loadedValues), string.Join(", ", preview))];
++    }
++
+     internal void ExportPreview(string destination)
+     {
+         var workspace = _getWorkspacePath();
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@
+ 
+ **Start → Save shared preset… / Load shared preset…** shares the complete gameplay setup in a versioned `.snowpreset` file: current truck/engine/winch/frame-addon/XP previews, staged edits, map-truck drafts and applied map edits, upgrade results, ownership, truck groups/tiers, region difficulty/progression, randomizer rules and workspace planning settings. Export renders drafts in an isolated workspace without applying or clearing the sender's edits. Randomization choices are stored as concrete results; loading never rerolls. The file contains Brotli-compressed copy/literal differences against preserved originals, rather than full PAKs or unchanged assets. Machine paths, installed game archives, player saves, window settings and caches are excluded.
+ 
+-Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. When local previews, pending edits, drafts, applied changes or another staged preset exist, Load warns and asks whether to replace them. No cancels loading. Yes stages the preset as a complete replacement; old pending edits are ignored while it is staged. Apply backs up and clears superseded pending stores and local outputs absent from the preset, so they cannot leak into the shared result. Discarding before Apply retains existing saved work. Original-file compatibility checks still apply. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
++Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. When local previews, pending edits, drafts, applied changes or another staged preset exist, Load shows a resizable, sortable review of the local changes that will be replaced: applied file edits, staged editor values, unsaved previews, map drafts, upgrade plans, an existing staged preset, and changed planning/settings. The table lists targets, before/after local values, and the preset outcome; hover for full values or copy selected rows. Cancel keeps the current setup. Replace with preset stages the preset as a complete replacement; old pending edits are ignored while it is staged. Apply backs up and clears superseded pending stores and local outputs absent from the preset, so they cannot leak into the shared result. Discarding before Apply retains existing saved work. Original-file compatibility checks still apply. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
+ 
+ The same preset applied to matching originals produces the same initial and map contents. Initial PAK packing uses ordinal cache-entry ordering and fixed ZIP timestamps/attributes, so the same app build also produces byte-identical archives across workspace paths, file modification times and system cultures. For the sender to reproduce the complete exported preview, stage and apply all included previews/drafts, or load that same preset into a clean workspace. Automated checks cover cross-workspace initial/map SHA-256 equality, compact deltas, preview capture, staging/restart reads, baseline conflicts, malformed presets and rollback after a locked-file failure. Runtime behavior still requires in-game verification.
+ 
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/PresetOverwriteReview.cs
+@@ -0,0 +1,148 @@
++using System.Data;
++using System.Security.Cryptography;
++using System.Text.Json;
++using System.Text.Json.Nodes;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record PresetOverwriteItem(string Area, string State, string Target, string Change, string LocalValue, string PresetResult);
++
++internal static class PresetOverwriteReview
++{
++    public static IReadOnlyList<PresetOverwriteItem> Build(string workspace, SharedPresetDocument preset,
++        IReadOnlyList<WorkspaceChange> editorChanges, string? preferences = null)
++    {
++        var rows = new List<PresetOverwriteItem>();
++        var initial = preset.Files.Where(p => p.Area == "initial").ToDictionary(p => p.Path.Replace('\\', '/'), StringComparer.OrdinalIgnoreCase);
++        var maps = preset.Files.Where(p => p.Area == "map").ToDictionary(p => Path.GetFileNameWithoutExtension(p.Path), StringComparer.OrdinalIgnoreCase);
++        string Relative(string target) => Path.IsPathRooted(target) ? WorkspaceOriginals.GetRelativePath(workspace, target).Replace('\\', '/') : target.Replace('\\', '/');
++        string MapResult(string map) => maps.ContainsKey(map) ? "Replace with shared map result" : "Remove local map output; use original map";
++        string InitialResult(string path, string property)
++        {
++            if (!initial.ContainsKey(path)) return File.Exists(WorkspaceOriginals.GetOriginalReadPath(workspace, path)) ? "Restore original file values" : "Remove local added file";
++            var detail = preset.Review?.FirstOrDefault(c => c.Target.Equals(path, StringComparison.OrdinalIgnoreCase) && c.Property == property);
++            return detail is null ? "Replace with shared file values" : detail.After;
++        }
++        var audited = WorkspaceChangeAudit.PakFiles(workspace);
++        foreach (var change in audited.Concat(editorChanges))
++        {
++            if (change.Property.StartsWith("Upgrade randomization:", StringComparison.Ordinal)) continue;
++            var path = Relative(change.Target);
++            rows.Add(new("Initial PAK", change.State == WorkspaceChange.Pending ? "Staged / editor" : change.State,
++                path, change.Property, change.Before + " → " + change.After, InitialResult(path, change.Property)));
++        }
++        // Audit covers the editor formats; retain file-level coverage for load lists
++        // and any other changed files that the existing audit does not interpret.
++        var updated = WorkspaceOriginals.GetUpdatedRoot(workspace);
++        var covered = audited.Select(c => Relative(c.Target)).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        if (Directory.Exists(updated)) foreach (var file in Directory.EnumerateFiles(updated, "*", SearchOption.AllDirectories))
++        {
++            var path = Relative(file); if (covered.Contains(path)) continue;
++            var original = WorkspaceOriginals.GetOriginalReadPath(workspace, path);
++            if (File.Exists(original) && Hash(original) == Hash(file)) continue;
++            rows.Add(new("Initial PAK", "In files", path, File.Exists(original) ? "Changed file" : "Added file",
++                $"{new FileInfo(file).Length:N0} bytes", InitialResult(path, "")));
++        }
++        foreach (var change in WorkspaceChangeAudit.MapFiles(workspace).Where(c => c.State == WorkspaceChange.InFiles))
++            rows.Add(new("Maps", "In files", change.Target, change.Property, change.Before + " → " + change.After, MapResult(change.Target)));
++        foreach (var plan in PendingTruckReplacements.Load(workspace))
++        {
++            var placement = plan.Original.PlacementId.Length > 0 ? plan.Original.PlacementId : $"Placement {plan.Original.PlacementIndex}";
++            rows.Add(new("Maps", plan.Staged ? "Staged" : "Draft", plan.Original.MapCode + " / " + placement,
++                plan.ResetOriginal ? "Reset truck / equipment" : "Truck / equipment replacement",
++                plan.Original.Truck + " → " + plan.Target.Name + (plan.Configuration is null ? "" : "\n" + JsonSerializer.Serialize(plan.Configuration)), MapResult(plan.Original.MapCode)));
++        }
++        foreach (var assignment in PendingTruckReplacements.LoadAssignments(workspace))
++            rows.Add(new("Maps", "Saved assignment", assignment.PlacementKey, "Randomized truck / equipment",
++                assignment.Target.Name + "\n" + JsonSerializer.Serialize(assignment.Configuration), "Replace saved randomization assignment"));
++        var stagedPath = WorkspaceOriginals.GetMetadataPath(workspace, "upgrade-randomization", "staged.json");
++        if (File.Exists(stagedPath))
++        {
++            var staged = JsonSerializer.Deserialize<UpgradeChangeSnapshot>(File.ReadAllText(stagedPath))
++                ?? throw new InvalidDataException("Cannot read staged upgrade changes for review.");
++            foreach (var edit in staged.Edits)
++                rows.Add(new("Upgrades", "Staged", edit.Source,
++                    edit.Zone.Length > 0 ? edit.Zone + " / Pickup " + edit.RewardIndex : edit.Element + " / " + edit.Variant + " / Exploration unlock",
++                    (edit.Before ?? "Inherited") + " → " + edit.After, InitialResult(edit.Source.Replace('\\', '/'), "")));
++        }
++        var draft = UpgradeTrialStore.Load(workspace);
++        if (draft is not null)
++        {
++            foreach (var assignment in draft.Assignments)
++                rows.Add(new("Upgrades", "Draft", assignment.Slot.Map + " / " + assignment.Slot.Zone + " / " + assignment.Slot.RewardIndex,
++                    "Upgrade pickup", assignment.Slot.OriginalUpgradeId + " → " + assignment.UpgradeId, "Replace with shared upgrade results"));
++            foreach (var key in draft.ResetKeys ?? [])
++                rows.Add(new("Upgrades", "Draft", key, "Reset upgrade pickup", "Restore original pickup", "Replace with shared upgrade results"));
++            if (draft.Assignments.Count == 0 && (draft.ResetKeys?.Count ?? 0) == 0)
++                rows.Add(new("Upgrades", "Draft", "Upgrade randomizer", "Saved draft", "Seed " + draft.Seed, "Clear local draft"));
++        }
++        foreach (var (path, incoming) in preset.Planning)
++            CompareJson("Planning", path, ReadJson(Path.Combine(preferences ?? SharedPreset.PreferencesRoot, path)), incoming, rows);
++        foreach (var (path, incoming) in preset.Metadata)
++        {
++            if (path == "region-maps/pending-replacements.json") continue;
++            CompareJson("Settings", path, ReadJson(WorkspaceOriginals.GetMetadataPath(workspace, path.Replace('/', Path.DirectorySeparatorChar))), incoming, rows);
++        }
++        if (SharedPreset.HasPending(workspace))
++        {
++            foreach (var change in SharedPreset.Pending(workspace))
++                rows.Add(new("Shared preset", "Staged", change.SummaryName.Length > 0 ? change.SummaryName : Relative(change.Target),
++                    change.Property, change.Before + " → " + change.After, "Replace staged preset"));
++        }
++        return rows.Distinct().OrderBy(r => r.Area, StringComparer.Ordinal).ThenBy(r => r.State, StringComparer.Ordinal)
++            .ThenBy(r => r.Target, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Change, StringComparer.OrdinalIgnoreCase).ToArray();
++    }
++
++    private static string Hash(string path) { using var input = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(input)); }
++    private static string? ReadJson(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
++    private static void CompareJson(string area, string path, string? before, string? after, List<PresetOverwriteItem> rows)
++    {
++        var a = before is null ? null : JsonNode.Parse(before); var b = after is null ? null : JsonNode.Parse(after);
++        void Visit(JsonNode? left, JsonNode? right, string property)
++        {
++            if (JsonNode.DeepEquals(left, right)) return;
++            if (left is JsonObject lo && right is JsonObject ro)
++            { foreach (var key in lo.Select(p => p.Key).Concat(ro.Select(p => p.Key)).Distinct()) Visit(lo[key], ro[key], property.Length == 0 ? key : property + "." + key); return; }
++            string Display(JsonNode? node) => node is null ? "Defaults / not saved" : node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
++            rows.Add(new(area, "Saved", path, property.Length == 0 ? "Saved settings" : property, Display(left), Display(right)));
++        }
++        Visit(a, b, "");
++    }
++}
++
++internal sealed class PresetOverwriteReviewDialog : Form
++{
++    public PresetOverwriteReviewDialog(string presetName, IReadOnlyList<PresetOverwriteItem> items)
++    {
++        Text = "Review changes replaced by shared preset"; StartPosition = FormStartPosition.CenterParent;
++        Size = new Size(1240, 740); MinimumSize = new Size(850, 460); ShowInTaskbar = false;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 3 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        var explanation = new Label { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 10),
++            Text = $"Loading {presetName} will replace the local work listed below ({items.Count:N0} entries).\n" +
++                "Unstaged previews are discarded on load. Saved edits, drafts and settings are replaced only when you Apply; backups are kept in preset-history.\n" +
++                "Cancel keeps the current setup. Hover cells for full values, or copy selected rows with Ctrl+C." };
++        var grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++            RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
++            AutoGenerateColumns = false, BackgroundColor = AppColors.Get("Surface"), RowTemplate = { Height = 26 },
++            ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText };
++        var table = new DataTable();
++        var columns = new[] { ("Area", 45), ("State", 60), ("Target", 140), ("Change", 150), ("Local changes being replaced", 170), ("Preset result", 160) };
++        foreach (var (name, weight) in columns)
++        {
++            table.Columns.Add(name);
++            grid.Columns.Add(new DataGridViewTextBoxColumn { Name = name, HeaderText = name, DataPropertyName = name, FillWeight = weight });
++        }
++        foreach (var item in items) table.Rows.Add(item.Area, item.State, item.Target, item.Change, item.LocalValue, item.PresetResult);
++        grid.DataSource = table; TableHeaderBehavior.Attach(grid);
++        grid.DefaultCellStyle.BackColor = AppColors.Get("Surface"); grid.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow");
++        grid.CellToolTipTextNeeded += (_, e) => { if (e.RowIndex >= 0 && e.ColumnIndex >= 0) e.ToolTipText = Convert.ToString(grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value); };
++        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 10, 0, 0) };
++        var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.No };
++        var replace = new Button { Text = "Replace with preset", AutoSize = true, DialogResult = DialogResult.Yes };
++        buttons.Controls.Add(cancel); buttons.Controls.Add(replace); AcceptButton = cancel; CancelButton = cancel;
++        layout.Controls.Add(explanation, 0, 0); layout.Controls.Add(grid, 0, 1); layout.Controls.Add(buttons, 0, 2); Controls.Add(layout);
++        Shown += (_, _) => cancel.Focus(); TextAreaStyle.Watch(this);
++    }
++}
+--- a/.checks/SharedPreset/Program.cs
++++ b/.checks/SharedPreset/Program.cs
+@@ -144,6 +144,30 @@
+   Check(Directory.GetFiles(Path.Combine(replaceReceiver,"preset-history"),"shared-preset.staged.before",SearchOption.AllDirectories).Length==1,"replacing an earlier staged preset preserves a backup");
+   var portableReplacement=W("replacement-export.snowpreset");Call("SharedPreset","Export",replaceReceiver,portableReplacement,(Action<string>)(_=>{}),replacePrefs);
+   var portableDoc=Call("SharedPreset","Read",portableReplacement)!;Check(!(bool)portableDoc.GetType().GetProperty("ReplaceLocalChanges")!.GetValue(portableDoc)!,"local overwrite confirmation is not exported to other users");
++  var reviewPrefs=W("review-prefs");Put(Path.Combine(reviewPrefs,"truck-tiers.json"),"[]");Put(Path.Combine(reviewPrefs,"owned-regions.json"),"{\"us_01\":false}");
++  Put(Updated(sender,"[media]/local-extra.xml"),"<Extra/>");Put(Updated(sender,"pak.load_list"),"local-order");
++  var changesType=typeof(List<>).MakeGenericType(T("WorkspaceChange"));
++  var reviewChanges=JsonSerializer.Deserialize(JsonSerializer.Serialize(new[]{new{State="Preview",Target=Updated(sender,relative),Property="Test / FuelCapacity",Before="30",After="55"},new{State="Pending",Target=Updated(sender,relative),Property="Test / FuelCapacity",Before="30",After="40"}}),changesType)!;
++  var reviewBefore=Hash(Updated(sender,relative));
++  var reviewItems=Call("PresetOverwriteReview","Build",sender,doc,reviewChanges,reviewPrefs)!;var reviewRows=((IEnumerable)reviewItems).Cast<object>().ToArray();
++  string Cell(object item,string property)=>(string)item.GetType().GetProperty(property)!.GetValue(item)!;
++  Check(reviewRows.Any(r=>Cell(r,"State")=="Preview"&&Cell(r,"LocalValue").Contains("55"))&&reviewRows.Any(r=>Cell(r,"State")=="Staged / editor"&&Cell(r,"LocalValue").Contains("40")),"overwrite review lists unsaved preview and staged values separately");
++  Check(reviewRows.Any(r=>Cell(r,"State")=="In files"&&Cell(r,"Change").Contains("FuelCapacity"))&&reviewRows.Any(r=>Cell(r,"Target").Contains("local-extra")&&Cell(r,"PresetResult").Contains("Remove")),"overwrite review lists applied edits and extra files to remove");
++  Check(reviewRows.Any(r=>Cell(r,"Target")=="pak.load_list")&&reviewRows.Any(r=>Cell(r,"Area")=="Maps"),"overwrite review covers load lists and applied maps");
++  Check(reviewRows.Any(r=>Cell(r,"Target")=="truck-tiers.json")&&reviewRows.Any(r=>Cell(r,"Target")=="owned-regions.json"),"overwrite review lists changed planning and ownership settings");
++  Check(Hash(Updated(sender,relative))==reviewBefore&&!File.Exists(Path.Combine(sender,"shared-preset.staged")),"building replacement list neither stages nor changes local work");
++  var upgradeDraft=new{Seed=4,CreatedAt=DateTimeOffset.UtcNow,InputStamp="test",Assignments=new[]{new{Slot=new{Source="[ps]/level.sso",Map="level_us_01_01",Region="us_01",Zone="upgrade-zone",RewardIndex=0,OriginalUpgradeId="old_upgrade"},UpgradeId="new_upgrade",Kind=0,Relation=0,Path=0,Fallback=false,Reused=false}},Report=(object?)null,ResetKeys=new[]{"reset-pickup"}};
++  Put(Path.Combine(draftSender,"upgrade-randomization/draft.json"),JsonSerializer.Serialize(upgradeDraft));
++  var emptyChanges=Activator.CreateInstance(changesType)!;var draftReview=((IEnumerable)Call("PresetOverwriteReview","Build",draftSender,Call("SharedPreset","Read",draftPreset)!,emptyChanges,reviewPrefs)!).Cast<object>().ToArray();
++  Check(draftReview.Any(r=>Cell(r,"Area")=="Maps"&&Cell(r,"State")=="Draft"&&Cell(r,"LocalValue").Contains("New")),"overwrite review includes unstaged map replacements");
++  Check(draftReview.Any(r=>Cell(r,"Area")=="Upgrades"&&Cell(r,"LocalValue").Contains("new_upgrade"))&&draftReview.Any(r=>Cell(r,"Change")=="Reset upgrade pickup"),"overwrite review includes upgrade drafts and resets");
++  using(var overwriteDialog=(Form)Activator.CreateInstance(T("PresetOverwriteReviewDialog"),new object[]{"shared.snowpreset",reviewItems})!)
++  {
++   overwriteDialog.StartPosition=FormStartPosition.Manual;overwriteDialog.Location=new Point(-20000,-20000);overwriteDialog.Show();Application.DoEvents();
++   Check(overwriteDialog.AcceptButton is Button{Text:"Cancel"}&&overwriteDialog.CancelButton is Button{Text:"Cancel"},"review defaults Enter and Escape to Cancel");
++   using(var bitmap=new Bitmap(overwriteDialog.Width,overwriteDialog.Height)){overwriteDialog.DrawToBitmap(bitmap,new Rectangle(Point.Empty,overwriteDialog.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"preset-overwrite-review.png"));}
++   ((Button)overwriteDialog.CancelButton!).PerformClick();Check(overwriteDialog.DialogResult==DialogResult.No&&Hash(Updated(sender,relative))==reviewBefore,"Cancel closes review without discarding or staging work");
++  }
+   File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"results.json"),JsonSerializer.Serialize(new{PresetBytes=new FileInfo(preset).Length,InitialSha256=Hash(packed1),MapSha256=Hash(mapOutput),Scratch=scratch},new JsonSerializerOptions{WriteIndented=true}));
+  }
+ }

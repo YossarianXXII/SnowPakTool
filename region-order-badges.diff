@@ -1,0 +1,80 @@
+--- src\SnowPakTool.Desktop\RegionProgressionTab.cs
++++ src\SnowPakTool.Desktop\RegionProgressionTab.cs
+@@ -161,6 +161,16 @@
+         {
+             if (!regions.TryGetValue(code, out var region)) continue;
+             var tile = CustomGroupWipTab.CreateTile(region, region: true);
++            var header = tile.Controls.OfType<Label>().First(label => label.Dock == DockStyle.Top);
++            var badge = new RegionOrderBadge();
++            header.Controls.Add(badge);
++            void SizeBadge()
++            {
++                badge.Size = new Size(header.Height, header.Height);
++                header.Padding = new Padding(header.Height + 4, 0, 4, 0);
++            }
++            header.SizeChanged += (_, _) => SizeBadge();
++            SizeBadge();
+             CustomGroupWipTab.AttachTileDragHandlers(tile, tile, null);
+             tile.QueryContinueDrag += (_, e) => { if (e.Action != DragAction.Continue) StopDrag(); };
+             AttachDropTarget(tile);
+@@ -178,8 +188,11 @@
+             var tile = _tiles.Controls[index];
+             var region = regions[(string)tile.Tag!];
+             var tier = _tiers.GetValueOrDefault(region.Code, "Unsorted");
+-            tile.Controls.OfType<Label>().First(label => label.Dock == DockStyle.Top).Text =
+-                $"{index + 1}. {region.Name}{Environment.NewLine}{region.Class} · {tier}";
++            var header = tile.Controls.OfType<Label>().First(label => label.Dock == DockStyle.Top);
++            header.Text = $"{region.Name}{Environment.NewLine}{region.Class} · {tier}";
++            var badge = header.Controls.OfType<RegionOrderBadge>().Single();
++            badge.Text = (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
++            badge.AccessibleName = $"Play position {index + 1}";
+             tile.AccessibleName = $"{index + 1}. {region.Name}, {tier}";
+         }
+     }
+@@ -240,3 +253,35 @@
+ 
+     private void StopDrag() { _dragScroll.Stop(); _dragTile = null; _tiles.ClearDropIndex(); }
+ }
++
++/// <summary>A numeric badge supports every position without depending on circled-number font glyphs.</summary>
++internal sealed class RegionOrderBadge : Control
++{
++    public RegionOrderBadge()
++    {
++        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
++            ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
++        BackColor = Color.Transparent;
++        AccessibleRole = AccessibleRole.StaticText;
++        TabStop = false;
++    }
++
++    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
++
++    protected override void OnPaint(PaintEventArgs e)
++    {
++        base.OnPaint(e);
++        var diameter = Math.Min(Width, Height);
++        if (diameter < 4) return;
++        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
++        var circle = new RectangleF(1, 1, diameter - 2, diameter - 2);
++        using var fill = new SolidBrush(Color.FromArgb(42, 47, 55));
++        using var outline = new Pen(Color.FromArgb(160, 170, 185));
++        e.Graphics.FillEllipse(fill, circle);
++        e.Graphics.DrawEllipse(outline, circle);
++        using var font = new Font(Font.FontFamily, diameter * (Text.Length > 2 ? 0.34f : 0.46f), FontStyle.Bold, GraphicsUnit.Pixel);
++        using var text = new SolidBrush(Color.White);
++        using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
++        e.Graphics.DrawString(Text, font, text, circle, format);
++    }
++}
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically. Previous randomization restores one prior order kept in memory for this session. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles show circular position badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 

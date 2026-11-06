@@ -1,0 +1,1151 @@
+--- src\SnowPakTool.Desktop\MainForm.cs
++++ src\SnowPakTool.Desktop\MainForm.cs
+@@ -18,6 +18,7 @@
+     private readonly TruckEditTab _truckEditTab;
+     private readonly TrucksCargoTab _trucksCargoTab;
+     private readonly RegionsTrucksTab _regionsTrucksTab;
++    private readonly TruckRandomizationTab _truckRandomizationTab;
+     private readonly SettingsTab _settingsTab;
+     private StartChangesPanel? _startChanges;
+     private readonly OwnedRegionState _ownedRegionState = new();
+@@ -62,6 +63,7 @@
+             _ownedContentTab.EnsureLoaded();
+             return _ownedContentTab.GetAvailableCustomGroupingTrucks();
+         });
++        _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync);
+         _settingsTab = new SettingsTab();
+         BuildLayout();
+         _workspacePath.TextChanged += (_, _) => _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+@@ -164,7 +166,8 @@
+         _regionsTrucksTab.Dock = DockStyle.Fill;
+         regionsTrucksPage.Controls.Add(_regionsTrucksTab);
+         gameDataTabs.TabPages.Add(regionsTrucksPage);
+-        truckRandomizationPage.Controls.Add(new TruckRandomizationTab { Dock = DockStyle.Fill });
++        _truckRandomizationTab.Dock = DockStyle.Fill;
++        truckRandomizationPage.Controls.Add(_truckRandomizationTab);
+         _regionProgressionTab.Dock = DockStyle.Fill;
+         regionProgressionPage.Controls.Add(_regionProgressionTab);
+         randomizerTabs.TabPages.Add(regionProgressionPage);
+@@ -411,15 +414,40 @@
+         if (!Directory.Exists(workspace)) return;
+         _ownedContentTab.EnsureLoaded();
+         var enabled = _ownedContentTab.GetAvailableCustomGroupingTrucks().Select(truck => truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var ownedRegions = WorkspaceDataCache.GetRegionMetadata(workspace)
++            .Where(pair => pair.Value.IsBaseGame || _ownedRegionState.IsOwned(pair.Key)).Select(pair => pair.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var succeeded = await RunBusyAsync("Applying pending map replacements and preserving backups…", () =>
+         {
+-            if (PendingTruckReplacements.Load(workspace).Any(change => !enabled.Contains(change.Target.Code)))
++            if (PendingTruckReplacements.Load(workspace).Any(change => !change.ResetOriginal && !enabled.Contains(change.Target.Code)))
+                 throw new InvalidOperationException("A pending replacement truck is no longer enabled. Review the pending map changes.");
++            var randomized = PendingTruckReplacements.LoadAssignments(workspace).Select(item => item.PlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            if (PendingTruckReplacements.Load(workspace).Any(change => !change.ResetOriginal && randomized.Contains(change.Original.StablePlacementKey)
++                    && !ownedRegions.Contains(change.Original.RegionCode)))
++                throw new InvalidOperationException("A region with staged randomization is no longer owned. Restore ownership or reset its staged changes.");
+             foreach (var saved in PendingTruckReplacements.ApplyAll(workspace))
+                 BeginInvoke((Action)(() => AppendLog($"Map saved: {saved.OutputPath} · Original backup: {saved.OriginalBackupPath}")));
+         });
+         await _regionsTrucksTab.RefreshChangesAsync();
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
++    }
++
++    private async Task RandomizeObtainableAsync(IProgress<string> progress)
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) throw new InvalidOperationException("Choose an extracted workspace on Start first.");
++        var progression = new RegionProgressionStore().Load();
++        if (!progression.IsFinalized) throw new InvalidOperationException("Finalize Region progression before randomizing obtainable trucks.");
++        await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++        _ownedContentTab.EnsureLoaded();
++        var regions = WorkspaceDataCache.GetRegionMetadata(workspace);
++        var ownedRegions = regions.Where(pair => pair.Value.IsBaseGame || _ownedRegionState.IsOwned(pair.Key))
++            .Select(pair => pair.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var ownedTrucks = _ownedContentTab.GetAvailableCustomGroupingTrucks();
++        var truckTiers = TierListStore.Load();
++        var regionTiers = RegionTierListStore.Load();
++        var catalog = await _regionsTrucksTab.GetRandomizationCatalogAsync();
++        await Task.Run(() => ObtainableTruckRandomizer.Randomize(workspace, catalog, ownedRegions, ownedTrucks, progression, truckTiers, regionTiers, progress));
++        await _regionsTrucksTab.RefreshChangesAsync();
+     }
+ 
+     private static void ExtractPak(string pakPath, string workspace)
+--- src\SnowPakTool.Desktop\PendingTruckReplacements.cs
++++ src\SnowPakTool.Desktop\PendingTruckReplacements.cs
+@@ -2,23 +2,56 @@
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed record PendingTruckReplacement(string Key, RegionTruckEntry Original, CustomTruck Target, DateTimeOffset QueuedAt);
++internal sealed record PendingTruckReplacement(string Key, RegionTruckEntry Original, CustomTruck Target, DateTimeOffset QueuedAt,
++    MapTruckEquipment? Configuration = null, bool ResetOriginal = false, bool Randomized = false);
++internal sealed record TruckRandomizationAssignment(string PlacementKey, string RegionCode, CustomTruck Target,
++    MapTruckEquipment Configuration, int Seed, DateTimeOffset CreatedAt);
+ 
+-/// <summary>Persist intent independently of the map files. Only Start calls ApplyAll.</summary>
++/// <summary>Intent and completed assignments share one atomic file. Only Start applies map writes.</summary>
+ internal static class PendingTruckReplacements
+ {
++    private sealed class State
++    {
++        public State() { }
++        public List<PendingTruckReplacement> Pending { get; set; } = [];
++        public List<TruckRandomizationAssignment> Assignments { get; set; } = [];
++    }
+     private static readonly object Gate = new();
+     private static string PathFor(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "pending-replacements.json");
+     private static string Key(RegionTruckEntry entry) => entry.MapCode + "|" + entry.PlacementId + "|" + entry.BinaryOffset;
+ 
+-    public static IReadOnlyList<PendingTruckReplacement> Load(string workspace)
++    private static State Read(string workspace)
+     {
+         var path = PathFor(workspace);
+-        if (!File.Exists(path)) return [];
++        if (!File.Exists(path)) return new();
+         using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+-        return JsonSerializer.Deserialize<List<PendingTruckReplacement>>(input)
+-            ?? throw new InvalidDataException("The pending map changes file is empty or invalid.");
++        using var document = JsonDocument.Parse(input);
++        // Previous releases stored only a JSON array of manual pending changes.
++        var state = document.RootElement.ValueKind == JsonValueKind.Array
++            ? new State { Pending = document.RootElement.Deserialize<List<PendingTruckReplacement>>()! }
++            : document.RootElement.TryGetProperty("Pending", out _)
++                ? document.RootElement.Deserialize<State>() : null;
++        if (state?.Pending is null || state.Assignments is null || state.Pending.Any(item => item?.Original is null || item.Target is null
++                || string.IsNullOrWhiteSpace(item.Key) || string.IsNullOrWhiteSpace(item.Original.TruckCode) || !ConfigurationShape(item.Configuration))
++            || state.Assignments.Any(item => item?.Configuration is null || item.Target is null || string.IsNullOrWhiteSpace(item.PlacementKey)
++                || !ConfigurationShape(item.Configuration))
++            || state.Pending.Select(item => item.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Pending.Count
++            || state.Assignments.Select(item => item.PlacementKey).Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Assignments.Count)
++            throw new InvalidDataException("The saved map change plan is invalid; it was not overwritten.");
++        return state;
+     }
++
++    private static bool ConfigurationShape(MapTruckEquipment? equipment)
++    {
++        if (equipment is null) return true;
++        static bool Identifier(string value) => value is not null && value.Length <= 255 && value.All(character => character is >= ' ' and <= '~');
++        return equipment.Parsed && equipment.Addons is not null && equipment.Addons.Count <= 128 && equipment.Addons.All(Identifier)
++            && new[] { equipment.Engine, equipment.Gearbox, equipment.Winch, equipment.Suspension, equipment.WheelType, equipment.Tire, equipment.Rim }.All(Identifier)
++            && (equipment.WheelScale is null || float.IsFinite(equipment.WheelScale.Value) && equipment.WheelScale is >= 0 and <= 10);
++    }
++
++    public static IReadOnlyList<PendingTruckReplacement> Load(string workspace) { lock (Gate) return Read(workspace).Pending; }
++    public static IReadOnlyList<TruckRandomizationAssignment> LoadAssignments(string workspace) { lock (Gate) return Read(workspace).Assignments; }
+ 
+     public static PendingTruckReplacement Queue(string workspace, RegionTruckEntry displayed, CustomTruck target)
+     {
+@@ -27,18 +60,68 @@
+             var original = displayed.FileEntry ?? displayed;
+             if (original.MapDataHash.Length == 0) throw new InvalidDataException("Reload maps before queuing a replacement.");
+             var item = new PendingTruckReplacement(Key(original), original, target, DateTimeOffset.UtcNow);
+-            var changes = Load(workspace).Where(change => change.Key != item.Key).ToList();
+-            if (!original.TruckCode.Equals(target.Code, StringComparison.OrdinalIgnoreCase)) changes.Add(item);
+-            Write(workspace, changes);
++            var state = Read(workspace);
++            state.Pending.RemoveAll(change => change.Key == item.Key);
++            state.Assignments.RemoveAll(change => change.PlacementKey == original.StablePlacementKey);
++            if (!original.TruckCode.Equals(target.Code, StringComparison.OrdinalIgnoreCase)) state.Pending.Add(item);
++            Write(workspace, state);
+             return item;
+         }
+     }
+ 
+-    private static void Write(string workspace, IReadOnlyList<PendingTruckReplacement> changes)
++    public static void QueueRandomization(string workspace,
++        IReadOnlyList<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)> changes, int seed)
++    {
++        lock (Gate)
++        {
++            var state = Read(workspace);
++            foreach (var (entry, target, configuration) in changes)
++            {
++                if (entry.PlacementIndex < 0 || entry.MapDataHash.Length == 0 || !configuration.Parsed)
++                    throw new InvalidDataException("Reload maps before randomizing.");
++                var existing = state.Pending.Where(item => item.Key == Key(entry) || item.Original.StablePlacementKey == entry.StablePlacementKey).ToArray();
++                if (state.Assignments.Any(item => item.PlacementKey == entry.StablePlacementKey) || existing.Any(item => !item.ResetOriginal))
++                    throw new InvalidOperationException("A placement changed while the region was being randomized. Reload and retry.");
++                // A user-requested reset may be replaced by a fresh roll without an intermediate map write.
++                state.Pending.RemoveAll(item => existing.Contains(item));
++                state.Pending.Add(new(Key(entry), entry, target, DateTimeOffset.UtcNow, configuration, Randomized: true));
++                state.Assignments.Add(new(entry.StablePlacementKey, entry.RegionCode, target, configuration, seed, DateTimeOffset.UtcNow));
++            }
++            if (changes.Count > 0) Write(workspace, state);
++        }
++    }
++
++    public static void Reset(string workspace, IReadOnlyList<RegionTruckEntry> entries)
++    {
++        lock (Gate)
++        {
++            var state = Read(workspace);
++            foreach (var displayed in entries)
++            {
++                var current = displayed.FileEntry ?? displayed;
++                var configuration = current.OriginalEquipment;
++                var assignment = state.Assignments.FirstOrDefault(item => item.PlacementKey == current.StablePlacementKey);
++                var isPending = state.Pending.Any(item => item.Key == Key(current));
++                if (!isPending && assignment is null && !current.TruckChanged && (configuration is null || EquipmentEqual(current.RawEquipment, configuration))) continue;
++                if (assignment is not null && !isPending && RegionTruckCatalogService.OriginalMapPath(workspace, current.MapCode) is null)
++                    throw new InvalidDataException("The preserved original map is missing. Restore its backup before resetting this assignment.");
++                if (configuration is not { Parsed: true } || configuration.WheelScale is null)
++                    throw new InvalidDataException("Original equipment is unavailable. Reload the original map before resetting.");
++                state.Pending.RemoveAll(item => item.Key == Key(current) || item.Original.StablePlacementKey == current.StablePlacementKey);
++                state.Assignments.RemoveAll(item => item.PlacementKey == current.StablePlacementKey);
++                if (current.TruckChanged || !EquipmentEqual(current.RawEquipment, configuration))
++                    state.Pending.Add(new(Key(current), current, new(current.BaselineTruckCode, current.BaselineTruck,
++                        current.OriginalClass.Length > 0 ? current.OriginalClass : current.Class), DateTimeOffset.UtcNow, configuration, true));
++            }
++            Write(workspace, state);
++        }
++    }
++
++    private static void Write(string workspace, State state)
+     {
+         var path = PathFor(workspace); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+-        try { File.WriteAllText(temporary, JsonSerializer.Serialize(changes, new JsonSerializerOptions { WriteIndented = true })); File.Move(temporary, path, overwrite: true); }
++        try { File.WriteAllText(temporary, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true })); File.Move(temporary, path, overwrite: true); }
+         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+     }
+ 
+@@ -48,11 +131,14 @@
+         return entries.Select(entry =>
+         {
+             if (!pending.TryGetValue(Key(entry), out var change) || entry.MapDataHash != change.Original.MapDataHash) return entry;
+-            var equipment = catalog.ResolveDefault(change.Target.Code);
++            var equipment = change.Configuration is { } configuration
++                ? change.ResetOriginal ? catalog.Resolve(change.Target.Code, configuration) : catalog.ResolveConfigured(change.Target.Code, configuration)
++                : catalog.ResolveDefault(change.Target.Code);
+             return entry with { TruckCode = change.Target.Code, Truck = change.Target.Name, Class = change.Target.Class,
+                 Tires = equipment.Tires, TireDetails = equipment.TireDetails, Addons = equipment.Addons, AddonDetails = equipment.AddonDetails,
+                 FrameAddons = equipment.FrameAddons, FrameAddonDetails = equipment.FrameAddonDetails,
+-                InstalledAddons = equipment.InstalledAddons, InternalEquipment = equipment.InternalEquipment, FileEntry = entry };
++                InstalledAddons = equipment.InstalledAddons, InternalEquipment = equipment.InternalEquipment,
++                RawEquipment = change.Configuration, FileEntry = entry };
+         }).ToArray();
+     }
+ 
+@@ -60,22 +146,42 @@
+     {
+         lock (Gate)
+         {
+-            var changes = Load(workspace).ToList();
++            var state = Read(workspace);
+             var catalog = new TruckEquipmentCatalog(workspace, WorkspaceDataCache.GetLocalizedNames(workspace), []);
+             var saved = new List<SavedTruckReplacement>();
+-            foreach (var group in changes.GroupBy(change => change.Original.MapCode).ToArray())
++            foreach (var group in state.Pending.GroupBy(change => change.Original.MapCode).ToArray())
+             {
++                foreach (var change in group)
++                    if (!change.ResetOriginal && change.Configuration is { } configured && !catalog.IsConfigurationSupported(change.Target.Code, configured))
++                        throw new InvalidDataException("Staged randomization equipment is no longer compatible. Reset the affected region and randomize again.");
+                 var replacements = group.Select(change => (change.Original, new ReplacementTruck(change.Target,
+-                    catalog.ResolveDefault(change.Target.Code), catalog.ComparisonProperties(change.Target.Code)))).ToArray();
++                    change.Configuration is { } configuration
++                        ? change.ResetOriginal ? catalog.Resolve(change.Target.Code, configuration) : catalog.ResolveConfigured(change.Target.Code, configuration)
++                        : catalog.ResolveDefault(change.Target.Code),
++                    catalog.ComparisonProperties(change.Target.Code), change.Configuration))).ToArray();
+                 saved.Add(TruckReplacementStore.SaveBatch(workspace, replacements));
+                 var keys = group.Select(change => change.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+-                changes.RemoveAll(change => keys.Contains(change.Key));
+-                Write(workspace, changes); // Each successfully written map is removed independently.
++                state.Pending.RemoveAll(change => keys.Contains(change.Key));
++                Write(workspace, state);
+             }
+             return saved;
+         }
+     }
+ 
++    public static bool EquipmentEqual(MapTruckEquipment? a, MapTruckEquipment? b) => a is not null && b is not null
++        && a.Parsed == b.Parsed && a.Addons.SequenceEqual(b.Addons) && a.WheelType == b.WheelType && a.Tire == b.Tire && a.Rim == b.Rim
++        && a.Engine == b.Engine && a.Gearbox == b.Gearbox && a.Winch == b.Winch && a.Suspension == b.Suspension
++        && (a.WheelScale ?? 0f) == (b.WheelScale ?? 0f);
++
+     public static void Discard(string workspace, string key)
+-    { lock (Gate) Write(workspace, Load(workspace).Where(change => change.Key != key).ToArray()); }
++    {
++        lock (Gate)
++        {
++            var state = Read(workspace);
++            var placement = state.Pending.FirstOrDefault(item => item.Key == key)?.Original.StablePlacementKey;
++            state.Pending.RemoveAll(item => item.Key == key);
++            if (placement is not null) state.Assignments.RemoveAll(item => item.PlacementKey == placement);
++            Write(workspace, state);
++        }
++    }
+ }
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices; actual trucks and equipment are shown in Game data → Regions-Trucks. That tab has Reset truck to original and Reset selected regions to original buttons, which clear assignments and queue restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+--- src\SnowPakTool.Desktop\RegionsTrucksTab.cs
++++ src\SnowPakTool.Desktop\RegionsTrucksTab.cs
+@@ -13,6 +13,8 @@
+     private readonly CheckBox _showMission = new() { Text = "Mission", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
++    private readonly Button _resetTruck = new() { Text = "Reset truck to original", AutoSize = true, Enabled = false };
++    private readonly Button _resetRegions = new() { Text = "Reset selected regions to original", AutoSize = true, Enabled = false };
+     private readonly FlowLayoutPanel _regions = new()
+     {
+         Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+@@ -72,6 +74,8 @@
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+         filters.Controls.Add(all);
+         filters.Controls.Add(clear);
++        filters.Controls.Add(_resetTruck);
++        filters.Controls.Add(_resetRegions);
+         layout.Controls.Add(filters, 0, 2);
+         layout.Controls.Add(_status, 0, 3);
+         var detailsSplit = new SplitContainer
+@@ -93,6 +97,16 @@
+             await LoadAsync(force: true);
+         };
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
++        _resetTruck.Click += async (_, _) =>
++        {
++            if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
++                await ResetOriginalAsync([entry]);
++        };
++        _resetRegions.Click += async (_, _) =>
++        {
++            if (_catalog is not null)
++                await ResetOriginalAsync(_catalog.Entries.Where(entry => _selectedRegions.Contains(entry.RegionCode)).ToArray());
++        };
+         all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshTiles(); ApplyFilter(); };
+         clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshTiles(); ApplyFilter(); };
+         _showObtainable.CheckedChanged += (_, _) => ApplyFilter();
+@@ -120,6 +134,28 @@
+ 
+     public Task EnsureLoadedAsync() => LoadAsync(force: false);
+     public Task RefreshChangesAsync() { _loadedMapFolder = null; return LoadAsync(force: false); }
++
++    public async Task<RegionTruckCatalog> GetRandomizationCatalogAsync()
++    {
++        while (_loading && !IsDisposed) await Task.Delay(50);
++        await LoadAsync(force: false);
++        return _catalog ?? throw new InvalidOperationException("No map data is loaded. Choose a workspace and map folder in Game data → Regions-Trucks.");
++    }
++
++    private async Task ResetOriginalAsync(IReadOnlyList<RegionTruckEntry> entries)
++    {
++        if (_loadedWorkspace is null || entries.Count == 0) return;
++        _resetTruck.Enabled = _resetRegions.Enabled = false;
++        try
++        {
++            PendingTruckReplacements.Reset(_loadedWorkspace, entries);
++            await RefreshChangesAsync();
++            _status.Text = "Original trucks and equipment restored in the preview; randomization assignments cleared. Apply any queued restoration from Start → Map files.";
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
++        { _status.Text = "Could not reset trucks: " + ex.Message; }
++        finally { ShowDetails(); _resetRegions.Enabled = _catalog is not null && _selectedRegions.Count > 0; }
++    }
+ 
+     private async Task LoadAsync(bool force)
+     {
+@@ -165,6 +201,7 @@
+         finally
+         {
+             _loading = false;
++            if (!IsDisposed) ShowDetails();
+             if (!IsDisposed) { _reload.Enabled = _browse.Enabled = true; _mapFolder.ReadOnly = false; }
+         }
+     }
+@@ -350,6 +387,9 @@
+ 
+     private void ShowDetails()
+     {
++        _resetTruck.Enabled = !_loading && _trucks.CurrentRow?.DataBoundItem is DataRowView resetRow
++            && resetRow["Entry"] is RegionTruckEntry { OriginalEquipment.Parsed: true };
++        _resetRegions.Enabled = !_loading && _catalog is not null && _selectedRegions.Count > 0;
+         _details.Clear();
+         if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
+             _details.Text = TruckDetailsFormatter.Format(entry);
+--- src\SnowPakTool.Desktop\RegionTruckCatalogService.cs
++++ src\SnowPakTool.Desktop\RegionTruckCatalogService.cs
+@@ -14,7 +14,8 @@
+     IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
+     IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1,
+     string MapDataHash = "", [property: System.Text.Json.Serialization.JsonIgnore] RegionTruckEntry? FileEntry = null,
+-    string OriginalTruckCode = "", string OriginalTruck = "")
++    string OriginalTruckCode = "", string OriginalTruck = "", string OriginalClass = "",
++    MapTruckEquipment? RawEquipment = null, MapTruckEquipment? OriginalEquipment = null, int PlacementIndex = -1)
+ {
+     [System.Text.Json.Serialization.JsonIgnore]
+     public string BaselineTruckCode => !string.IsNullOrEmpty(OriginalTruckCode) ? OriginalTruckCode : FileEntry?.TruckCode ?? TruckCode;
+@@ -22,6 +23,8 @@
+     public string BaselineTruck => !string.IsNullOrEmpty(OriginalTruck) ? OriginalTruck : FileEntry?.Truck ?? Truck;
+     [System.Text.Json.Serialization.JsonIgnore]
+     public bool TruckChanged => !TruckCode.Equals(BaselineTruckCode, StringComparison.OrdinalIgnoreCase);
++    [System.Text.Json.Serialization.JsonIgnore]
++    public string StablePlacementKey => FormattableString.Invariant($"{MapCode}|{PlacementId}|{X:R}|{Y:R}|{Z:R}|{PlacementIndex}");
+ }
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead,
+     TruckEquipmentCatalog? EquipmentCatalog = null);
+@@ -57,7 +60,10 @@
+                 var mapName = MapName(data, map, names);
+                 var mapHash = Convert.ToHexString(SHA256.HashData(data));
+                 var originals = ReadOriginalTrucks(workspace, map, source, models, warnings);
++                var originalSource = OriginalMapPath(workspace, map);
++                var comparingBackup = originalSource is not null && !Path.GetFullPath(originalSource).Equals(Path.GetFullPath(source), StringComparison.OrdinalIgnoreCase);
+                 mapsRead++;
++                var placementIndex = 0;
+                 foreach (var placement in ReadPlacements(data, models))
+                 {
+                     var metadata = trucks[placement.TruckCode];
+@@ -101,9 +107,14 @@
+                     var evidence = reason + $" Placement at 0x{placement.Offset:X}."
+                         + (links.Length == 0 ? "" : " Task sources: " + string.Join("; ", links.Select(link => link.Source).Distinct()));
+                     var equipment = equipmentCatalog.Resolve(placement.TruckCode, placement.Equipment);
+-                    var originalCode = placement.TruckCode;
++                    var originalPlacement = placement;
++                    var originalFound = !comparingBackup;
+                     if (originals.TryGetValue((placement.Id, placement.X, placement.Y, placement.Z), out var originalCodes) && originalCodes.Count > 0)
+-                        originalCode = originalCodes.Dequeue();
++                    {
++                        originalPlacement = originalCodes.Dequeue();
++                        originalFound = true;
++                    }
++                    var originalCode = originalPlacement.TruckCode;
+                     var originalName = trucks.TryGetValue(originalCode, out var originalMetadata) ? originalMetadata.Name : originalCode;
+                     entries.Add(new(regionCode, region, map, mapName, placement.TruckCode, metadata.Name,
+                         metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
+@@ -111,7 +122,8 @@
+                         equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons,
+                         FrameAddons: equipment.FrameAddons, FrameAddonDetails: equipment.FrameAddonDetails,
+                         InternalEquipment: equipment.InternalEquipment, Transform: placement.Transform, BinaryOffset: placement.Offset, MapDataHash: mapHash,
+-                        OriginalTruckCode: originalCode, OriginalTruck: originalName));
++                        OriginalTruckCode: originalCode, OriginalTruck: originalName, OriginalClass: originalMetadata.Class ?? metadata.Class,
++                        RawEquipment: placement.Equipment, OriginalEquipment: originalFound ? originalPlacement.Equipment : null, PlacementIndex: placementIndex++));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+@@ -120,7 +132,7 @@
+         return new(PendingTruckReplacements.Preview(workspace, entries.Select(availabilityStore.Apply).ToArray(), equipmentCatalog), warnings.ToArray(), mapsRead, equipmentCatalog);
+     }
+ 
+-    private static string? OriginalMapPath(string workspace, string map)
++    internal static string? OriginalMapPath(string workspace, string map)
+     {
+         var directory = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "backups", map);
+         var pak = Path.Combine(directory, "original.pak");
+@@ -129,10 +141,10 @@
+         return File.Exists(bin) ? bin : null;
+     }
+ 
+-    private static Dictionary<(string Id, float X, float Y, float Z), Queue<string>> ReadOriginalTrucks(
++    private static Dictionary<(string Id, float X, float Y, float Z), Queue<MapTruckPlacement>> ReadOriginalTrucks(
+         string workspace, string map, string source, TruckModelIndex models, List<string> warnings)
+     {
+-        var result = new Dictionary<(string, float, float, float), Queue<string>>();
++        var result = new Dictionary<(string, float, float, float), Queue<MapTruckPlacement>>();
+         var original = OriginalMapPath(workspace, map);
+         if (original is null || Path.GetFullPath(original).Equals(Path.GetFullPath(source), StringComparison.OrdinalIgnoreCase)) return result;
+         try
+@@ -145,7 +157,7 @@
+             {
+                 var key = (placement.Id, placement.X, placement.Y, placement.Z);
+                 if (!result.TryGetValue(key, out var codes)) result[key] = codes = new();
+-                codes.Enqueue(placement.TruckCode);
++                codes.Enqueue(placement);
+             }
+         }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+--- src\SnowPakTool.Desktop\TruckEquipmentCatalog.cs
++++ src\SnowPakTool.Desktop\TruckEquipmentCatalog.cs
+@@ -22,7 +22,7 @@
+ internal sealed record InternalEquipmentInfo(string Slot, string Id, string Name, string Origin, string SourcePath, string DefinitionDetails);
+ 
+ /// <summary>Resolves per-placement equipment against the active workspace's vehicle defaults and wheel definitions.</summary>
+-internal sealed class TruckEquipmentCatalog
++internal sealed partial class TruckEquipmentCatalog
+ {
+     private sealed record Definition(string Path, XElement Xml, string Parent);
+     private sealed record Tire(string Identity, string Name, string Category);
+@@ -91,7 +91,12 @@
+         }
+     }
+ 
+-    private TruckEquipmentSummary ResolveCore(string truck, MapTruckEquipment equipment)
++    public TruckEquipmentSummary ResolveConfigured(string truck, MapTruckEquipment equipment)
++    {
++        lock (_gate) return ResolveCore(truck, equipment, includeDefaults: false);
++    }
++
++    private TruckEquipmentSummary ResolveCore(string truck, MapTruckEquipment equipment, bool includeDefaults = true)
+     {
+         if (!equipment.Parsed) return new("Unknown", "The map equipment record could not be read; vehicle defaults were not assumed.",
+             "Unknown", "The map equipment record could not be read.");
+@@ -113,9 +118,10 @@
+         var installed = equipment.Addons.Where(id => id.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+         var mapAddons = installed.ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var occupied = installed.SelectMany(SocketTypes).ToHashSet(StringComparer.OrdinalIgnoreCase);
+-        foreach (var addon in DefaultAddons(chain))
++        foreach (var addon in includeDefaults ? DefaultAddons(chain) : [])
+         {
+             if (installed.Contains(addon, StringComparer.OrdinalIgnoreCase) || SocketTypes(addon).Any(occupied.Contains)) continue;
++            if (installed.All(id => SocketTypes(id).Any()) && !CanInstallAddons(truck, installed.Append(addon).ToArray())) continue;
+             installed.Add(addon);
+         }
+         var addonLabels = installed.Select(id => (Id: id, Name: AddonName(id))).ToArray();
+--- src\SnowPakTool.Desktop\TruckRandomizationTab.cs
++++ src\SnowPakTool.Desktop\TruckRandomizationTab.cs
+@@ -16,10 +16,18 @@
+     private readonly ToolTip _actionTips = new();
+     private readonly Font _glyphFont = new("Segoe MDL2 Assets", 10f);
+     private readonly TruckRandomizationRules _rules;
++    private readonly Func<IProgress<string>, Task>? _runObtainable;
++    private readonly Button _randomize = new() { Text = "Randomize obtainable trucks", AutoSize = true };
++    private readonly TextBox _messages = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true };
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 8) };
+ 
+-    public TruckRandomizationTab()
+-    {
++    public TruckRandomizationTab() : this(null) { }
++
++    public TruckRandomizationTab(Func<IProgress<string>, Task>? runObtainable)
++    {
++        _runObtainable = runObtainable;
++        _randomize.Enabled = runObtainable is not null;
++        _randomize.Click += async (_, _) => await RandomizeAsync();
+         Disposed += (_, _) => { _actionTips.Dispose(); _glyphFont.Dispose(); };
+         try { _rules = _store.Load(); }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+@@ -40,7 +48,7 @@
+         panes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         panes.Controls.Add(CreatePane("Obtainable", _rules.Obtainable, new Padding(0, 0, 6, 0)), 0, 0);
+         panes.Controls.Add(CreatePane("Missions", _rules.Missions, new Padding(6, 0, 0, 0)), 1, 0);
+-        if (_status.Text.Length == 0) _status.Text = "Add, edit, or remove individual rules. Changes save automatically.";
++        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes; editing it does not change randomizer behavior.";
+         root.Controls.Add(panes, 0, 0);
+         root.Controls.Add(_status, 0, 1);
+         Controls.Add(root);
+@@ -49,10 +57,12 @@
+     private GroupBox CreatePane(string title, List<string> rules, Padding margin)
+     {
+         var pane = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(10), Margin = margin };
+-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+         var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 0, 0, 10) };
+         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+@@ -124,8 +134,41 @@
+         RefreshRules();
+         scroll.Controls.Add(list);
+         layout.Controls.Add(scroll, 0, 1);
++        if (title == "Obtainable")
++        {
++            var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++            actions.Controls.Add(_randomize);
++            actions.Controls.Add(new Label
++            {
++                Text = "Results and reset: Game data → Regions-Trucks. Apply maps from Start.", AutoSize = true,
++                Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(400, 0)
++            });
++            layout.Controls.Add(actions, 0, 2);
++            layout.Controls.Add(_messages, 0, 3);
++        }
++        else
++            layout.Controls.Add(new Label { Text = "Mission randomization is not configured.", AutoSize = true }, 0, 2);
+         pane.Controls.Add(layout);
+         return pane;
++    }
++
++    private async Task RandomizeAsync()
++    {
++        if (_runObtainable is null || !_randomize.Enabled) return;
++        _randomize.Enabled = false;
++        _messages.Clear();
++        _messages.AppendText("Preparing owned regions and trucks…" + Environment.NewLine);
++        try
++        {
++            await _runObtainable(new Progress<string>(message =>
++            {
++                if (!_messages.IsDisposed) _messages.AppendText(message + Environment.NewLine);
++            }));
++            _messages.AppendText("Finished. Review the messages above; apply any queued map changes from Start." + Environment.NewLine);
++        }
++        catch (InvalidOperationException ex) { _messages.AppendText("Error: " + ex.Message + Environment.NewLine); }
++        catch (Exception) { _messages.AppendText("Error: could not read or save the randomization plan. Check the workspace and reload map data." + Environment.NewLine); }
++        finally { if (!_randomize.IsDisposed) _randomize.Enabled = true; }
+     }
+ 
+     private Button CreateGlyphAction(string glyph, string description)
+@@ -156,7 +199,7 @@
+             return;
+         }
+         refresh();
+-        _status.Text = "Rules saved.";
++        _status.Text = "Rule notes saved.";
+     }
+ 
+     private string? EditRule(string title, string value)
+--- src\SnowPakTool.Desktop\TruckReplacementDialog.cs
++++ src\SnowPakTool.Desktop\TruckReplacementDialog.cs
+@@ -2,7 +2,8 @@
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed record ReplacementTruck(CustomTruck Truck, TruckEquipmentSummary Equipment, IReadOnlyDictionary<string, string> Properties);
++internal sealed record ReplacementTruck(CustomTruck Truck, TruckEquipmentSummary Equipment, IReadOnlyDictionary<string, string> Properties,
++    MapTruckEquipment? Configuration = null);
+ internal sealed record TruckComparisonRow(string Property, string Current, string Replacement);
+ 
+ internal static class TruckReplacementComparison
+--- src\SnowPakTool.Desktop\TruckReplacementStore.cs
++++ src\SnowPakTool.Desktop\TruckReplacementStore.cs
+@@ -118,7 +118,7 @@
+     {
+         if (!Regex.IsMatch(current.MapCode, @"^level_(?:us|ru)_\d{2}_\d{2}(?:_[a-z0-9]+)*$", RegexOptions.IgnoreCase))
+             throw new InvalidDataException("The map has no valid map identifier.");
+-        if (replacement.Truck.Code.Equals(current.TruckCode, StringComparison.OrdinalIgnoreCase))
++        if (replacement.Configuration is null && replacement.Truck.Code.Equals(current.TruckCode, StringComparison.OrdinalIgnoreCase))
+             throw new InvalidOperationException("Choose a different replacement truck.");
+         if (replacement.Equipment.InstalledAddons is null)
+             throw new InvalidDataException("The replacement truck's default equipment could not be resolved.");
+@@ -212,12 +212,16 @@
+         writer.Write(data.AsSpan(0, offset));
+         WriteString(writer, replacement.Truck.Code);
+         writer.Write(data.AsSpan(idOffset, addonsStart - idOffset)); // ID, transform, flags and bounds stay byte-identical.
+-        var addons = replacement.Equipment.InstalledAddons ?? throw new InvalidDataException("Replacement default addons are unavailable.");
++        var configuration = replacement.Configuration;
++        var addons = configuration?.Addons ?? replacement.Equipment.InstalledAddons?.Select(addon => addon.Id).ToArray()
++            ?? throw new InvalidDataException("Replacement addons are unavailable.");
+         if (addons.Count > 128) throw new InvalidDataException("Too many default addons for this placement format.");
+         writer.Write((uint)addons.Count);
+-        foreach (var addon in addons) WriteString(writer, addon.Id);
+-        for (var i = 0; i < 7; i++) WriteString(writer, ""); // Engine/drivetrain/wheels resolve from the new vehicle's defaults.
+-        writer.Write(0f); // Default wheel scale; don't carry the previous truck's size override.
++        foreach (var addon in addons) WriteString(writer, addon);
++        foreach (var value in new[] { configuration?.Engine ?? "", configuration?.Gearbox ?? "", configuration?.Winch ?? "",
++                     configuration?.Suspension ?? "", configuration?.WheelType ?? "", configuration?.Rim ?? "", configuration?.Tire ?? "" })
++            WriteString(writer, value);
++        writer.Write(configuration?.WheelScale ?? 0f);
+         writer.Write(data.AsSpan(end)); // Preserve the untouched placement suffix and all following data.
+         writer.Flush();
+         var patched = output.ToArray();
+@@ -261,7 +265,8 @@
+             {
+                 targetFound = true;
+                 if (updated.TruckCode != replacement.Truck.Code || !updated.Equipment.Parsed
+-                    || !updated.Equipment.Addons.SequenceEqual(replacement.Equipment.InstalledAddons!.Select(addon => addon.Id)))
++                    || !updated.Equipment.Addons.SequenceEqual(replacement.Configuration?.Addons ?? replacement.Equipment.InstalledAddons!.Select(addon => addon.Id))
++                    || replacement.Configuration is { } expected && !EquipmentEqual(updated.Equipment, expected with { WheelScale = expected.WheelScale ?? 0f }))
+                     throw new InvalidDataException("Replacement truck did not pass re-read verification.");
+             }
+             else if (original.TruckCode != updated.TruckCode || !EquipmentEqual(original.Equipment, updated.Equipment))
+--- src\SnowPakTool.Desktop\WorkspaceChangeAudit.cs
++++ src\SnowPakTool.Desktop\WorkspaceChangeAudit.cs
+@@ -85,6 +85,10 @@
+     public static IReadOnlyList<WorkspaceChange> MapFiles(string workspace)
+     {
+         var rows = new List<WorkspaceChange>();
++        var pendingChanges = PendingTruckReplacements.Load(workspace);
++        var hiddenPlacements = PendingTruckReplacements.LoadAssignments(workspace).Select(item => item.PlacementKey)
++            .Concat(pendingChanges.Where(item => item.ResetOriginal || item.Randomized).Select(item => item.Original.StablePlacementKey))
++            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+         var trucks = RegionTruckCatalogService.LoadTrucks(workspace, names, []);
+         var codes = trucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+@@ -98,7 +102,8 @@
+             try { TruckReplacementStore.ValidateScene(after); }
+             catch (InvalidDataException) { rows.Add(new(WorkspaceChange.InFiles, map, TruckReplacementStore.RepairRequired, "Original scene", "Use Repair saved maps")); }
+             if (before.AsSpan().SequenceEqual(after)) continue;
+-            var old = RegionTruckCatalogService.ReadPlacements(before, codes).ToLookup(Identity);
++            var originalRows = RegionTruckCatalogService.ReadPlacements(before, codes).ToList();
++            var old = originalRows.ToLookup(Identity);
+             var updated = RegionTruckCatalogService.ReadPlacements(after, codes).ToLookup(Identity);
+             var start = rows.Count;
+             foreach (var key in old.Select(group => group.Key).Concat(updated.Select(group => group.Key)).Distinct())
+@@ -107,6 +112,13 @@
+                 for (var i = 0; i < Math.Max(a.Length, b.Length); i++)
+                 {
+                     var first = i < a.Length ? a[i] : null; var second = i < b.Length ? b[i] : null;
++                    if (first is not null && second is not null && hiddenPlacements.Contains(FormattableString.Invariant(
++                            $"{map}|{first.Id}|{first.X:R}|{first.Y:R}|{first.Z:R}|{originalRows.IndexOf(first)}")))
++                    {
++                        if (first.TruckCode != second.TruckCode || !PendingTruckReplacements.EquipmentEqual(first.Equipment, second.Equipment))
++                            rows.Add(new(WorkspaceChange.InFiles, map, "Obtainable randomization", "Original placement", "Saved — details in Regions-Trucks"));
++                        continue;
++                    }
+                     var label = first?.Id is { Length: > 0 } id ? id : $"Placement at {first?.X ?? second!.X:0.#}; {first?.Z ?? second!.Z:0.#}";
+                     if (first?.TruckCode != second?.TruckCode)
+                         rows.Add(new(WorkspaceChange.InFiles, map, label + " / Truck", Name(first?.TruckCode), Name(second?.TruckCode)));
+@@ -117,8 +129,11 @@
+             if (rows.Count == start) rows.Add(new(WorkspaceChange.InFiles, map, "Other map metadata changed", "Original metadata", "Modified metadata"));
+             string Name(string? code) => code is null ? "Not present" : trucks.TryGetValue(code, out var truck) ? truck.Name : code;
+         }
+-        foreach (var change in PendingTruckReplacements.Load(workspace))
+-            rows.Add(new(WorkspaceChange.Pending, change.Original.MapCode,
++        foreach (var change in pendingChanges)
++            rows.Add(change.Randomized || change.ResetOriginal
++                ? new(WorkspaceChange.Pending, change.Original.MapCode, change.ResetOriginal ? "Reset to original" : "Obtainable randomization",
++                    "Current placement", change.ResetOriginal ? "Original truck and equipment" : "Queued — details in Regions-Trucks", change.Key)
++                : new(WorkspaceChange.Pending, change.Original.MapCode,
+                 (change.Original.PlacementId.Length > 0 ? change.Original.PlacementId : $"Placement at {change.Original.X:0.#}; {change.Original.Z:0.#}") + " / Truck",
+                 change.Original.Truck, change.Target.Name, change.Key));
+         return rows;
+--- /dev/null
++++ src\SnowPakTool.Desktop\TruckRandomizationEquipment.cs
+@@ -0,0 +1,178 @@
++using System.Globalization;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed partial class TruckEquipmentCatalog
++{
++    private sealed record RandomizationSocket(int Group, string Type, HashSet<string> Blocks);
++    private sealed record RandomizationTire(string WheelType, string Tire, string Rim, float Scale, int Category, int Order, float Size);
++    private readonly Dictionary<string, RandomizationSocket[]> _randomSockets = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, RandomizationTire[]> _randomTires = new(StringComparer.OrdinalIgnoreCase);
++    private Dictionary<string, string[]>? _randomAddons;
++    private static bool MapIdentifier(string value) => value is not null && value.Length <= 255 && value.All(character => character is >= ' ' and <= '~');
++
++    private string? RequiredAddonKind(string id)
++    {
++        var key = string.Join(" ", FileChain(id).Select(definition =>
++            (string?)definition.Xml.Element("GameData")?.Element("UiDesc")?.Attribute("UiName"))) + " " + id + " " + AddonName(id);
++        key = new string(key.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
++        if (key.Contains("sideboard") && !key.Contains("trailer"))
++        {
++            var capacity = FileChain(id).Select(definition => (string?)definition.Xml.Element("GameData")?.Element("AddonSlots")?.Attribute("Quantity"))
++                .FirstOrDefault(value => value is not null) ?? "unspecified";
++            return "Sideboard Bed/" + capacity;
++        }
++        if (key.Contains("saddlehigh")) return "Saddle High";
++        if (key.Contains("saddlelow")) return "Saddle Low";
++        if (key.Contains("bigcraneru") || key.Contains("avto23")) return "Avto-23 Heavy Crane";
++        if (key.Contains("kung") || key.Contains("vanbody")) return "Van Body Addon";
++        if (key.Contains("bunklogaddon") || key.Contains("logcarrierfront")) return "Log Carrier Front";
++        if (key.Contains("shortlogging") || key.Contains("logshort") || key.Contains("shortlog")) return "Short logging frame";
++        if (key.Contains("seismic")) return "Seismic Vibrator Module";
++        if (key.Contains("metaldetector")) return "Metal Detector Module Frame";
++        return null;
++    }
++
++    private RandomizationSocket[] RandomizationSockets(string truck)
++    {
++        if (_randomSockets.TryGetValue(truck, out var cached)) return cached;
++        var groups = new Dictionary<string, XElement[]>(StringComparer.OrdinalIgnoreCase);
++        foreach (var definition in FileChain(truck).Reverse())
++            foreach (var group in definition.Xml.Element("GameData")?.Elements("AddonSockets") ?? [])
++            {
++                var sockets = group.Elements("Socket").ToArray();
++                var key = string.Join(",", sockets.SelectMany(socket => Split((string?)socket.Attribute("Names"))).Order(StringComparer.OrdinalIgnoreCase));
++                if (key.Length > 0) groups[key] = sockets;
++            }
++        return _randomSockets[truck] = groups.Values.SelectMany((group, index) => group.SelectMany(socket =>
++            Split((string?)socket.Attribute("Names")).Select(type => new RandomizationSocket(index, type,
++                Split((string?)socket.Attribute("NamesBlock")).ToHashSet(StringComparer.OrdinalIgnoreCase))))).ToArray();
++    }
++
++    private bool CanInstallAddons(string truck, IReadOnlyList<string> addons)
++    {
++        var sockets = RandomizationSockets(truck);
++        var options = addons.Select(id => (Id: id, Slots: sockets.Where(socket => SocketTypes(id).Contains(socket.Type, StringComparer.OrdinalIgnoreCase)).ToArray()))
++            .OrderBy(item => item.Slots.Length).ToArray();
++        if (options.Any(item => item.Slots.Length == 0)) return false;
++        var chosen = new List<RandomizationSocket>();
++        var attempts = 0;
++        bool Place(int index)
++        {
++            if (++attempts > 4096) return false;
++            if (index == options.Length) return true;
++            foreach (var slot in options[index].Slots)
++            {
++                if (chosen.Any(other => other.Group == slot.Group || other.Blocks.Contains(slot.Type) || slot.Blocks.Contains(other.Type))) continue;
++                chosen.Add(slot);
++                if (Place(index + 1)) return true;
++                chosen.RemoveAt(chosen.Count - 1);
++            }
++            return false;
++        }
++        if (!Place(0)) return false;
++        var installed = addons.ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var installedTypes = addons.SelectMany(SocketTypes).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        foreach (var id in addons)
++            foreach (var definition in FileChain(id))
++                foreach (var condition in definition.Xml.Element("GameData")?.Elements()
++                             .Where(element => element.Name.LocalName is "RequiredAddon" or "ExcludedAddon") ?? [])
++                {
++                    var tokens = condition.Attributes().SelectMany(attribute => Split(attribute.Value)).ToArray();
++                    if (tokens.Length == 0) return false;
++                    var found = tokens.Any(token => installed.Contains(token) || installedTypes.Contains(token));
++                    if (condition.Name.LocalName == "RequiredAddon" ? !found : found) return false;
++                }
++        return true;
++    }
++
++    private static int TireCategory(string category) => category switch
++    {
++        "Highway" => 0, "All-terrain" => 1, "Offroad" => 2, "Mudtires" => 3, _ => -1
++    };
++
++    private RandomizationTire[] RandomizationTires(string truck)
++    {
++        if (_randomTires.TryGetValue(truck, out var cached)) return cached;
++        var chain = FileChain(truck).ToArray();
++        var result = new List<RandomizationTire>();
++        var defaultRim = DefaultWheel(chain, "DefaultRim");
++        var defaultSuspension = chain.Select(definition => (string?)definition.Xml.Element("TruckData")?.Element("SuspensionSocket")?.Attribute("Default"))
++            .FirstOrDefault(value => value is not null) ?? "";
++        foreach (var wheel in chain.SelectMany(definition => definition.Xml.Descendants("CompatibleWheels")))
++        {
++            var type = (string?)wheel.Attribute("Type") ?? "";
++            if (!float.TryParse((string?)wheel.Attribute("Scale"), NumberStyles.Float, CultureInfo.InvariantCulture, out var scale) || scale <= 0 || scale > 10) continue;
++            var suspension = (string?)wheel.Attribute("Suspension");
++            if (!string.IsNullOrEmpty(suspension) && !Split(suspension).Contains(defaultSuspension, StringComparer.OrdinalIgnoreCase)) continue;
++            var rims = FileChain(type).SelectMany(definition => definition.Xml.Element("TruckRims")?.Elements("TruckRim") ?? [])
++                .Select(rim => (string?)rim.Attribute("Name") ?? "").Where(id => id.Length > 0).ToArray();
++            var rim = rims.Length == 0 || rims.Contains(defaultRim, StringComparer.OrdinalIgnoreCase) ? defaultRim : rims[0];
++            var radiusText = FileChain(type).Select(definition => (string?)definition.Xml.Attribute("Radius")).FirstOrDefault(value => value is not null);
++            var radius = float.TryParse(radiusText, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedRadius) && parsedRadius > 0 ? parsedRadius : 1f;
++            var order = 0;
++            foreach (var (id, tire) in Tires(type))
++            {
++                var category = TireCategory(tire.Category);
++                if (category >= 0) result.Add(new(type, id, rim, scale, category, order, scale * radius));
++                order++;
++            }
++        }
++        return _randomTires[truck] = result.ToArray();
++    }
++
++    public bool TryRandomizationConfiguration(RegionTruckEntry original, string truck, int requestedTires,
++        out MapTruckEquipment configuration, out bool tireFallback)
++    {
++        lock (_gate)
++        {
++            configuration = MapTruckEquipment.Unknown; tireFallback = false;
++            var baseline = original.OriginalEquipment ?? original.RawEquipment;
++            if (baseline is not { Parsed: true }) return false;
++            var required = ResolveCore(original.BaselineTruckCode, baseline).InstalledAddons!
++                .Select(addon => (addon.Id, Kind: RequiredAddonKind(addon.Id))).Where(item => item.Kind is not null)
++                .DistinctBy(item => item.Id, StringComparer.OrdinalIgnoreCase).Select(item => (Kind: item.Kind!, Original: item.Id)).ToArray();
++            _randomAddons ??= _files.Keys.Where(id => FileChain(id).FirstOrDefault()?.Xml.Name.LocalName == "TruckAddon")
++                .Select(id => (Id: id, Kind: RequiredAddonKind(id))).Where(item => item.Kind is not null)
++                .GroupBy(item => item.Kind!).ToDictionary(group => group.Key, group => group.Select(item => item.Id).Order(StringComparer.OrdinalIgnoreCase).ToArray());
++            var selected = new List<string>();
++            var attempts = 0;
++            bool Select(int index)
++            {
++                if (++attempts > 1024) return false;
++                if (index == required.Length) return CanInstallAddons(truck, selected);
++                if (!_randomAddons.TryGetValue(required[index].Kind, out var options)) return false;
++                foreach (var id in options.OrderBy(id => id.Equals(required[index].Original, StringComparison.OrdinalIgnoreCase) ? 0 : 1))
++                {
++                    if (selected.Contains(id, StringComparer.OrdinalIgnoreCase)) continue;
++                    if (!SocketTypes(id).Any(type => RandomizationSockets(truck).Any(socket => socket.Type.Equals(type, StringComparison.OrdinalIgnoreCase)))) continue;
++                    selected.Add(id);
++                    if (Select(index + 1)) return true;
++                    selected.RemoveAt(selected.Count - 1);
++                }
++                return false;
++            }
++            if (!Select(0)) return false;
++            foreach (var addon in DefaultAddons(FileChain(truck).ToArray()))
++                if (!selected.Contains(addon, StringComparer.OrdinalIgnoreCase) && CanInstallAddons(truck, selected.Append(addon).ToArray())) selected.Add(addon);
++            var tires = RandomizationTires(truck).OrderBy(tire => Math.Abs(tire.Category - requestedTires))
++                .ThenBy(tire => tire.Size).ThenBy(tire => tire.Order).ThenBy(tire => tire.WheelType, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
++            if (tires is null || selected.Count > 128 || !MapIdentifier(truck) || selected.Any(id => !MapIdentifier(id))
++                || !MapIdentifier(tires.WheelType) || !MapIdentifier(tires.Tire) || !MapIdentifier(tires.Rim)) return false;
++            configuration = new(true, selected, tires.WheelType, tires.Tire, tires.Rim, WheelScale: tires.Scale);
++            tireFallback = tires.Category != requestedTires;
++            return true;
++        }
++    }
++
++    public bool IsConfigurationSupported(string truck, MapTruckEquipment configuration)
++    {
++        lock (_gate) return MapIdentifier(truck) && truck.Length > 0 && configuration.Parsed && configuration.Addons is not null
++            && configuration.Addons.Count <= 128 && configuration.Addons.All(MapIdentifier)
++            && configuration.Engine == "" && configuration.Gearbox == "" && configuration.Winch == "" && configuration.Suspension == ""
++            && RandomizationTires(truck).Any(tire => tire.WheelType == configuration.WheelType && tire.Tire == configuration.Tire
++                && tire.Rim == configuration.Rim && tire.Scale == configuration.WheelScale)
++            && CanInstallAddons(truck, configuration.Addons);
++    }
++}
+--- /dev/null
++++ src\SnowPakTool.Desktop\ObtainableTruckRandomizer.cs
+@@ -0,0 +1,125 @@
++using System.Buffers.Binary;
++using System.Security.Cryptography;
++using System.Text;
++
++namespace SnowPakTool.Desktop;
++
++internal static class ObtainableTruckRandomizer
++{
++    private static int TruckQuality(string tier) => tier switch
++    {
++        "FX" => 0, "D" => 1, "C" => 2, "B" => 3, "A" => 4, "S" => 5, "SS" => 6, _ => -1
++    };
++
++    public static void Randomize(string workspace, RegionTruckCatalog catalog, IReadOnlySet<string> ownedRegions,
++        IReadOnlyList<CustomTruck> ownedTrucks, RegionProgressionState progression, IReadOnlyList<GroupState> truckTiers,
++        IReadOnlyList<GroupState> regionTiers, IProgress<string> progress, int? seed = null)
++    {
++        if (!progression.IsFinalized || progression.Order.Count == 0)
++            throw new InvalidOperationException("Finalize Region progression before randomizing obtainable trucks.");
++        var equipment = catalog.EquipmentCatalog ?? throw new InvalidOperationException("Load map and equipment data before randomizing.");
++        var quality = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        foreach (var tier in truckTiers)
++            foreach (var code in tier.TruckCodes)
++                if (TruckQuality(tier.Name) >= 0) quality.TryAdd(code, TruckQuality(tier.Name));
++        var trucks = ownedTrucks.Where(truck => quality.ContainsKey(truck.Code)).DistinctBy(truck => truck.Code, StringComparer.OrdinalIgnoreCase)
++            .OrderBy(truck => truck.Code, StringComparer.OrdinalIgnoreCase).ToArray();
++        if (trucks.Length == 0) throw new InvalidOperationException("Rank your owned trucks in the Truck tier list before randomizing.");
++        var difficulty = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        foreach (var tier in regionTiers)
++            foreach (var code in tier.TruckCodes)
++                if (RegionProgressionService.TierDifficulty(tier.Name) is { } value) difficulty.TryAdd(code, value);
++        var order = progression.Order.Select((code, index) => (code, index))
++            .ToDictionary(item => item.code, item => item.index, StringComparer.OrdinalIgnoreCase);
++        var assignments = PendingTruckReplacements.LoadAssignments(workspace).ToDictionary(item => item.PlacementKey, StringComparer.OrdinalIgnoreCase);
++        var pendingChanges = PendingTruckReplacements.Load(workspace);
++        var pending = pendingChanges.Select(item => item.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var pendingOffsets = pendingChanges.Select(item => item.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var resetKeys = pendingChanges.Where(item => item.ResetOriginal).Select(item => item.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var uses = assignments.Values.GroupBy(item => item.Target.Code, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
++        var regions = catalog.Entries.Where(entry => ownedRegions.Contains(entry.RegionCode) && entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal))
++            .GroupBy(entry => entry.RegionCode).OrderBy(group => order.GetValueOrDefault(group.Key, int.MaxValue)).ThenBy(group => group.Key).ToArray();
++        if (regions.Length == 0) throw new InvalidOperationException("No obtainable placements were found in owned regions.");
++        var runSeed = seed ?? Random.Shared.Next();
++        foreach (var region in regions)
++        {
++            var name = region.First().Region;
++            if (!difficulty.TryGetValue(region.Key, out var tier) || !order.TryGetValue(region.Key, out var position))
++            {
++                progress.Report($"{name}: unchanged — assign a difficulty tier and include this region in the finalized progression first.");
++                continue;
++            }
++            var planned = new List<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)>();
++            var counts = new Dictionary<string, int>(uses, StringComparer.OrdinalIgnoreCase);
++            var kept = 0; var skipped = 0; var fallbacks = 0;
++            var errors = new Dictionary<string, int>();
++            void Skip(string reason) { skipped++; errors[reason] = errors.GetValueOrDefault(reason) + 1; }
++            var work = region.OrderBy(entry => trucks.Count(truck => SameClass(truck.Class, entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class)))
++                .ThenByDescending(entry => entry.OriginalEquipment?.Addons.Count ?? 0).ThenBy(entry => entry.StablePlacementKey, StringComparer.Ordinal).ToArray();
++            foreach (var entry in work)
++            {
++                if (!resetKeys.Contains(entry.StablePlacementKey) && (entry.FileEntry is not null || pending.Contains(entry.StablePlacementKey)
++                    || pendingOffsets.Contains(entry.MapCode + "|" + entry.PlacementId + "|" + entry.BinaryOffset))) { kept++; continue; }
++                if (assignments.TryGetValue(entry.StablePlacementKey, out var assigned))
++                {
++                    if (entry.TruckCode.Equals(assigned.Target.Code, StringComparison.OrdinalIgnoreCase) && PendingTruckReplacements.EquipmentEqual(entry.RawEquipment, assigned.Configuration)) kept++;
++                    else Skip("saved assignment differs from the current map; reset that placement before randomizing it again");
++                    continue;
++                }
++                if (entry.TruckChanged || !PendingTruckReplacements.EquipmentEqual(entry.RawEquipment, entry.OriginalEquipment)) { kept++; continue; }
++                if (entry.RawEquipment is not { Parsed: true } || entry.PlacementIndex < 0) { Skip("placement equipment could not be read"); continue; }
++                var random = PlacementRandom(runSeed, entry.StablePlacementKey);
++                var requested = tier switch { 0 => 0, 1 => 1, 2 => 2, 3 => random.NextDouble() < 0.5 ? 2 : 3, _ => 3 };
++                if (random.NextDouble() < 0.15) requested = Math.Clamp(requested + (random.Next(2) == 0 ? -1 : 1), 0, 3);
++                var candidates = trucks.Where(truck => SameClass(truck.Class, entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class)
++                    && !truck.Code.Equals(entry.BaselineTruckCode, StringComparison.OrdinalIgnoreCase)).ToList();
++                var accepted = false;
++                while (candidates.Count > 0)
++                {
++                    double Weight(CustomTruck truck)
++                    {
++                        var expected = quality[truck.Code] / 6d * Math.Max(1, progression.Order.Count - 1);
++                        var distance = expected - position;
++                        var spread = distance > 0 ? 1.6 : Math.Max(2, progression.Order.Count * 0.18);
++                        return Math.Max(1e-8, Math.Exp(-0.5 * Math.Pow(distance / spread, 2))) / Math.Pow(1 + counts.GetValueOrDefault(truck.Code), 2);
++                    }
++                    var roll = random.NextDouble() * candidates.Sum(Weight);
++                    var candidate = candidates[^1];
++                    foreach (var truck in candidates) { roll -= Weight(truck); if (roll <= 0) { candidate = truck; break; } }
++                    candidates.Remove(candidate);
++                    if (!equipment.TryRandomizationConfiguration(entry, candidate.Code, requested, out var configuration, out var fallback)) continue;
++                    planned.Add((entry.FileEntry ?? entry, candidate, configuration));
++                    counts[candidate.Code] = counts.GetValueOrDefault(candidate.Code) + 1;
++                    if (fallback) fallbacks++;
++                    accepted = true;
++                    break;
++                }
++                if (!accepted) Skip("no different owned, ranked truck in the same class supports the required addon configuration and tires");
++            }
++            try { PendingTruckReplacements.QueueRandomization(workspace, planned, runSeed); }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
++            {
++                progress.Report($"{name}: error — the region plan could not be saved. Its previous assignments were preserved.");
++                continue;
++            }
++            uses = counts;
++            foreach (var (reason, count) in errors) progress.Report($"{name}: {count} unchanged — {reason}.");
++            progress.Report($"{name}: complete — {planned.Count} randomized, {kept} kept, {skipped} unchanged."
++                + (fallbacks > 0 ? $" Nearest compatible tire category used for {fallbacks} placement(s)." : ""));
++        }
++    }
++
++    private static bool SameClass(string first, string second)
++    {
++        var a = string.Concat(first.Where(char.IsLetterOrDigit));
++        var b = string.Concat(second.Where(char.IsLetterOrDigit));
++        return a.Length > 0 && !a.Equals("Unknown", StringComparison.OrdinalIgnoreCase) && a.Equals(b, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static Random PlacementRandom(int seed, string key)
++    {
++        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(seed.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + key));
++        return new Random(BinaryPrimitives.ReadInt32LittleEndian(bytes));
++    }
++}
+--- /dev/null
++++ .checks\RegionsTrucksRegression\ObtainableRandomizerChecks.cs
+@@ -0,0 +1,108 @@
++using System.Reflection;
++using System.Text.Json;
++using System.IO.Compression;
++using SnowPakTool.Desktop;
++internal static class ObtainableRandomizerChecks
++{
++ sealed class Messages : IProgress<string>{public List<string> Lines {get;}=[];public void Report(string text)=>Lines.Add(text);}
++ static void Check(bool ok,string name){if(!ok)throw new Exception(name);}
++ public static void Run()
++ {
++  var root=Path.Combine(AppContext.BaseDirectory,"randomizer-"+Guid.NewGuid().ToString("N"));
++  var media=Path.Combine(root,"original_files","[media]","classes");var trucks=Path.Combine(media,"trucks");var addons=Path.Combine(trucks,"addons");var ps=Path.Combine(root,"original_files","[ps]");var maps=Path.Combine(root,"maps");var strings=Path.Combine(root,"original_files","[strings]");
++  foreach(var dir in new[]{addons,ps,maps,strings,Path.Combine(media,"wheels")})Directory.CreateDirectory(dir);
++  var names=new Dictionary<string,string>{{"SOURCE","Original vehicle"},{"GOOD","Secret choice one"},{"GOOD2","Secret choice two"},{"BAD","Secret incompatible"},{"SIDEBOARD","Sideboard Bed"}};
++  File.WriteAllText(Path.Combine(strings,"strings_english.str"),string.Join("\n",names.Select(p=>p.Key+" \""+p.Value+"\"")));
++  void Truck(string code,string key,bool bed,string extra="",string wheels="test_wheels")=>File.WriteAllText(Path.Combine(trucks,code+".xml"),
++   $"<Truck><TruckData TruckType=\"HEAVY_DUTY\"><Wheels DefaultWheelType=\"{wheels}\" DefaultTire=\"highway_1\" DefaultRim=\"rim_1\"/></TruckData><GameData><UiDesc UiName=\"{key}\"/><CompatibleWheels Type=\"{wheels}\" Scale=\"0.8\"/><CompatibleWheels Type=\"{wheels}\" Scale=\"0.5\"/>"+
++   (bed ? "<AddonSockets DefaultAddon=\"frame_addon_sideboard_2\"><Socket Names=\"Bed\" "+(code=="test_truck" ? "" : "NamesBlock=\"Other\"")+"/></AddonSockets>" : "")+
++   "<AddonSockets DefaultAddon=\"visual_stock\"><Socket Names=\"Other\"/></AddonSockets>"+extra+"</GameData></Truck>");
++  Truck("test_truck","SOURCE",true);Truck("good","GOOD",true);Truck("good2","GOOD2",true);Truck("bad","BAD",false);
++  File.WriteAllText(Path.Combine(addons,"frame_addon_sideboard_2.xml"),"<TruckAddon><GameData Category=\"frame_addons\"><UiDesc UiName=\"SIDEBOARD\"/><InstallSocket Type=\"Bed\"/></GameData></TruckAddon>");
++  File.WriteAllText(Path.Combine(addons,"frame_addon_kung.xml"),"<TruckAddon><GameData Category=\"frame_addons\"><InstallSocket Type=\"Kung\"/></GameData></TruckAddon>");
++  foreach(var id in new[]{"visual_stock","test_upgrade"})File.WriteAllText(Path.Combine(addons,id+".xml"),"<TruckAddon><GameData><InstallSocket Type=\"Other\"/></GameData></TruckAddon>");
++  File.WriteAllText(Path.Combine(media,"wheels","test_wheels.xml"),"<TruckWheels><TruckRims><TruckRim Name=\"rim_1\"/></TruckRims><TruckTires>"+string.Join("",new[]{"highway","allterrain","offroad","mudtires"}.Select(kind=>$"<TruckTire Name=\"{kind}_1\"><WheelFriction _template=\"{kind}\"/></TruckTire>"))+"</TruckTires></TruckWheels>");
++  Truck("combo","GOOD",true,"<AddonSockets><Socket Names=\"Kung\"/></AddonSockets>");
++  Truck("highway_only","GOOD",true,wheels:"highway_wheels");Truck("private_only","GOOD",true,wheels:"private_wheels");
++  foreach(var (wheel,kind) in new[]{("highway_wheels","highway"),("private_wheels","offroad")})File.WriteAllText(Path.Combine(media,"wheels",wheel+".xml"),$"<TruckWheels Radius=\"1\"><TruckTires><TruckTire Name=\"{kind}_1\"><WheelFriction _template=\"{kind}\"/></TruckTire></TruckTires></TruckWheels>");
++  var data=(byte[])typeof(Program).GetMethod("BuildMap",BindingFlags.Static|BindingFlags.NonPublic)!.Invoke(null,new object[]{new[]{"AWARD","REMOVE","UNKNOWN","",""}})!;
++  foreach(var code in new[]{"us_01","us_02","ru_02"})
++  {
++   using(var zip=ZipFile.Open(Path.Combine(maps,"level_"+code+"_01.pak"),ZipArchiveMode.Create))using(var stream=zip.CreateEntry("[scene]/data_for_ssl.bin").Open())stream.Write(data);
++   File.WriteAllText(Path.Combine(ps,code+"_01_tasks.sso"),"tasksSettings = { AWARD_TASK = { stages = [ { truckDelivery = [ { truckId = \"AWARD\" afterStageFinished = \"REWARD\" } ] } ] __type = \"TaskSettings\" } REMOVE_TASK = { stages = [ { truckDelivery = [ { truckId = \"REMOVE\" afterStageFinished = \"DESTROY\" } ] } ] __type = \"TaskSettings\" } }");
++  }
++  var inputBytes=Directory.EnumerateFiles(maps,"*.pak").ToDictionary(path=>path,File.ReadAllBytes);
++  var availability=new RegionTruckAvailabilityStore(Path.Combine(root,"availability.json"));
++  RegionTruckCatalog Load()=>RegionTruckCatalogService.Load(root,maps,names,new Dictionary<string,string>{{"us_01","First region"},{"us_02","Second region"},{"ru_02","Unsorted region"}},availability);
++  var original=Load();Check(original.Entries.Count(e=>e.Availability.StartsWith("Obtainable"))==9,"obtainable fixture classifications");
++  var progression=new RegionProgressionState{IsFinalized=true,HasRandomized=true,Order=["us_01","us_02","ru_02"]};
++  var tiers=new List<GroupState>{new(){Name="FX",TruckCodes=["good","good2"]},new(){Name="SS",TruckCodes=["bad"]}};
++  var difficulties=new List<GroupState>{new(){Name="D",TruckCodes=["us_01"]},new(){Name="S",TruckCodes=["us_02"]}};
++  var owned=new List<CustomTruck>{new("good","Secret choice one","Heavy-duty"),new("good2","Secret choice two","Heavy-duty"),new("bad","Secret incompatible","Heavy-duty"),new("good","Wrong class decoy","Scout")};
++  var regions=new HashSet<string>(new[]{"us_01","ru_02"},StringComparer.OrdinalIgnoreCase);var log=new Messages();
++  void Randomize(RegionTruckCatalog catalog,int seed=42)=>ObtainableTruckRandomizer.Randomize(root,catalog,regions,owned,progression,tiers,difficulties,log,seed);
++  progression.IsFinalized=false;bool refused=false;try{Randomize(original);}catch(InvalidOperationException){refused=true;}Check(refused && PendingTruckReplacements.Load(root).Count==0,"requires finalized progression");progression.IsFinalized=true;
++  var source=original.Entries.First(e=>e.PlacementId=="AWARD");var eq=original.EquipmentCatalog!;
++  Check(!eq.TryRandomizationConfiguration(source,"bad",3,out _,out _),"unsupported required addon rejected");
++  Check(eq.TryRandomizationConfiguration(source,"good",3,out var exact,out _) && exact.Tire=="mudtires_1" && exact.WheelScale==0.5f,"smallest tire in requested category");
++  Check(exact.Addons.SequenceEqual(new[]{"frame_addon_sideboard_2"}),"required addon installed, blocked optional default omitted");
++  Check(eq.IsConfigurationSupported("good",exact),"configuration validation");
++  var combo=source with{OriginalEquipment=new(true,["frame_addon_sideboard_2","frame_addon_kung"],"","","",WheelScale:0)};
++  Check(!eq.TryRandomizationConfiguration(combo,"good",1,out _,out _),"unsupported multiple required addons rejected");
++  Check(eq.TryRandomizationConfiguration(combo,"combo",1,out var combined,out _) && combined.Addons.Contains("frame_addon_kung") && combined.Addons.Contains("frame_addon_sideboard_2"),"rare multiple-addon combination installed together");
++  Check(eq.TryRandomizationConfiguration(source,"highway_only",3,out var fallbackConfig,out var usedFallback) && usedFallback && fallbackConfig.Tire=="highway_1","nearest supported tire fallback");
++  Check(eq.TryRandomizationConfiguration(source,"private_only",2,out var privateConfig,out _) && eq.ResolveConfigured("private_only",privateConfig).Tires=="Custom (Offroad)","custom tires use underlying category");
++  Randomize(original);
++  var pending=PendingTruckReplacements.Load(root);var assignments=PendingTruckReplacements.LoadAssignments(root);
++  Check(pending.Count==3 && assignments.Count==3 && pending.All(p=>p.Original.RegionCode=="us_01"),"only owned ranked obtainable placements randomized");
++  Check(pending.All(p=>p.Target.Code is "good" or "good2" && p.Configuration!.Addons.Contains("frame_addon_sideboard_2")),"incompatible truck never selected and equipment stored");
++  Check(pending.Select(p=>p.Target.Code).Distinct().Count()==2,"diversity preference");
++  Check(log.Lines.Any(l=>l.Contains("Unsorted region")&&l.Contains("unchanged")) && log.Lines.Any(l=>l.Contains("First region: complete")),"region completion and unsorted messages");
++  Check(!log.Lines.Any(l=>l.Contains("Secret")||l.Contains("good")||l.Contains("bad")||l.Contains("test_truck")||l.Contains("mudtires_1")),"logs contain no replacement spoilers");
++  void NoAuditSpoilers(string phase)
++  {
++   var rows=WorkspaceChangeAudit.MapFiles(root);
++   Check(!rows.Any(row=>new[]{row.Property,row.Before,row.After}.Any(text=>text.Contains("Secret")||text.Contains("good")||text.Contains("mudtires_1")||text.Contains("frame_addon_sideboard_2"))),"Start stays spoiler free: "+phase);
++  }
++  NoAuditSpoilers("pending");
++  var planPath=Path.Combine(root,"region-maps","pending-replacements.json");var savedJson=File.ReadAllText(planPath);Randomize(original,77);Check(File.ReadAllText(planPath)==savedJson,"rerun preserves pending assignments byte for byte");
++  foreach(var pair in inputBytes)Check(File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value),"queue does not write input map");
++  var goodXml=File.ReadAllText(Path.Combine(trucks,"good.xml"));var good2Xml=File.ReadAllText(Path.Combine(trucks,"good2.xml"));
++  File.WriteAllText(Path.Combine(trucks,"good.xml"),goodXml.Replace("Names=\"Bed\"","Names=\"Unavailable\""));File.WriteAllText(Path.Combine(trucks,"good2.xml"),good2Xml.Replace("Names=\"Bed\"","Names=\"Unavailable\""));
++  bool incompatible=false;try{PendingTruckReplacements.ApplyAll(root);}catch(InvalidDataException){incompatible=true;}
++  Check(incompatible && !TruckReplacementStore.SavedMaps(root).Any() && PendingTruckReplacements.Load(root).Count==3,"Apply revalidates changed definitions without partial map writes");
++  File.WriteAllText(Path.Combine(trucks,"good.xml"),goodXml);File.WriteAllText(Path.Combine(trucks,"good2.xml"),good2Xml);
++  var preview=Load();Check(preview.Entries.Where(e=>e.FileEntry is not null).All(e=>e.TireDetails.Contains("0.5")&&e.FrameAddons.Contains("Sideboard")),"Regions-Trucks preview shows exact equipment");
++  var written=PendingTruckReplacements.ApplyAll(root);Check(written.Count==1 && PendingTruckReplacements.Load(root).Count==0 && PendingTruckReplacements.LoadAssignments(root).Count==3,"Apply retains persistent assignment ledger");
++  var applied=Load();NoAuditSpoilers("applied");
++  foreach(var assignment in assignments)
++  {var actual=applied.Entries.Single(e=>e.StablePlacementKey==assignment.PlacementKey);Check(actual.TruckCode==assignment.Target.Code && PendingTruckReplacements.EquipmentEqual(actual.RawEquipment,assignment.Configuration),"written model and all equipment fields match plan");}
++  Randomize(applied,999);Check(PendingTruckReplacements.Load(root).Count==0 && PendingTruckReplacements.LoadAssignments(root).Count==3,"applied assignments not rerolled");
++  regions.Add("us_02");Randomize(applied,123);
++  Check(PendingTruckReplacements.Load(root).All(p=>p.Original.RegionCode=="us_02"),"new ownership only processes new placements");
++  Check(assignments.All(a=>PendingTruckReplacements.LoadAssignments(root).Any(b=>a.PlacementKey==b.PlacementKey && a.Target==b.Target && a.Seed==b.Seed && a.CreatedAt==b.CreatedAt && PendingTruckReplacements.EquipmentEqual(a.Configuration,b.Configuration))),"previous assignments unchanged after new ownership");
++  PendingTruckReplacements.ApplyAll(root);applied=Load();PendingTruckReplacements.Reset(root,applied.Entries.Where(e=>e.RegionCode=="us_01").ToArray());
++  Check(PendingTruckReplacements.Load(root).Count==3 && PendingTruckReplacements.Load(root).All(p=>p.ResetOriginal),"reset queues full restoration");NoAuditSpoilers("reset");
++  Check(PendingTruckReplacements.LoadAssignments(root).All(a=>a.RegionCode=="us_02"),"reset clears only selected region assignments");
++  Randomize(Load(),800);
++  Check(PendingTruckReplacements.Load(root).Count==3 && PendingTruckReplacements.Load(root).All(item=>item.Randomized&&!item.ResetOriginal),"reset can be rerolled before an intermediate Apply");
++  PendingTruckReplacements.Reset(root,Load().Entries.Where(e=>e.RegionCode=="us_01").ToArray());
++
++  PendingTruckReplacements.ApplyAll(root);
++  var output=written.Single().OutputPath;Check(RegionTruckCatalogService.ReadMapData(output)!.SequenceEqual(data),"reset restores original scene bytes including engine/wheels/addons");
++  Check(File.ReadAllBytes(Path.Combine(maps,"level_us_01_01.pak")).SequenceEqual(File.ReadAllBytes(written.Single().OriginalBackupPath)),"original archive preserved");
++  Randomize(Load(),456);var afterReset=Load();PendingTruckReplacements.Reset(root,afterReset.Entries.Where(e=>e.RegionCode=="us_01").ToArray());
++  Check(PendingTruckReplacements.Load(root).Count==0 && RegionTruckCatalogService.ReadMapData(output)!.SequenceEqual(data),"reset before Apply cancels plan without writing maps");
++  var badOnly=new[]{new CustomTruck("bad","Secret incompatible","Heavy-duty")};var beforeFailure=File.ReadAllText(planPath);
++  ObtainableTruckRandomizer.Randomize(root,Load(),new HashSet<string>{"us_01"},badOnly,progression,tiers,difficulties,log,1);
++  Check(File.ReadAllText(planPath)==beforeFailure && log.Lines.Any(l=>l.Contains("no different owned")),"no valid candidate leaves state untouched and logs an error");
++  var custom=Load() with{Entries=Load().Entries.Where(e=>e.RegionCode=="us_01").Select(e=>e with{Class="Farming Tractor",OriginalClass="Farming Tractor"}).ToArray()};
++  ObtainableTruckRandomizer.Randomize(root,custom,new HashSet<string>{"us_01"},[new("good","Secret choice one","Farming Tractor"),new("good2","Secret choice two","Heavy-duty")],progression,tiers,difficulties,log,3);
++  Check(PendingTruckReplacements.Load(root).All(p=>p.Target.Code=="good"),"custom Farming Tractor class respected");
++  PendingTruckReplacements.Reset(root,Load().Entries.Where(e=>e.RegionCode=="us_01").ToArray());
++  var legacy=Path.Combine(root,"legacy");Directory.CreateDirectory(Path.Combine(legacy,"region-maps"));var legacyPath=Path.Combine(legacy,"region-maps","pending-replacements.json");
++  File.WriteAllText(legacyPath,JsonSerializer.Serialize(new[]{new PendingTruckReplacement("legacy",source,new("good","Secret choice one","Heavy-duty"),DateTimeOffset.UtcNow)}));
++  Check(PendingTruckReplacements.Load(legacy).Count==1,"legacy pending array remains readable");PendingTruckReplacements.Discard(legacy,"legacy");Check(PendingTruckReplacements.Load(legacy).Count==0,"legacy plan migrated safely on write");
++  Console.WriteLine("PASS randomizer: owned/class/tier filters, required addon rejection and retry, smallest configured tires, diversity, exact preview/Apply, stable assignments and new ownership, full equipment reset and cancellation, spoiler-free logs, custom classes, legacy plans and original preservation.");
++ }
++}
+--- /dev/null
++++ .checks\RegionsTrucksRegression\RealRandomizerEquipmentChecks.cs
+@@ -0,0 +1,28 @@
++using SnowPakTool.Desktop;
++internal static class RealRandomizerEquipmentChecks
++{
++ public static void Run(string workspace)
++ {
++  var warnings=new List<string>();var names=LocalizedStrings.Load(WorkspaceOriginals.GetCurrentPath(workspace,Path.Combine("[strings]","strings_english.str")));
++  var equipment=new TruckEquipmentCatalog(workspace,names,warnings);
++  var source=new RegionTruckEntry("us_01","Region","level_us_01_01","Map","international_fleetstar_f2070a","Original","Heavy-duty","Obtainable — discovery/start","","",0,0,0,"","",
++   OriginalEquipment:new(true,["frame_addon_sideboard_2"],"","","",WheelScale:0));
++  var count=0;
++  foreach(var target in new[]{"international_paystar_5070","ws_4964_white","voron_ae4380","voron_grad"})
++   for(var category=0;category<4;category++)
++   {
++    if(!equipment.TryRandomizationConfiguration(source,target,category,out var config,out _))
++    {
++     object? Call(string method,params object[] values)=>equipment.GetType().GetMethod(method,System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.Invoke(equipment,values);
++     Console.WriteLine("sockets="+((Array)Call("RandomizationSockets",target)!).Length+" tires="+((Array)Call("RandomizationTires",target)!).Length+" bed="+Call("CanInstallAddons",target,new[]{"frame_addon_sideboard_2"}));
++     foreach(var addon in equipment.Resolve(source.TruckCode,source.OriginalEquipment!).InstalledAddons!)Console.WriteLine(addon.Id+" => "+Call("RequiredAddonKind",addon.Id));
++     foreach(var warning in warnings.Take(4))Console.WriteLine(warning);
++     throw new Exception("Real definition did not produce a valid sideboard/tire configuration: "+target);
++    }
++    if(!equipment.IsConfigurationSupported(target,config))throw new Exception("Real configuration failed validation");
++    if(!equipment.ResolveConfigured(target,config).InstalledAddons!.Any(a=>a.Name.Contains("Sideboard",StringComparison.OrdinalIgnoreCase)))throw new Exception("Real sideboard missing");
++    count++;
++   }
++  Console.WriteLine($"PASS read-only real definitions: {count} sideboard/tire combinations across four vehicles; configurations validated without queuing or writing maps.");
++ }
++}

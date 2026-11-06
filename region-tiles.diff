@@ -1,0 +1,433 @@
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index c11e177..2950fc9 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -146,19 +146,24 @@ internal sealed class RegionsTrucksTab : UserControl
+     {
+         if (_catalog is null) return;
+         _regions.SuspendLayout();
+-        foreach (var group in _catalog.Entries.GroupBy(entry => entry.RegionCode).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
++        foreach (var group in _catalog.Entries.GroupBy(entry => entry.RegionCode)
++                     .OrderBy(group => RegionTileAssets.GetReleaseOrder(group.Key))
++                     .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+         {
+             var code = group.Key;
+             var rows = group.ToArray();
+             var obtainable = rows.Count(row => row.Availability.StartsWith("Obtainable", StringComparison.Ordinal));
+             var missions = rows.Count(row => row.Availability == "Mission/task only");
+             var unverified = rows.Length - obtainable - missions;
+-            var tile = new Button
++            var tile = new RegionTileButton
+             {
+                 Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
+-                Text = rows[0].Region + "\n\n" + code.ToUpperInvariant() + "\n"
+-                    + $"{rows.Select(row => row.MapCode).Distinct().Count()} maps · {rows.Length} placements\n\n"
++                RegionName = rows[0].Region,
++                ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(),
++                Summary = $"{rows.Select(row => row.MapCode).Distinct().Count()} maps · {rows.Length} placements\n"
+                     + $"{obtainable} obtainable\n{missions} mission/task only\n{unverified} unverified",
++                Thumbnail = RegionTileAssets.GetThumbnail(code),
++                Text = rows[0].Region,
+                 Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+                 TextAlign = ContentAlignment.MiddleCenter, UseVisualStyleBackColor = false,
+                 AccessibleName = rows[0].Region, AccessibleDescription = "Toggle this region in the truck table", Tag = code
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 6b85ade..96b4e80 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -26,6 +26,8 @@ The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variant
+ 
+ The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. Search by truck, map, task or placement ID, and filter by availability. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
++Region tiles retain their 150 × 210 size and are sorted by original release order: the base-game regions followed by seasons 1–19. Each tile has a region-name header, a representative map screenshot from [MapRunner](https://www.maprunner.info/), and a season/counts footer. Thumbnails are embedded for offline use; the source manifest is in `Assets/Regions/sources.json`. Unrecognized future region IDs sort after known releases and retain a text fallback.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/SnowPakTool.Desktop.csproj b/src/SnowPakTool.Desktop/SnowPakTool.Desktop.csproj
+index a8cf516..10ad1df 100644
+--- a/src/SnowPakTool.Desktop/SnowPakTool.Desktop.csproj
++++ b/src/SnowPakTool.Desktop/SnowPakTool.Desktop.csproj
+@@ -15,5 +15,7 @@
+     <EmbeddedResource Include="Assets\aac-58dw.png" />
+     <EmbeddedResource Include="Assets\Trucks\*.png" />
+     <EmbeddedResource Include="Assets\Trucks\aliases.json" />
++    <EmbeddedResource Include="Assets\Regions\*.png" />
++    <EmbeddedResource Include="Assets\Regions\sources.json" />
+   </ItemGroup>
+ </Project>
+diff --git a/src/SnowPakTool.Desktop/THIRD-PARTY-NOTICES.txt b/src/SnowPakTool.Desktop/THIRD-PARTY-NOTICES.txt
+index cc0a143..7b8c308 100644
+--- a/src/SnowPakTool.Desktop/THIRD-PARTY-NOTICES.txt
++++ b/src/SnowPakTool.Desktop/THIRD-PARTY-NOTICES.txt
+@@ -1,3 +1,12 @@
++Region thumbnails
++https://www.maprunner.info/
++
++Region tiles use representative map screenshots from MapRunner. Original MapRunner
++watermarks are preserved. SnowRunner game imagery belongs to its respective rights
++holders. These images are provided for identification in the region catalog.
++Individual source URLs and representative maps are recorded in the embedded
++Assets/Regions/sources.json manifest (retrieved 2026-11-01).
++
+ Bootstrap Icons
+ https://github.com/twbs/icons
+ 
+diff --git a/src/SnowPakTool.Desktop/RegionTileAssets.cs b/src/SnowPakTool.Desktop/RegionTileAssets.cs
+new file mode 100644
+index 0000000..f89dcd7
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/RegionTileAssets.cs
+@@ -0,0 +1,37 @@
++using System.Collections.Concurrent;
++
++namespace SnowPakTool.Desktop;
++
++internal static class RegionTileAssets
++{
++    // Base-game regions, then the regions introduced in seasons 1–19.
++    // Region IDs match dlc_library.sso; chronology follows the original releases,
++    // including seasons 1–3 that predate SnowRunner's Steam launch.
++    private static readonly string[] ReleaseOrder =
++    [
++        "us_01", "us_02", "ru_02", "ru_03", "us_04", "us_03", "ru_04", "ru_05",
++        "us_06", "us_07", "ru_08", "us_09", "us_10", "us_11", "us_12", "ru_13",
++        "us_14", "us_15", "us_16", "ru_17", "us_18", "us_19"
++    ];
++    private static readonly ConcurrentDictionary<string, Lazy<Image?>> Images = new(StringComparer.OrdinalIgnoreCase);
++
++    public static int GetReleaseOrder(string code)
++    {
++        var index = Array.FindIndex(ReleaseOrder, item => item.Equals(code, StringComparison.OrdinalIgnoreCase));
++        return index < 0 ? int.MaxValue : index;
++    }
++
++    public static string GetReleaseLabel(string code)
++    {
++        var order = GetReleaseOrder(code);
++        return order == int.MaxValue ? "Region" : order < 3 ? "Base game" : $"Season {order - 2}";
++    }
++
++    public static Image? GetThumbnail(string code) => Images.GetOrAdd(code, key => new Lazy<Image?>(() =>
++    {
++        using var stream = typeof(RegionTileAssets).Assembly.GetManifestResourceStream($"SnowPakTool.Desktop.Assets.Regions.{key.ToLowerInvariant()}.png");
++        if (stream is null) return null;
++        using var source = Image.FromStream(stream);
++        return new Bitmap(source);
++    })).Value;
++}
+diff --git a/src/SnowPakTool.Desktop/RegionTileButton.cs b/src/SnowPakTool.Desktop/RegionTileButton.cs
+new file mode 100644
+index 0000000..799b2e2
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/RegionTileButton.cs
+@@ -0,0 +1,58 @@
++using System.ComponentModel;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>A keyboard-selectable region card using the same dimensions and header style as truck tiles.</summary>
++internal sealed class RegionTileButton : Button
++{
++    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
++    internal string RegionName { get; init; } = "";
++    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
++    internal string ReleaseLabel { get; init; } = "";
++    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
++    internal string Summary { get; init; } = "";
++    // Cached by RegionTileAssets and shared by every tile for this region.
++    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
++    internal Image? Thumbnail { get; init; }
++
++    public RegionTileButton()
++    {
++        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
++    }
++
++    protected override void OnPaint(PaintEventArgs e)
++    {
++        var graphics = e.Graphics;
++        graphics.Clear(BackColor);
++        var border = Math.Max(1, FlatAppearance.BorderSize);
++        var inner = new Rectangle(border, border, Math.Max(1, Width - 2 * border), Math.Max(1, Height - 2 * border));
++        var header = new Rectangle(inner.X, inner.Y, inner.Width, 30);
++        using var headerFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8.5f, FontStyle.Bold);
++        TextRenderer.DrawText(graphics, RegionName, headerFont, header, ForeColor,
++            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
++
++        var picture = new Rectangle(inner.X, header.Bottom, inner.Width, Math.Max(1, inner.Height - 30 - 76));
++        using (var background = new SolidBrush(Color.FromArgb(30, 35, 40))) graphics.FillRectangle(background, picture);
++        if (Thumbnail is not null)
++        {
++            var scale = Math.Min((float)picture.Width / Thumbnail.Width, (float)picture.Height / Thumbnail.Height);
++            var width = Math.Max(1, (int)Math.Round(Thumbnail.Width * scale));
++            var height = Math.Max(1, (int)Math.Round(Thumbnail.Height * scale));
++            var destination = new Rectangle(picture.X + (picture.Width - width) / 2, picture.Y + (picture.Height - height) / 2, width, height);
++            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
++            graphics.DrawImage(Thumbnail, destination);
++        }
++
++        var release = new Rectangle(inner.X + 2, picture.Bottom + 2, inner.Width - 4, 15);
++        using var releaseFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 7.5f, FontStyle.Bold);
++        TextRenderer.DrawText(graphics, ReleaseLabel, releaseFont, release, ForeColor,
++            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
++        var summary = new Rectangle(inner.X + 2, release.Bottom, inner.Width - 4, inner.Bottom - release.Bottom);
++        using var summaryFont = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8f);
++        TextRenderer.DrawText(graphics, Summary, summaryFont, summary, ForeColor,
++            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
++        using var pen = new Pen(FlatAppearance.BorderColor, border);
++        graphics.DrawRectangle(pen, border / 2f, border / 2f, Width - border, Height - border);
++        if (Focused) ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -border - 2, -border - 2), ForeColor, BackColor);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_02.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_02.png
+new file mode 100644
+index 0000000..b4add5f
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_02.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_03.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_03.png
+new file mode 100644
+index 0000000..c43798c
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_03.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_04.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_04.png
+new file mode 100644
+index 0000000..d6db205
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_04.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_05.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_05.png
+new file mode 100644
+index 0000000..5827413
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_05.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_08.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_08.png
+new file mode 100644
+index 0000000..5a74283
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_08.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_13.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_13.png
+new file mode 100644
+index 0000000..e4bf983
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_13.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/ru_17.png b/src/SnowPakTool.Desktop/Assets/Regions/ru_17.png
+new file mode 100644
+index 0000000..4fc103b
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/ru_17.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/sources.json b/src/SnowPakTool.Desktop/Assets/Regions/sources.json
+new file mode 100644
+index 0000000..d0b69b0
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/Assets/Regions/sources.json
+@@ -0,0 +1,156 @@
++[
++  {
++    "Region": "ru_02",
++    "Map": "level_ru_02_02",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_02_02/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_03",
++    "Map": "level_ru_03_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_03_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_04",
++    "Map": "level_ru_04_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_04_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_05",
++    "Map": "level_ru_05_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_05_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_08",
++    "Map": "level_ru_08_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_08_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_13",
++    "Map": "level_ru_13_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_13_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "ru_17",
++    "Map": "level_ru_17_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_ru_17_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_01",
++    "Map": "level_us_01_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_01_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_02",
++    "Map": "level_us_02_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_02_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_03",
++    "Map": "level_us_03_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_03_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_04",
++    "Map": "level_us_04_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_04_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_06",
++    "Map": "level_us_06_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_06_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_07",
++    "Map": "level_us_07_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_07_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_09",
++    "Map": "level_us_09_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_09_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_10",
++    "Map": "level_us_10_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_10_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_11",
++    "Map": "level_us_11_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_11_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_12",
++    "Map": "level_us_12_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_12_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_14",
++    "Map": "level_us_14_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_14_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_15",
++    "Map": "level_us_15_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_15_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_16",
++    "Map": "level_us_16_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_16_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_18",
++    "Map": "level_us_18_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_18_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  },
++  {
++    "Region": "us_19",
++    "Map": "level_us_19_01",
++    "ImageUrl": "https://cdn3.maprunner.info/snowrunner/levels/level_us_19_01/thumbnail.webp?v=2026-10-16",
++    "SourcePage": "https://www.maprunner.info/",
++    "Retrieved": "2026-11-01"
++  }
++]
+\ No newline at end of file
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_01.png b/src/SnowPakTool.Desktop/Assets/Regions/us_01.png
+new file mode 100644
+index 0000000..6b604be
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_01.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_02.png b/src/SnowPakTool.Desktop/Assets/Regions/us_02.png
+new file mode 100644
+index 0000000..9b6a94d
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_02.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_03.png b/src/SnowPakTool.Desktop/Assets/Regions/us_03.png
+new file mode 100644
+index 0000000..d300e44
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_03.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_04.png b/src/SnowPakTool.Desktop/Assets/Regions/us_04.png
+new file mode 100644
+index 0000000..92d4341
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_04.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_06.png b/src/SnowPakTool.Desktop/Assets/Regions/us_06.png
+new file mode 100644
+index 0000000..28d0871
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_06.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_07.png b/src/SnowPakTool.Desktop/Assets/Regions/us_07.png
+new file mode 100644
+index 0000000..f638c43
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_07.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_09.png b/src/SnowPakTool.Desktop/Assets/Regions/us_09.png
+new file mode 100644
+index 0000000..8accf2c
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_09.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_10.png b/src/SnowPakTool.Desktop/Assets/Regions/us_10.png
+new file mode 100644
+index 0000000..129ef0d
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_10.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_11.png b/src/SnowPakTool.Desktop/Assets/Regions/us_11.png
+new file mode 100644
+index 0000000..10c147b
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_11.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_12.png b/src/SnowPakTool.Desktop/Assets/Regions/us_12.png
+new file mode 100644
+index 0000000..f64a3c8
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_12.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_14.png b/src/SnowPakTool.Desktop/Assets/Regions/us_14.png
+new file mode 100644
+index 0000000..957113a
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_14.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_15.png b/src/SnowPakTool.Desktop/Assets/Regions/us_15.png
+new file mode 100644
+index 0000000..470c28d
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_15.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_16.png b/src/SnowPakTool.Desktop/Assets/Regions/us_16.png
+new file mode 100644
+index 0000000..4e72460
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_16.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_18.png b/src/SnowPakTool.Desktop/Assets/Regions/us_18.png
+new file mode 100644
+index 0000000..0f5999d
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_18.png differ
+diff --git a/src/SnowPakTool.Desktop/Assets/Regions/us_19.png b/src/SnowPakTool.Desktop/Assets/Regions/us_19.png
+new file mode 100644
+index 0000000..6fb1d91
+Binary files /dev/null and b/src/SnowPakTool.Desktop/Assets/Regions/us_19.png differ

@@ -1,0 +1,117 @@
+--- AppColors.cs
++++ AppColors.cs
+@@ -36,6 +36,13 @@
+ 
+     private static Dictionary<string, ColorEntry> CreateEntries() => new(StringComparer.Ordinal)
+     {
++        ["TierSS"] = new("TierSS", "SS — Cyan", "Tier SS background and header", Color.FromArgb(0, 210, 225)),
++        ["TierS"] = new("TierS", "S — Blue", "Tier S background and header", Color.FromArgb(55, 117, 173)),
++        ["TierA"] = new("TierA", "A — Green", "Tier A background and header", Color.FromArgb(45, 180, 75)),
++        ["TierB"] = new("TierB", "B — Lime", "Tier B background and header", Color.FromArgb(180, 220, 115)),
++        ["TierC"] = new("TierC", "C — Yellow", "Tier C background and header", Color.FromArgb(255, 220, 65)),
++        ["TierD"] = new("TierD", "D — Orange", "Tier D background and header", Color.FromArgb(220, 125, 40)),
++        ["TierFX"] = new("TierFX", "FX — Red", "Tier FX background and header", Color.FromArgb(225, 65, 65)),
+         ["Surface"] = new("Surface", "Surface", "Table and graph backgrounds", Color.White),
+         ["AlternateRow"] = new("AlternateRow", "Alternate row", "Alternating table rows", Color.FromArgb(248, 248, 248)),
+         ["SelectionBlue"] = new("SelectionBlue", "Selected cell", "Selected compatibility cells", Color.FromArgb(205, 226, 247)),
+--- TierListStore.cs
++++ TierListStore.cs
+@@ -9,16 +9,7 @@
+         "SnowPakTool.Desktop", "truck-tiers.json");
+     private static readonly string[] Names = ["SS", "S", "A", "B", "C", "D", "FX"];
+ 
+-    public static Color ColorFor(string name) => name switch
+-    {
+-        "SS" => AppColors.Get("GraphOriginal"),
+-        "S" => Color.Cyan,
+-        "A" => AppColors.Get("DAF8E0"),
+-        "B" => Color.Lime,
+-        "C" => AppColors.Get("EngineMatch"),
+-        "D" => AppColors.Get("GraphModified"),
+-        _ => AppColors.Get("FFDCDC")
+-    };
++    public static Color ColorFor(string name) => AppColors.Get($"Tier{name}");
+ 
+     public static List<GroupState> Load()
+     {
+--- SettingsTab.cs
++++ SettingsTab.cs
+@@ -25,7 +25,9 @@
+     private void BuildColorRows()
+     {
+         _colors.SuspendLayout();
+-        _colors.Controls.Clear();
++        foreach (Control control in _colors.Controls.Cast<Control>().ToArray()) control.Dispose();
++        var generalRows = CreateColorPane("General colors");
++        var tierRows = CreateColorPane("Tier colors");
+         foreach (var entry in AppColors.GetEntries())
+         {
+             var row = new TableLayoutPanel
+@@ -54,10 +56,28 @@
+             row.Controls.Add(name, 1, 0);
+             row.Controls.Add(new Label { Text = entry.Usage, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(3, 0, 0, 0) }, 2, 0);
+             row.Controls.Add(code, 3, 0);
+-            _colors.Controls.Add(row);
++            (entry.Key.StartsWith("Tier", StringComparison.Ordinal) ? tierRows : generalRows).Controls.Add(row);
+         }
+         _colors.ResumeLayout();
+     }
+ 
++    private FlowLayoutPanel CreateColorPane(string title)
++    {
++        var pane = new GroupBox
++        {
++            Text = title, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
++            Padding = new Padding(8), Margin = new Padding(0, 0, 0, 12)
++        };
++        var rows = new FlowLayoutPanel
++        {
++            FlowDirection = FlowDirection.TopDown, WrapContents = false,
++            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
++            Location = new Point(8, 24), Margin = Padding.Empty
++        };
++        pane.Controls.Add(rows);
++        _colors.Controls.Add(pane);
++        return rows;
++    }
++
+     private static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+ }
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -112,13 +112,34 @@
+         else
+         {
+             section.Tiles.WrapContents = false;
+-            ((TableLayoutPanel)section.Header.Parent!).RowStyles[0].Height = 0;
++            section.Panel.Text = string.Empty;
++            var content = (TableLayoutPanel)section.Header.Parent!;
++            content.Controls.Remove(section.Header);
++            content.Controls.Remove(section.Tiles);
++            content.ColumnCount = 2;
++            content.ColumnStyles.Clear();
++            content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
++            content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++            content.RowCount = 1;
++            content.RowStyles.Clear();
++            content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++            var tierHeader = new Label
++            {
++                Text = state.Name, Dock = DockStyle.Fill, Margin = Padding.Empty,
++                TextAlign = ContentAlignment.MiddleCenter,
++                Font = new Font(Font.FontFamily, 18f, FontStyle.Bold)
++            };
++            content.Controls.Add(tierHeader, 0, 0);
++            content.Controls.Add(section.Tiles, 1, 0);
++            section.Panel.Disposed += (_, _) => section.Header.Dispose();
+             section.Header.Visible = false;
+             void ApplyTint()
+             {
+                 var c = TierListStore.ColorFor(state.Name);
+                 var b = AppColors.Get("Surface");
+                 section.Panel.BackColor = Color.FromArgb((b.R * 4 + c.R) / 5, (b.G * 4 + c.G) / 5, (b.B * 4 + c.B) / 5);
++                tierHeader.BackColor = Color.FromArgb((b.R + c.R * 2) / 3, (b.G + c.G * 2) / 3, (b.B + c.B * 2) / 3);
++                tierHeader.ForeColor = tierHeader.BackColor.GetBrightness() < 0.45f ? Color.White : Color.Black;
+             }
+             ApplyTint();
+             EventHandler changed = (_, _) => ApplyTint();

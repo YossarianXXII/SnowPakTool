@@ -1,0 +1,432 @@
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+index 2354798..e189480 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed record TruckPropertySpec(string Element, string Attribute, string Label, decimal Step, decimal Minimum, decimal Maximum);
++internal sealed record TruckPropertySpec(string Element, string Attribute, string Label, decimal Step, decimal Minimum, decimal Maximum, bool IsBoolean = false);
+ internal sealed record TruckPropertyEdit(string RelativeFile, string TruckName, string Attribute, decimal Before, decimal After);
+ internal sealed record TruckPropertyPreset(int Version, List<TruckPropertyEdit> Values);
+ internal sealed record TruckPropertyRow(string RelativeFile, CustomTruck Truck, string Country, string DiffLock,
+@@ -17,7 +17,8 @@ internal static class TruckPropertiesStore
+     [
+         new("TruckData", "FuelCapacity", "Fuel capacity (L)", 10, 1, 100000),
+         new("GameData", "UnlockByRank", "Unlock rank", 1, 0, 30),
+-        new("GameData", "Price", "Price", 1000, 0, 100000000)
++        new("GameData", "Price", "Price", 1000, 0, 100000000),
++        new("GameData", "UnlockByExploration", "Unlock by exploration", 1, 0, 1, true)
+     ];
+     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+     private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "truck-properties", "pending-changes.json");
+@@ -26,7 +27,9 @@ internal static class TruckPropertiesStore
+     private static Match Attribute(string text, string attribute) => Regex.Match(text, @"\b" + attribute + "\\s*=\\s*\"(?<value>[^\"]*)\"", RegexOptions.IgnoreCase);
+     internal static string Read(string text, string element, string attribute) => Attribute(Tag(Root(text).Value, element).Value, attribute).Groups["value"].Value;
+     internal static Dictionary<string, decimal> Values(string text) => Specs
+-        .Select(spec => (spec.Attribute, Value: Read(text, spec.Element, spec.Attribute)))
++        .Select(spec => (spec.Attribute, Value: spec.IsBoolean
++            ? (Read(text, spec.Element, spec.Attribute).Equals("true", StringComparison.OrdinalIgnoreCase) ? "1" : "0")
++            : Read(text, spec.Element, spec.Attribute)))
+         .Where(pair => decimal.TryParse(pair.Value, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+         .ToDictionary(pair => pair.Attribute, pair => decimal.Parse(pair.Value, CultureInfo.InvariantCulture));
+ 
+@@ -112,12 +115,24 @@ internal static class TruckPropertiesStore
+             var root = Root(text);
+             var tag = Tag(root.Value, spec.Element);
+             var attribute = Attribute(tag.Value, spec.Attribute);
+-            if (!decimal.TryParse(attribute.Groups["value"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var current)
++            var rawValue = attribute.Groups["value"].Value;
++            decimal current;
++            var valid = spec.IsBoolean ? rawValue.Length == 0 || bool.TryParse(rawValue, out _) : decimal.TryParse(rawValue, NumberStyles.Number, CultureInfo.InvariantCulture, out _);
++            current = spec.IsBoolean ? (rawValue.Equals("true", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
++                : decimal.TryParse(rawValue, NumberStyles.Number, CultureInfo.InvariantCulture, out var number) ? number : 0;
++            if (!root.Success || !tag.Success || !valid
+                 || current != edit.Before && current != edit.After)
+                 throw new InvalidDataException($"{edit.TruckName}: {spec.Label} changed since staging. Reload and stage again.");
++            var replacement = spec.IsBoolean ? (edit.After == 1 ? "true" : "false") : edit.After.ToString(CultureInfo.InvariantCulture);
++            if (!attribute.Success && spec.IsBoolean)
++            {
++                var insert = root.Index + tag.Index + tag.Length - (tag.Value.EndsWith("/>") ? 2 : 1);
++                text = text.Insert(insert, $" {spec.Attribute}=\"{replacement}\"");
++                continue;
++            }
+             var value = attribute.Groups["value"];
+             var offset = root.Index + tag.Index + value.Index;
+-            text = text.Remove(offset, value.Length).Insert(offset, edit.After.ToString(CultureInfo.InvariantCulture));
++            text = text.Remove(offset, value.Length).Insert(offset, replacement);
+         }
+         return text;
+     }
+@@ -153,7 +168,7 @@ internal static class TruckPropertiesStore
+             throw new InvalidDataException("Unsupported truck property preset.");
+         var values = ReadEdits(JsonSerializer.Serialize(preset.Values));
+         // Ignore the short-lived Country payload in older version-2 plans/presets.
+-        // Country availability is read-only; only validated numeric properties can be applied.
++        // Country availability is read-only; only validated supported properties can be applied.
+         return new(2, values);
+     }
+ }
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 23fb79b..6814332 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -15,6 +15,7 @@ internal sealed class TruckPropertiesTab : UserControl
+     private readonly List<RadioButton> _unlockDifficultyOptions = [];
+     private ProgressionDifficulty _unlockDifficulty = ProgressionDifficulty.Normal;
+     private bool _loadingUnlockDifficulty;
++    internal Func<DialogResult> ConfirmExplorationUpdate;
+     private readonly DataGridView _grid = new()
+     {
+         Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+@@ -45,6 +46,9 @@ internal sealed class TruckPropertiesTab : UserControl
+         _getRegions = getRegions;
+         _getEnabledTrucks = getEnabledTrucks;
+         _getStarterContext = getStarterContext;
++        ConfirmExplorationUpdate = () => MessageBox.Show(this,
++            "Update UnlockByExploration as well?\n\nYes is strongly recommended: trucks obtainable on current maps will require discovery before purchase; other trucks will not. This follows randomized/pending map-truck replacements.\n\nChanges are previewed only. Stage the truck properties and any map changes, then Apply from Start.\n\nYes = update exploration flags and ranks. No = ranks only. Cancel = change nothing.",
++            "Update exploration unlocks? — Yes recommended", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+@@ -109,7 +113,7 @@ internal sealed class TruckPropertiesTab : UserControl
+             _unlockDifficultyOptions.Add(radio); unlockOptions.Controls.Add(radio);
+         }
+         bulk.Controls.Add(unlockOptions);
+-        var unlock = AddButton(bulk, "Generate unlock ranks", GenerateUnlockRanks);
++        var unlock = AddButton(bulk, "Generate unlock ranks", async () => await GenerateUnlockRanks());
+         _tips.SetToolTip(unlock, "Preview tier-based ranks with variation. First saved region only: SCOUT/OFFROAD starters at rank 1, other game classes at ranks 1–3. The log explains changed, unchanged and skipped trucks. Stage to keep the ranks.");
+         bulk.Controls.Add(_showUnlockLog);
+         _showUnlockLog.CheckedChanged += (_, _) => _unlockLogSplit.Panel2Collapsed = !_showUnlockLog.Checked;
+@@ -122,11 +126,13 @@ internal sealed class TruckPropertiesTab : UserControl
+         Controls.Add(layout);
+         foreach (var (name, title, width) in new[] { ("Truck", "Truck", 220), ("Class", "Class", 130), ("Tier", "Tier", 65),
+                      ("FuelCapacity", "Fuel capacity (L)", 135), ("UnlockByRank", "Unlock rank", 100), ("Price", "Price", 105),
+-                     ("Regions", "Obtainable in region / map", 360), ("Country", "Store countries", 120), ("DiffLock", "Differential lock", 130) })
++                     ("Regions", "Obtainable in region / map", 360), ("Country", "Store countries", 120), ("DiffLock", "Differential lock", 130),
++                     ("UnlockByExploration", "Unlock by exploration", 160) })
+         {
+             var index = _grid.Columns.Add(name, title);
+             var column = _grid.Columns[index]; column.Width = width;
+-            column.ReadOnly = !TruckPropertiesStore.Specs.Any(spec => spec.Attribute == name);
++            column.ReadOnly = name == "UnlockByExploration" || !TruckPropertiesStore.Specs.Any(spec => spec.Attribute == name);
++            if (name == "UnlockByExploration") column.ValueType = typeof(decimal);
+             column.SortMode = DataGridViewColumnSortMode.Automatic;
+             if (!column.ReadOnly) { column.ValueType = typeof(decimal); column.DefaultCellStyle.Format = "N0"; }
+             column.Visible = name != "DiffLock";
+@@ -272,7 +278,8 @@ internal sealed class TruckPropertiesTab : UserControl
+                 var tier = tiers.FirstOrDefault(tier => tier.TruckCodes.Contains(data.Truck.Code, StringComparer.OrdinalIgnoreCase))?.Name ?? "Unsorted";
+                 var index = _grid.Rows.Add(data.Truck.Name, data.Truck.Class, tier,
+                     data.Draft.GetValueOrDefault("FuelCapacity"), data.Draft.GetValueOrDefault("UnlockByRank"), data.Draft.GetValueOrDefault("Price"),
+-                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Map trucks", data.Country, data.DiffLock);
++                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Map trucks", data.Country, data.DiffLock,
++                    data.Draft.GetValueOrDefault("UnlockByExploration"));
+                 var row = _grid.Rows[index]; row.Tag = data;
+                 row.Cells["Truck"].ToolTipText = data.Truck.Code + "\n" + data.RelativeFile;
+                 if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.ColorFor(tier);
+@@ -296,6 +303,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         cell.Style.BackColor = draft != data.Current[spec.Attribute] ? Color.LightGoldenrodYellow
+             : data.Original.TryGetValue(spec.Attribute, out var original) && draft != original ? Color.Honeydew : AppColors.Get("Surface");
+         cell.ToolTipText = $"Original: {(data.Original.TryGetValue(spec.Attribute, out var baseline) ? baseline.ToString("N0") : "undefined")}\nIn files: {data.Current[spec.Attribute]:N0}\nRange: {spec.Minimum:N0}–{spec.Maximum:N0}";
++        if (spec.IsBoolean) cell.ToolTipText = $"Original: {Flag(data.Original.GetValueOrDefault(spec.Attribute))}\nIn files: {Flag(data.Current[spec.Attribute])}\nPreview: {Flag(draft)}\nUpdated optionally when generating ranks. True requires discovery before purchase.";
+     }
+ 
+     private void FormatValue(object? sender, DataGridViewCellFormattingEventArgs e)
+@@ -303,6 +311,14 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (e.RowIndex < 0 || e.ColumnIndex < 0 || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
+         var attribute = _grid.Columns[e.ColumnIndex].Name;
+         if (e.Value is not decimal value) return;
++        if (attribute == "UnlockByExploration")
++        {
++            var flag = value == 1 ? "true" : "false";
++            e.Value = data.Original.TryGetValue(attribute, out var baseline) && value != baseline
++                ? $"{flag} ({(baseline == 1 ? "true" : "false")})" : flag;
++            e.FormattingApplied = true;
++            return;
++        }
+         if (data.Original.TryGetValue(attribute, out var original) && value != original && !_grid[e.ColumnIndex, e.RowIndex].IsInEditMode)
+         {
+             e.Value = $"{value:N0} ({original:N0})";
+@@ -321,21 +337,41 @@ internal sealed class TruckPropertiesTab : UserControl
+         finally { _loadingUnlockDifficulty = false; }
+     }
+ 
+-    private void GenerateUnlockRanks()
++    private async Task GenerateUnlockRanks()
+     {
+         if (!_grid.EndEdit()) { ShowUnlockReport("Not generated: correct the active numeric cell first. No ranks were changed."); return; }
+         if (!Ready()) { ShowUnlockReport("Not generated: load an extracted workspace first. No ranks were changed."); return; }
+-        var enabled = (_getEnabledTrucks?.Invoke() ?? _rows.Select(row => row.Truck).ToArray()).Select(truck => truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var answer = ConfirmExplorationUpdate();
++        if (answer == DialogResult.Cancel) { ShowUnlockReport("Cancelled. No ranks or exploration flags were changed."); return; }
++        var workspace = _loadedWorkspace!;
++        var sourceRows = _rows;
++        var explorationLog = "EXPLORATION UNLOCK UPDATE — declined; existing preview flags were preserved.";
+         TruckUnlockPlan plan;
++        TruckExplorationUnlockPlan? exploration = null;
++        Enabled = false;
+         try
+         {
++            if (answer == DialogResult.Yes)
++            {
++                var catalog = await _getRegions();
++                if (IsDisposed || !Ready() || workspace != _loadedWorkspace || !ReferenceEquals(sourceRows, _rows)) return;
++                exploration = TruckExplorationUnlockGenerator.Generate(_rows, catalog);
++                explorationLog = string.Join(Environment.NewLine, exploration.Log);
++            }
++            var enabled = (_getEnabledTrucks?.Invoke() ?? _rows.Select(row => row.Truck).ToArray()).Select(truck => truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            var projected = _rows.Select(row => exploration is not null && exploration.Values.TryGetValue(row.RelativeFile, out var flag)
++                ? row with { Draft = new(row.Draft) { ["UnlockByExploration"] = flag } } : row).ToArray();
+             var context = _getStarterContext?.Invoke() ?? TruckUnlockRankGenerator.ResolveFirstRegion(_loadedWorkspace!, new RegionProgressionStore().Load());
+-            plan = TruckUnlockRankGenerator.Generate(_rows, TierListStore.Load(), enabled, _unlockDifficulty, Random.Shared.Next(), context);
++            plan = TruckUnlockRankGenerator.Generate(projected, TierListStore.Load(), enabled, _unlockDifficulty, Random.Shared.Next(), context);
+         }
+-        catch (Exception ex) { ShowUnlockReport("Not generated: " + ex.Message + Environment.NewLine + "No ranks were changed."); throw; }
++        catch (Exception ex) { ShowUnlockReport("Not generated: " + ex.Message + Environment.NewLine + "No ranks or exploration flags were changed."); _status.Text = "Generation failed; see unlock log."; return; }
++        finally { if (!IsDisposed) Enabled = true; }
+         var byFile = plan.Choices.ToDictionary(choice => choice.RelativeFile, StringComparer.OrdinalIgnoreCase);
+         foreach (var row in _rows)
++        {
+             if (byFile.TryGetValue(row.RelativeFile, out var choice)) row.Draft["UnlockByRank"] = choice.Rank;
++            if (exploration is not null && exploration.Values.TryGetValue(row.RelativeFile, out var flag)) row.Draft["UnlockByExploration"] = flag;
++        }
+         ShowRows();
+         var changed = plan.Report.Count(row => row.State == "Changed");
+         var unchanged = plan.Report.Count(row => row.State == "Unchanged");
+@@ -347,9 +383,10 @@ internal sealed class TruckPropertiesTab : UserControl
+         var report = new System.Text.StringBuilder();
+         report.AppendLine($"UNLOCK RANK GENERATION — {_unlockDifficulty}; soft cap ≈{plan.SoftCap}; maximum rank 30; seed {plan.Seed}");
+         report.AppendLine($"First region: {plan.StarterContext.RegionName} [{plan.StarterContext.RegionCode}]; store country: {(plan.StarterContext.Country.Length > 0 ? plan.StarterContext.Country : "unresolved")}. {plan.StarterContext.Note}");
+-        report.AppendLine("Starter rule applies only to that region: SCOUT/OFFROAD at rank 1; HIGHWAY/HEAVY_DUTY/HEAVY at a randomly selected rank 1–3. Countries and unlock locks are preserved.");
++        report.AppendLine("Starter rule applies only to that region: SCOUT/OFFROAD at rank 1; HIGHWAY/HEAVY_DUTY/HEAVY at a randomly selected rank 1–3. Countries and task locks are preserved; starter eligibility uses the resulting exploration flags.");
+         report.AppendLine($"RESULT: {changed} changed; {unchanged} unchanged; {skipped} skipped. Before/after values refer to the preview. Stage then Apply to write changes.");
+         foreach (var issue in plan.MissingCoverage) report.AppendLine("STARTER WARNING: " + issue);
++        report.AppendLine(explorationLog);
+         report.AppendLine();
+         foreach (var row in plan.Report)
+             report.AppendLine($"{row.State.ToUpperInvariant()} | {row.Name} [{row.Code}] | game class {row.GameClass}, tier {row.Tier} | preview {row.Before?.ToString(CultureInfo.InvariantCulture) ?? "undefined"} → {row.After?.ToString(CultureInfo.InvariantCulture) ?? "not edited"} | in files {row.InFiles?.ToString(CultureInfo.InvariantCulture) ?? "undefined"}; original {row.Original?.ToString(CultureInfo.InvariantCulture) ?? "undefined"} | {row.Reason}");
+@@ -438,9 +475,12 @@ internal sealed class TruckPropertiesTab : UserControl
+         var pending = TruckPropertiesStore.LoadSnapshot(workspace);
+         return pending.Values.Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
+             edit.TruckName + ": " + TruckPropertiesStore.Specs.Single(spec => spec.Attribute == edit.Attribute).Label,
+-            edit.Before.ToString(CultureInfo.InvariantCulture), edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
++            edit.Attribute == "UnlockByExploration" ? Flag(edit.Before) : edit.Before.ToString(CultureInfo.InvariantCulture),
++            edit.Attribute == "UnlockByExploration" ? Flag(edit.After) : edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
+     }
+ 
++    private static string Flag(decimal value) => value == 1 ? "true" : "false";
++
+     public void SavePendingChanges()
+     {
+         TruckPropertiesStore.Apply(_getWorkspace().Trim());
+diff --git a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+index 7cb70b6..82f21df 100644
+--- a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
++++ b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+@@ -36,7 +36,7 @@ internal static class TruckUnlockRankGenerator
+             .ToDictionary(group => group.Key, group => group.First().Name, StringComparer.OrdinalIgnoreCase);
+         starterContext ??= new("", "", "", "No first region was supplied; starter coverage skipped.");
+         var candidates = rows.Where(row => enabledCodes.Contains(row.Truck.Code) && row.Draft.ContainsKey("UnlockByRank")
+-            && row.Current.ContainsKey("Price") && !row.RequiresExploration && row.UnlockObjective.Length == 0 && !row.Locked
++            && row.Current.ContainsKey("Price") && row.Draft.GetValueOrDefault("UnlockByExploration", row.RequiresExploration ? 1 : 0) == 0 && row.UnlockObjective.Length == 0 && !row.Locked
+             && row.Country.Length > 0 && GameClasses.Contains(row.GameClass.ToUpperInvariant())).ToArray();
+         var random = new Random(seed);
+         var ranks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+@@ -92,7 +92,7 @@ internal static class TruckUnlockRankGenerator
+         {
+             var exclusions = new List<string>();
+             if (!enabledCodes.Contains(row.Truck.Code)) exclusions.Add("not owned/enabled");
+-            if (row.RequiresExploration) exclusions.Add("UnlockByExploration=true: discover it before buying; changing rank does not clear this lock");
++            if (row.Draft.GetValueOrDefault("UnlockByExploration", row.RequiresExploration ? 1 : 0) == 1) exclusions.Add("UnlockByExploration=true: discover it before buying; changing rank does not clear this lock");
+             if (row.UnlockObjective.Length > 0) exclusions.Add("requires objective " + row.UnlockObjective);
+             if (row.Locked) exclusions.Add("locked unconditionally");
+             if (!row.Current.ContainsKey("Price")) exclusions.Add("no explicit store price");
+diff --git a/README.md b/README.md
+index 123cac2..2bfac0c 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,7 @@ All desktop tabs share one double-Shift text search with a three-character minim
+ 
+ **Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells individually. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to whole litres (halves away from zero), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+-**Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. All modes use wider independent per-truck variation: Easy is broadest and early-biased, Normal has a medium spread, and Hard unlocks later with a narrower but still substantial spread. Original game class is used for starter coverage only; other ranks depend on tier and independent random draws. There is no class balancing, rank-spacing enforcement or gap filling, so multiple trucks may share a rank and empty ranks can still occur. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. Starter coverage uses only the first region in the saved Region progression order and its existing store country. It sets one owned, directly purchasable Scout and Offroad starter to rank 1, and one Highway, Heavy Duty and Heavy starter to a randomly selected rank from 1-3; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in that first store country, the generator reports that class gap and proceeds with the achievable rank changes. Missing first-region/store definitions explicitly skip starter coverage. Other countries receive no starter guarantees. It does not add country assignments or remove discovery/task locks. Staging, Apply, presets and reset handle numeric values only; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview. Generation opens a resizable, copyable report, which can be hidden with Show unlock log. It records the seed, difficulty, first region/store country, coverage warnings and changed/unchanged/skipped totals. Each truck lists its before/after preview rank, file and original ranks, and the reason for its result, including equal random draws, missing tiers/ranks and exclusions from starter coverage. UnlockByExploration=true keeps a truck store-locked until discovered on a map; rank changes do not clear that separate requirement.
++**Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. All modes use wider independent per-truck variation: Easy is broadest and early-biased, Normal has a medium spread, and Hard unlocks later with a narrower but still substantial spread. Original game class is used for starter coverage only; other ranks depend on tier and independent random draws. There is no class balancing, rank-spacing enforcement or gap filling, so multiple trucks may share a rank and empty ranks can still occur. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. Starter coverage uses only the first region in the saved Region progression order and its existing store country. It sets one owned, directly purchasable Scout and Offroad starter to rank 1, and one Highway, Heavy Duty and Heavy starter to a randomly selected rank from 1-3; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in that first store country, the generator reports that class gap and proceeds with the achievable rank changes. Missing first-region/store definitions explicitly skip starter coverage. Other countries receive no starter guarantees. It does not add country assignments or remove task locks. Each generation asks whether to update UnlockByExploration, with Yes strongly recommended and selected by default; No changes ranks only and Cancel changes nothing. Yes sets true for trucks in current obtainable map placements (including randomized/pending replacements and task rewards), and false for other trucks; mission-only vehicles do not count. The table shows true/false with original values and change highlights. Starter eligibility uses these resulting flags, so a discovery-locked truck cannot satisfy immediate buyability. With no maps loaded, map-read warnings or unverified placements, uncertain flags are preserved and explained in the log; confirmed obtainable trucks can still be set true after partial reads. The report lists changed, unchanged and skipped exploration flags. Generate again after changing map-truck assignments, then stage both truck properties and map changes before applying. Staging, Apply, presets, revert and reset handle numeric values and exploration flags; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview. Generation opens a resizable, copyable report, which can be hidden with Show unlock log. It records the seed, difficulty, first region/store country, coverage warnings and changed/unchanged/skipped totals. Each truck lists its before/after preview rank, file and original ranks, and the reason for its result, including equal random draws, missing tiers/ranks and exclusions from starter coverage. UnlockByExploration=true keeps a truck store-locked until discovered on a map; rank changes do not clear that separate requirement.
+ 
+ The **Planning** tab contains **Truck tiers** and **Region difficulty**, alongside ownership and truck groups. **Region difficulty** ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+diff --git a/.checks/UnlockRanks/Program.cs b/.checks/UnlockRanks/Program.cs
+index a666d36..2c2d875 100644
+--- a/.checks/UnlockRanks/Program.cs
++++ b/.checks/UnlockRanks/Program.cs
+@@ -157,6 +157,7 @@ internal static class Program
+         var ownedGetter = Expression.Lambda(typeof(Func<>).MakeGenericType(typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck"))), Expression.Constant(trucks, typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck")))).Compile();
+         var starterGetter = Expression.Lambda(typeof(Func<>).MakeGenericType(T("UnlockStarterContext")), Expression.Constant(Context("US"))).Compile();
+         using var tab = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => root), getter, ownedGetter, starterGetter)!;
++        tab.GetType().GetField("ConfirmExplorationUpdate", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, new Func<DialogResult>(() => DialogResult.No));
+         tab.Size = new Size(1400, 850); tab.CreateControl(); Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
+         var radios = All(tab).OfType<RadioButton>().ToArray();
+         Check(radios.Length == 3 && radios.Single(radio => radio.Checked).Text == "Normal", "unlock difficulty radios load saved setting");
+diff --git a/src/SnowPakTool.Desktop/TruckExplorationUnlockGenerator.cs b/src/SnowPakTool.Desktop/TruckExplorationUnlockGenerator.cs
+new file mode 100644
+index 0000000..f4717e0
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckExplorationUnlockGenerator.cs
+@@ -0,0 +1,38 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed record TruckExplorationUnlockPlan(Dictionary<string, decimal> Values, List<string> Log);
++
++internal static class TruckExplorationUnlockGenerator
++{
++    internal static TruckExplorationUnlockPlan Generate(IReadOnlyList<TruckPropertyRow> rows, RegionTruckCatalog catalog)
++    {
++        var values = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
++        var log = new List<string> { "EXPLORATION UNLOCK UPDATE — current obtainable map placements, including randomized/pending replacements; mission-only placements do not count." };
++        var obtainable = catalog.Entries.Where(entry => entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal))
++            .Select(entry => entry.TruckCode).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var uncertain = catalog.Entries.Where(entry => entry.Availability == "Unverified")
++            .Select(entry => entry.TruckCode).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        log.Add($"{catalog.MapsRead} maps read; {catalog.Warnings.Count} read warnings. Stage map changes as well when using replacement previews.");
++        foreach (var warning in catalog.Warnings) log.Add("MAP WARNING: " + warning);
++        foreach (var row in rows.OrderBy(row => row.Truck.Name, StringComparer.CurrentCultureIgnoreCase))
++        {
++            var before = row.Draft.GetValueOrDefault("UnlockByExploration", row.RequiresExploration ? 1 : 0);
++            var onMap = obtainable.Contains(row.Truck.Code);
++            string? skip = catalog.MapsRead == 0 ? "no maps were read"
++                : !onMap && catalog.Warnings.Count > 0 ? "map read warnings prevent confirming absence"
++                : !onMap && uncertain.Contains(row.Truck.Code) ? "map placement obtainability is unverified" : null;
++            if (skip is not null)
++            {
++                log.Add($"SKIPPED | {row.Truck.Name} [{row.Truck.Code}] | UnlockByExploration stays {Flag(before)}: {skip}.");
++                continue;
++            }
++            var after = onMap ? 1m : 0m;
++            values[row.RelativeFile] = after;
++            log.Add($"{(before == after ? "UNCHANGED" : "CHANGED")} | {row.Truck.Name} [{row.Truck.Code}] | UnlockByExploration {Flag(before)} → {Flag(after)} | "
++                + (onMap ? "obtainable on a current map." : "no obtainable placement in the scanned maps."));
++        }
++        return new(values, log);
++    }
++
++    private static string Flag(decimal value) => value == 1 ? "true" : "false";
++}
+diff --git a/.checks/ExplorationUnlock/Program.cs b/.checks/ExplorationUnlock/Program.cs
+new file mode 100644
+index 0000000..92f7eae
+--- /dev/null
++++ b/.checks/ExplorationUnlock/Program.cs
+@@ -0,0 +1,103 @@
++using System.Collections;
++using System.Linq.Expressions;
++using System.Reflection;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string type) => App.GetType("SnowPakTool.Desktop." + type)!;
++    private static object? Static(string type, string name, params object?[] args) => T(type).GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!.Invoke(null, args);
++    private static object? Call(object target, string name, params object?[] args) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!.Invoke(target, args);
++    private static object P(object obj, string name) => obj.GetType().GetProperty(name)!.GetValue(obj)!;
++    private static object F(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static object Field(object target, string name, object value) { target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(target, value); return target; }
++    private static IEnumerable<object> Items(object items) => ((IEnumerable)items).Cast<object>();
++    private static Dictionary<string, decimal> Draft(object row) => (Dictionary<string, decimal>)P(row, "Draft");
++    private static string Code(object row) => (string)P(P(row, "Truck"), "Code");
++    private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static void Wait(Task task) { while (!task.IsCompleted) { Application.DoEvents(); Thread.Sleep(2); } task.GetAwaiter().GetResult(); }
++    private static object Entry(string code, string availability)
++    {
++        var ctor = T("RegionTruckEntry").GetConstructors().Single();
++        var args = ctor.GetParameters().Select(p => p.HasDefaultValue ? p.DefaultValue : p.ParameterType == typeof(string) ? "fixture" : p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : null).ToArray();
++        foreach (var p in ctor.GetParameters())
++        {
++            if (p.Name == "TruckCode") args[p.Position] = code;
++            if (p.Name == "Availability") args[p.Position] = availability;
++            if (p.Name == "OriginalTruckCode") args[p.Position] = "removed";
++        }
++        return ctor.Invoke(args);
++    }
++    private static object Catalog(string[] warnings, int maps, params object[] entries)
++    {
++        var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(T("RegionTruckEntry")))!;
++        foreach (var entry in entries) list.Add(entry);
++        return Activator.CreateInstance(T("RegionTruckCatalog"), list, warnings, maps, null)!;
++    }
++    [STAThread] private static void Main()
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
++        var files = Path.Combine(root, "initial.pak", "original_files", "[media]", "classes", "trucks"); Directory.CreateDirectory(files);
++        foreach (var (code, flag) in new[] { ("onmap", " UnlockByExploration=\"false\""), ("removed", " UnlockByExploration=\"true\""), ("other", " UnlockByExploration=\"true\""), ("missing", ""), ("mission", " UnlockByExploration=\"false\"") })
++            File.WriteAllText(Path.Combine(files, code + ".xml"), $"<_templates><GameData UnlockByExploration=\"false\"/></_templates><Truck><TruckData TruckType=\"SCOUT\" FuelCapacity=\"100\"/><GameData Country=\"US\" Price=\"1000\" UnlockByRank=\"20\"{flag}><UiDesc UiName=\"{code}\"/></GameData><Keep Value=\"untouched\"/></Truck>");
++        var rows = Static("TruckPropertiesStore", "LoadRows", root)!;
++        var byCode = Items(rows).ToDictionary(Code);
++        var catalog = Catalog([], 1, Entry("onmap", "Obtainable — discovery/start"), Entry("missing", "Obtainable — task reward"), Entry("mission", "Mission/task only"));
++        var plan = Static("TruckExplorationUnlockGenerator", "Generate", rows, catalog)!;
++        var values = (Dictionary<string, decimal>)P(plan, "Values");
++        decimal Value(string code) => values[(string)P(byCode[code], "RelativeFile")];
++        Check(Value("onmap") == 1 && Value("missing") == 1 && Value("removed") == 0 && Value("other") == 0 && Value("mission") == 0, "current replacements and rewards require exploration; removed/store-only/mission trucks do not");
++        Check(Items(P(plan, "Log")).Any(line => line.ToString()!.Contains("UNCHANGED")), "unchanged exploration results are explained");
++        var empty = Static("TruckExplorationUnlockGenerator", "Generate", rows, Catalog([], 0))!;
++        Check(((IDictionary)P(empty, "Values")).Count == 0 && Items(P(empty, "Log")).Any(line => line.ToString()!.Contains("no maps were read")), "missing map data preserves every flag and explains why");
++        var partial = Static("TruckExplorationUnlockGenerator", "Generate", rows, Catalog(["map unreadable"], 1, Entry("onmap", "Obtainable — discovery/start")))!;
++        Check(((IDictionary)P(partial, "Values")).Count == 1, "partial reads only update confirmed obtainable trucks");
++        var uncertain = Static("TruckExplorationUnlockGenerator", "Generate", rows, Catalog([], 1, Entry("other", "Unverified")))!;
++        Check(!((IDictionary)P(uncertain, "Values")).Contains(P(byCode["other"], "RelativeFile")), "unverified placements preserve exploration flags");
++        var getter = Expression.Lambda(typeof(Func<>).MakeGenericType(typeof(Task<>).MakeGenericType(T("RegionTruckCatalog"))),
++            Expression.Call(typeof(Task).GetMethod("FromResult")!.MakeGenericMethod(T("RegionTruckCatalog")), Expression.Constant(catalog))).Compile();
++        var context = Activator.CreateInstance(T("UnlockStarterContext"), "first", "First", "US", "Test saved order.")!;
++        var starter = Expression.Lambda(typeof(Func<>).MakeGenericType(T("UnlockStarterContext")), Expression.Constant(context)).Compile();
++        using var tab = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => root), getter, null, starter)!;
++        tab.Size = new Size(1450, 850); tab.CreateControl(); Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        Field(tab, "ConfirmExplorationUpdate", new Func<DialogResult>(() => DialogResult.Cancel));
++        Wait((Task)Call(tab, "GenerateUnlockRanks")!);
++        Check(Items(F(tab, "_rows")).All(row => Draft(row)["UnlockByRank"] == 20) && ((TextBox)F(tab, "_unlockLog")).Text.Contains("Cancelled"), "Cancel leaves ranks and flags untouched");
++        Field(tab, "ConfirmExplorationUpdate", new Func<DialogResult>(() => DialogResult.No));
++        Wait((Task)Call(tab, "GenerateUnlockRanks")!);
++        Check(Items(F(tab, "_rows")).All(row => Draft(row)["UnlockByExploration"] == Draft(byCode[Code(row)])["UnlockByExploration"]), "No generates ranks without changing exploration flags");
++        var ranksBeforeYes = Items(F(tab, "_rows")).ToDictionary(Code, row => Draft(row)["UnlockByRank"]);
++        Field(tab, "ConfirmExplorationUpdate", new Func<DialogResult>(() => DialogResult.Yes));
++        Wait((Task)Call(tab, "GenerateUnlockRanks")!);
++        var uiRows = Items(F(tab, "_rows")).ToDictionary(Code);
++        Check(uiRows.All(pair => Draft(pair.Value)["UnlockByExploration"] == Value(pair.Key)), "Yes previews exploration flags alongside ranks");
++        Check(Draft(uiRows["onmap"])["UnlockByRank"] == ranksBeforeYes["onmap"] && Draft(uiRows["missing"])["UnlockByRank"] == ranksBeforeYes["missing"] && uiRows.Where(pair => pair.Key is "removed" or "other" or "mission").Any(pair => Draft(pair.Value)["UnlockByRank"] == 1), "rank-1 store starter respects the updated discovery requirements");
++        var grid = (DataGridView)F(tab, "_grid");
++        Check(grid.Columns["UnlockByExploration"]!.Visible && grid.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["UnlockByExploration"].FormattedValue?.ToString() == "true (false)"), "table shows true/false flags, highlights and original values");
++        Check(!Directory.Exists(Path.Combine(root, "initial.pak", "updated")), "generation never writes game files");
++        using (var bitmap = new Bitmap(tab.Width, tab.Height)) { tab.PerformLayout(); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, "exploration-preview.png")); }
++        Call(tab, "Stage");
++        var edits = Static("TruckPropertiesStore", "LoadPending", root)!;
++        Check(Items(edits).Count(edit => (string)P(edit, "Attribute") == "UnlockByExploration") == 4, "staging includes exploration changes");
++        var json = (string)Static("TruckPropertiesStore", "SerializeSnapshot", edits)!;
++        var reloaded = Static("TruckPropertiesStore", "ReadPreset", json)!;
++        Check(Items(reloaded).Count() == Items(edits).Count(), "presets round-trip exploration and numeric changes");
++        Draft(uiRows["onmap"])["UnlockByExploration"] = 0;
++        Call(tab, "RestoreDraft");
++        Check(Draft(uiRows["onmap"])["UnlockByExploration"] == 1, "revert unstaged restores staged exploration flag");
++        Static("TruckPropertiesStore", "Apply", root);
++        var applied = Items(Static("TruckPropertiesStore", "LoadRows", root)!).ToDictionary(Code);
++        Check(applied.All(pair => Draft(pair.Value)["UnlockByExploration"] == Value(pair.Key)), "Apply persists every boolean as true/false, including missing attributes");
++        var current = (string)Static("WorkspaceOriginals", "GetCurrentPath", root, P(applied["missing"], "RelativeFile"))!;
++        var text = File.ReadAllText(current);
++        Check(text.Contains("UnlockByExploration=\"true\"") && text.Contains("<_templates><GameData UnlockByExploration=\"false\"/></_templates>") && text.Contains("<Keep Value=\"untouched\"/>"), "patch inserts the missing flag into the truck only and preserves other XML");
++        Check(File.ReadAllText(Path.Combine(files, "onmap.xml")).Contains("UnlockByExploration=\"false\""), "original truck files remain unchanged");
++        Wait((Task)Call(tab, "EnsureLoadedAsync", true)!);
++        var reset = tab.Controls.Cast<Control>().SelectMany(Flatten).OfType<Button>().Single(button => button.Text == "Reset to original values"); reset.PerformClick();
++        Check(Items(F(tab, "_rows")).All(row => Draft(row)["UnlockByExploration"] == Draft(byCode[Code(row)])["UnlockByExploration"]), "reset restores original exploration flags in preview");
++        Call(tab, "Stage"); Static("TruckPropertiesStore", "Apply", root);
++        Check(Items(Static("TruckPropertiesStore", "LoadRows", root)!).All(row => Draft(row)["UnlockByExploration"] == Draft(byCode[Code(row)])["UnlockByExploration"]), "reset, staging and Apply restore exploration booleans in files");
++        Console.WriteLine("All exploration unlock checks passed; isolated fixtures only.");
++    }
++    private static IEnumerable<Control> Flatten(Control root) => new[] { root }.Concat(root.Controls.Cast<Control>().SelectMany(Flatten));
++}
+diff --git a/.checks/ExplorationUnlock/ExplorationUnlock.csproj b/.checks/ExplorationUnlock/ExplorationUnlock.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/ExplorationUnlock/ExplorationUnlock.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

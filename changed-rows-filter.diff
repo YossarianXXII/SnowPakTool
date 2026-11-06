@@ -1,0 +1,318 @@
+diff --git "a/.checks\\ChangedRowsBaseline\\README.md" b/README.md
+index 5da8004..b92b7de 100644
+--- "a/.checks\\ChangedRowsBaseline\\README.md"
++++ b/README.md
+@@ -123,3 +123,5 @@ Truck properties: Reset to original values previews a restoration against the va
+ Editors > Addons shows current (original) values for Price, Unlock rank and Exploration unlock. Select and edit their cells, or use Reset selected to original / Reset to original values, then Stage changes and Start > Apply pending changes. Revert unstaged edits restores the saved snapshot; Revert staged changes clears it. Blank removes the local attribute and restores inheritance. Apply validates exact source, definition and attribute targets before writing; original files and unrelated properties remain intact. Later upgrade randomization can recalculate exploration flags. Packing and installation remain manual.
+ 
+ Editors > Addons follows Truck properties for Price, Unlock rank and Exploration unlock: editable cells, current (original) formatting, green applied/amber preview highlights, Reset selected to original, Reset to original values across both views and filters, Stage changes, Revert unstaged edits and Revert staged changes. Reset restores all three supported properties, including removing local attributes absent from the original. Price accepts whole numbers 0-100,000,000, rank 0-30, exploration true/false; blank restores inheritance. Each staged property identifies its source file, definition variant and attribute; legacy exploration-only snapshots remain readable. Other metadata and physical component parameters remain visible as source properties; engines and winches retain their specialized editors. Apply writes the workspace only, with original files preserved.
++
++Truck properties, Addons and Frame addons each have a Show changed only toggle button. It includes preview/staged differences from current files and applied values differing from preserved originals. In Frame addons this includes fuel and tracked price/rank/exploration changes. It combines with header filters and stays enabled across reloads and addon-view switches; turning it off retains other filters. The toggle changes visibility only: Stage and global reset actions still include hidden rows.
+diff --git "a/.checks\\ChangedRowsBaseline\\TableHeaderBehavior.cs" b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+index f160a87..78eb49e 100644
+--- "a/.checks\\ChangedRowsBaseline\\TableHeaderBehavior.cs"
++++ b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+@@ -23,6 +23,8 @@ internal sealed class TableHeaderBehavior
+     private bool _hadActiveFilters;
+     private string? _sorted;
+     private SortOrder _direction;
++    private Func<DataGridViewRow, bool>? _rowPredicate;
++    private string? _additionalExpression;
+     public event Action? Changed;
+ 
+     public static TableHeaderBehavior Attach(DataGridView grid, Action? restore = null,
+@@ -30,6 +32,11 @@ internal sealed class TableHeaderBehavior
+         => Instances.GetValue(grid, _ => new(grid, restore, sort, customHeader));
+     public static void Refresh(DataGridView grid) { if (Instances.TryGetValue(grid, out var behavior)) behavior.Refresh(); }
+ 
++    public void SetAdditionalFilter(Func<DataGridViewRow, bool>? predicate = null, string? expression = null)
++    {
++        _rowPredicate = predicate; _additionalExpression = expression; ApplyFilters();
++    }
++
+     private TableHeaderBehavior(DataGridView grid, Action? restore, Action<DataGridViewColumn, ListSortDirection>? sort,
+         Func<DataGridViewColumn, bool>? customHeader)
+     {
+@@ -205,7 +212,6 @@ internal sealed class TableHeaderBehavior
+ 
+     public void ApplyFilters()
+     {
+-        if (_filters.Count == 0) return;
+         var table = (_grid.DataSource as DataTable) ?? (_grid.DataSource as DataView)?.Table;
+         if (table is not null)
+         {
+@@ -216,15 +222,15 @@ internal sealed class TableHeaderBehavior
+                     .Select(value => FilterTerm(filter.ColumnName, value)).ToArray();
+                 return values.Length == 0 ? "false" : "(" + string.Join(" OR ", values) + ")";
+             });
+-            var expression = string.Join(" AND ", clauses.Select(clause => "(" + clause + ")"));
++            var expression = string.Join(" AND ", clauses.Concat(string.IsNullOrEmpty(_additionalExpression) ? [] : new[] { _additionalExpression }).Select(clause => "(" + clause + ")"));
+             if (table.DefaultView.RowFilter != expression) table.DefaultView.RowFilter = expression;
+         }
+         else
+         {
+-            var active = _filters.Values.Any(filter => filter.IsFiltered);
++            var active = _rowPredicate is not null || _filters.Values.Any(filter => filter.IsFiltered);
+             if (!active && !_hadActiveFilters) return;
+             _hadActiveFilters = active;
+-            bool Includes(DataGridViewRow row) => _filters.Values.All(filter => !_grid.Columns.Contains(filter.ColumnName) || filter.Includes(row.Cells[filter.ColumnName].Value));
++            bool Includes(DataGridViewRow row) => (_rowPredicate?.Invoke(row) ?? true) && _filters.Values.All(filter => !_grid.Columns.Contains(filter.ColumnName) || filter.Includes(row.Cells[filter.ColumnName].Value));
+             if (_grid.CurrentCell is { OwningRow: { } current } && !Includes(current)) _grid.CurrentCell = null;
+             foreach (DataGridViewRow row in _grid.Rows)
+                 if (!row.IsNewRow) row.Visible = Includes(row);
+diff --git "a/.checks\\ChangedRowsBaseline\\TruckPropertiesTab.cs" b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index c38d954..72ad88e 100644
+--- "a/.checks\\ChangedRowsBaseline\\TruckPropertiesTab.cs"
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -26,6 +26,8 @@ internal sealed class TruckPropertiesTab : UserControl
+     };
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 4) };
+     private readonly ToolTip _tips = new();
++    private readonly CheckBox _changedOnly = new() { Text = "Show changed only", Appearance = Appearance.Button, AutoSize = true, Margin = new Padding(4) };
++    private bool _changingChangedFilter;
+     private readonly TrackBar _fuelMultiplier = new() { Minimum = 1, Maximum = 6, Value = 2, TickFrequency = 1, SmallChange = 1, LargeChange = 1, Width = 150, Height = 38, AutoSize = false, AccessibleName = "Fuel capacity multiplier" };
+     private readonly Label _fuelMultiplierValue = new() { Text = "×1.0", AutoSize = true, Margin = new Padding(4, 8, 8, 0) };
+     private readonly ContextMenuStrip _columnsMenu = new();
+@@ -61,6 +63,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
+         AddButton(toolbar, "Reload properties", async () => await EnsureLoadedAsync(true));
+         AddButton(toolbar, "Order by tier", () => _tableHeaders.SetSort("Tier", SortOrder.Ascending));
++        toolbar.Controls.Add(_changedOnly);
+         AddButton(toolbar, "Revert unstaged edits", () => { RestoreDraft(); ShowRows(); });
+         AddButton(toolbar, "Reset to original values", () =>
+         {
+@@ -147,6 +150,14 @@ internal sealed class TruckPropertiesTab : UserControl
+         }
+         _tableHeaders = TableHeaderBehavior.Attach(_grid);
+         _tableHeaders.AddFilter("UnlockByExploration", value => Convert.ToString(value, CultureInfo.InvariantCulture) == "1" ? "true" : "false");
++        _tips.SetToolTip(_changedOnly, "Show trucks with preview/staged changes or values differing from the originals. Combines with header filters; staging and reset still cover all trucks.");
++        _changedOnly.CheckedChanged += (_, _) =>
++        {
++            if (_changingChangedFilter) return;
++            if (!_grid.EndEdit())
++            { _changingChangedFilter = true; _changedOnly.Checked = !_changedOnly.Checked; _changingChangedFilter = false; return; }
++            _tableHeaders.SetAdditionalFilter(_changedOnly.Checked ? row => row.Tag is TruckPropertyRow data && HasChangedValues(data) : null);
++        };
+         _grid.CellFormatting += FormatValue;
+         _grid.EditingControlShowing += (_, e) =>
+         {
+@@ -442,9 +453,13 @@ internal sealed class TruckPropertiesTab : UserControl
+             }
+         }
+         data.Draft[spec.Attribute] = value; PaintValue(_grid.Rows[e.RowIndex], spec); UpdateStatus();
++        if (_changedOnly.Checked && _grid.IsHandleCreated) _grid.BeginInvoke((Action)(() => { if (!IsDisposed) _tableHeaders.ApplyFilters(); }));
+     }
+ 
+     private static decimal RoundFuel(decimal value) => TruckPropertiesStore.RoundFuel(value);
++    private static bool HasChangedValues(TruckPropertyRow row) => row.Draft.Any(pair =>
++        row.Current.TryGetValue(pair.Key, out var current) && pair.Value != current
++        || row.Original.TryGetValue(pair.Key, out var original) && pair.Value != original);
+ 
+     private void MultiplyFuel()
+     {
+diff --git "a/.checks\\ChangedRowsBaseline\\AddonsTab.cs" b/src/SnowPakTool.Desktop/AddonsTab.cs
+index 46702f2..408cae2 100644
+--- "a/.checks\\ChangedRowsBaseline\\AddonsTab.cs"
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -23,6 +23,8 @@ internal sealed partial class AddonsTab : UserControl
+     private long _loadedContentVersion;
+     private readonly Button _reload = new() { Text = "Reload addons", AutoSize = true };
+     private readonly Button _switchAddons = new() { Text = "Show external addons", AutoSize = true, Enabled = false };
++    private readonly CheckBox _changedOnly = new() { Text = "Show changed only", Appearance = Appearance.Button, AutoSize = true };
++    private bool _changingChangedFilter;
+ 
+     public AddonsTab(Func<string> getWorkspacePath, bool frameAddonsOnly = false)
+     {
+@@ -40,6 +42,7 @@ internal sealed partial class AddonsTab : UserControl
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+         toolbar.Controls.Add(new Label { Text = _frameAddonsOnly ? "Frame addons" : "Addons", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         toolbar.Controls.Add(_reload);
++        toolbar.Controls.Add(_changedOnly);
+         if (!_frameAddonsOnly) toolbar.Controls.Add(_switchAddons);
+         if (!_frameAddonsOnly) InitializeExplorationTools(layout);
+         if (_frameAddonsOnly)
+@@ -82,10 +85,18 @@ internal sealed partial class AddonsTab : UserControl
+         _properties.Columns.Add("Source", "Source file");
+         _properties.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+         TableHeaderBehavior.Attach(_addons);
++        _changedOnly.CheckedChanged += (_, _) =>
++        {
++            if (_changingChangedFilter) return;
++            if (!_frameAddonsOnly && !CommitAddonProperties())
++            { _changingChangedFilter = true; _changedOnly.Checked = !_changedOnly.Checked; _changingChangedFilter = false; return; }
++            TableHeaderBehavior.Attach(_addons).SetAdditionalFilter(expression: _changedOnly.Checked ? "[__Changed] = true" : null);
++            ShowProperties();
++        };
+         TableHeaderBehavior.Attach(_properties);
+         _addons.CurrentCellChanged += (_, _) => ShowProperties();
+         _addons.DataBindingComplete += (_, _) => ShowProperties();
+-        if (!_frameAddonsOnly) _addons.CellFormatting += FormatExploration;
++        _addons.CellFormatting += FormatExploration;
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
+         _switchAddons.Click += (_, _) =>
+         {
+@@ -134,7 +145,9 @@ internal sealed partial class AddonsTab : UserControl
+             else await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+             var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+             var catalog = await Task.Run(() => AddonCatalogService.Load(workspace, names));
+-            var exploration = !_frameAddonsOnly ? await Task.Run(() => AddonExplorationStore.ReadRows(workspace, catalog)) : new Dictionary<string, AddonExplorationRow>();
++            var exploration = await Task.Run(() => AddonExplorationStore.ReadRows(workspace, _frameAddonsOnly
++                ? catalog with { Entries = catalog.Entries.Where(e => e.Type == "Addon" && e.Category.Equals("frame_addons", StringComparison.OrdinalIgnoreCase)).ToArray() }
++                : catalog));
+             var fuelRows = _frameAddonsOnly ? await Task.Run(() => LoadFuelRows(workspace, catalog)) : new Dictionary<string, FrameAddonFuelRow>();
+             if (IsDisposed || !string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
+             _catalog = catalog;
+@@ -142,7 +155,7 @@ internal sealed partial class AddonsTab : UserControl
+             _loadedContentVersion = WorkspaceDataCache.ContentVersion;
+             _fuelRows = fuelRows;
+             _explorationRows = exploration;
+-            if (!_frameAddonsOnly) RestoreExploration();
++            RestoreExploration();
+             if (_frameAddonsOnly) RestoreStagedFuel();
+             ApplyFilter();
+             _fuelTools.Enabled = _frameAddonsOnly;
+@@ -180,6 +193,7 @@ internal sealed partial class AddonsTab : UserControl
+                 _explorationRows.TryGetValue(AddonExplorationStore.Key(entry), out var flag) ? AddonExplorationStore.Display(flag.Draft) : entry.Exploration,
+                 string.Join(", ", entry.MapReferences.Select(item => item.Map).Distinct(StringComparer.OrdinalIgnoreCase)), entry.Source,
+                 ExplorationState(entry), (object?)entry.Price ?? DBNull.Value, (object?)entry.UnlockRank ?? DBNull.Value, (decimal)entry.MapReferences.Count, entry);
++        AddChangedColumn(table);
+         _binding = true;
+         try
+         {
+@@ -188,6 +202,7 @@ internal sealed partial class AddonsTab : UserControl
+             _addons.EditMode = DataGridViewEditMode.EditOnEnter;
+             _addons.SelectionMode = DataGridViewSelectionMode.CellSelect;
+             _addons.Columns["Entry"]!.Visible = false;
++            _addons.Columns["__Changed"]!.Visible = false;
+             foreach (DataGridViewColumn column in _addons.Columns)
+             {
+                 column.Width = column.Name switch { "Addon / upgrade" => 210, "Exploration unlock" => 230, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
+@@ -221,11 +236,13 @@ internal sealed partial class AddonsTab : UserControl
+             table.Rows.Add(entry.Name, entry.Id, entry.Family, entry.Content, entry.Exploration,
+                 Value(entry.Frame?.CargoSlots), Value(_fuelRows.TryGetValue(entry.Source, out var fuel) ? fuel.Draft : entry.Frame?.Fuel), Value(entry.Frame?.Water),
+                 Value(entry.Frame?.Repairs), Value(entry.Frame?.SpareWheels), Value(entry.Price), Value(entry.UnlockRank), entry);
++        AddChangedColumn(table);
+         _binding = true;
+         try
+         {
+             _addons.DataSource = table;
+             _addons.Columns["Entry"]!.Visible = false;
++            _addons.Columns["__Changed"]!.Visible = false;
+             foreach (DataGridViewColumn column in _addons.Columns)
+             {
+                 column.Width = column.Name switch { "Frame addon" => 210, "ID" or "Install socket" => 230, _ => 125 };
+@@ -326,7 +343,11 @@ internal sealed partial class AddonsTab : UserControl
+     {
+         if (_addons.DataSource is not DataTable table) return;
+         foreach (DataRow row in table.Rows)
+-            if (row["Entry"] is AddonCatalogEntry entry && _fuelRows.TryGetValue(entry.Source, out var fuel)) row["Fuel (L)"] = fuel.Draft;
++            if (row["Entry"] is AddonCatalogEntry entry)
++            {
++                if (_fuelRows.TryGetValue(entry.Source, out var fuel)) row["Fuel (L)"] = fuel.Draft;
++                row["__Changed"] = HasAddonChanges(entry);
++            }
+         _addons.Invalidate();
+         ShowProperties();
+         _status.Text = $"{_fuelRows.Count} explicit fuel capacities · {_fuelRows.Values.Count(row => row.Draft != row.Current)} changed values. Preview only; Stage changes, then apply from Start. Blank/inherited capacities stay unchanged.";
+@@ -344,6 +365,18 @@ internal sealed partial class AddonsTab : UserControl
+         _addons.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = $"Original: {row.Original:N0} L\nIn files: {row.Current:N0} L\nPreview: {row.Draft:N0} L\nMultiplier: 0.5×–3×; round to 5 L; range 5–100,000 L.";
+     }
+ 
++    private bool HasAddonChanges(AddonCatalogEntry entry) =>
++        _frameAddonsOnly && _fuelRows.TryGetValue(entry.Source, out var fuel) && (fuel.Draft != fuel.Current || fuel.Draft != fuel.Original)
++        || AddonExplorationStore.Attributes.Any(attribute => _explorationRows.TryGetValue(AddonExplorationStore.Key(entry, attribute), out var row)
++            && (row.Draft != row.Current || row.HasOriginal && row.Draft != row.Original));
++
++    private void AddChangedColumn(DataTable table)
++    {
++        table.Columns.Add("__Changed", typeof(bool));
++        foreach (DataRow row in table.Rows)
++            if (row["Entry"] is AddonCatalogEntry entry) row["__Changed"] = HasAddonChanges(entry);
++    }
++
+     private void RefreshColors(object? sender, EventArgs e)
+     {
+         foreach (var grid in new[] { _addons, _properties })
+diff --git "a/.checks\\ChangedRowsBaseline\\AddonsExploration.cs" b/src/SnowPakTool.Desktop/AddonsExploration.cs
+index b78fe68..9ffac13 100644
+--- "a/.checks\\ChangedRowsBaseline\\AddonsExploration.cs"
++++ b/src/SnowPakTool.Desktop/AddonsExploration.cs
+@@ -130,6 +130,7 @@ internal sealed partial class AddonsTab
+                         if (_explorationRows.TryGetValue(AddonExplorationStore.Key(entry, attribute), out var row))
+                             data[AddonExplorationStore.Column(attribute)] = row.Draft is null ? DBNull.Value : attribute == "UnlockByExploration" ? row.Draft : decimal.Parse(row.Draft, CultureInfo.InvariantCulture);
+                     data["Change state"] = ExplorationState(entry);
++                    data["__Changed"] = HasAddonChanges(entry);
+                 }
+         }
+         finally { _binding = false; }
+diff --git "a/.checks\\ChangedRowsBaseline\\AddonExploration.Program.cs" b/.checks/AddonExploration/Program.cs
+index 67264b4..719be01 100644
+--- "a/.checks\\ChangedRowsBaseline\\AddonExploration.Program.cs"
++++ b/.checks/AddonExploration/Program.cs
+@@ -40,6 +40,7 @@ static class Program
+         const string xml = "<_templates><Engine Name=\"a\"><GameData UnlockByExploration=\"true\"/></Engine></_templates>\r\n<EngineVariants>\r\n<Engine Name=\"a\"><GameData Price=\"100\" UnlockByRank=\"1\" UnlockByExploration=\"false\"/></Engine>\r\n<Engine Name=\"b\"><GameData Price=\"200\"/></Engine>\r\n</EngineVariants>";
+         void Write(string tree, string path, string value) { var p = Path.Combine(tree, path); Directory.CreateDirectory(Path.GetDirectoryName(p)!); File.WriteAllText(p, value); }
+         Write(original, file, xml); Write(updated, file, xml.Replace("UnlockByExploration=\"false\"", "UnlockByExploration=\"true\"").Replace("Price=\"100\"", "Price=\"150\"").Replace("UnlockByRank=\"1\"", "UnlockByRank=\"7\"").Replace("Price=\"200\"", "Price=\"200\" UnlockByExploration=\"true\""));
++        Write(original, "[media]/classes/engines/unchanged.xml", "<EngineVariants><Engine Name=\"unchanged\"><GameData Price=\"300\"/></Engine></EngineVariants>");
+         const string addon = "[media]/classes/trucks/test_addon.xml";
+         Write(original, addon, "<TruckAddon><GameData Category=\"frame_addons\" UnlockByExploration=\"false\"/></TruckAddon>");
+         Write(updated, addon, File.ReadAllText(Path.Combine(original, addon)).Replace("false", "true"));
+@@ -50,6 +51,20 @@ static class Program
+         tab.Dock = DockStyle.Fill; host.Controls.Add(tab); host.Show();
+         Pump((Task)Call(tab, "EnsureLoadedAsync")!);
+         var grid = (DataGridView)F(tab, "_addons"); var a = Row(grid, "a"); grid.CurrentCell = a.Cells["ID"];
++        var changedOnly = (CheckBox)F(tab, "_changedOnly");
++        changedOnly.Checked = true; Application.DoEvents();
++        Check(grid.Rows.Count == 2, "Addons changed-only includes applied changes and hides unchanged definitions");
++        var headers = S("TableHeaderBehavior", "Attach", grid, null, null, null)!;
++        var idFilter = Call(headers, "AddFilter", "ID", null, Array.Empty<string>())!;
++        Call(idFilter, "SelectValues", new object[] { new[] { "a" } }); Application.DoEvents();
++        Check(grid.Rows.Count == 1, "changed-only combines with addon header filters");
++        changedOnly.Checked = false; Application.DoEvents();
++        Check(grid.Rows.Count == 1, "disabling changed-only preserves other addon filters");
++        Call(idFilter, "Clear"); changedOnly.Checked = true;
++        Button(tab, "Show external addons"); Check(grid.Rows.Count == 1 && changedOnly.Checked, "changed-only stays active across internal/external views");
++        Button(tab, "Show internal addons"); Check(grid.Rows.Count == 2, "internal changed-only view is restored");
++        changedOnly.Checked = false; Application.DoEvents();
++        a = Row(grid, "a"); grid.CurrentCell = a.Cells["ID"];
+         void Edit(string id, string column, string value)
+         {
+             grid.CurrentCell = Row(grid, id).Cells[column];
+diff --git "a/.checks\\ChangedRowsBaseline\\TruckProperties.Program.cs" b/.checks/truck-properties/Program.cs
+index e20d31c..dfaaead 100644
+--- "a/.checks\\ChangedRowsBaseline\\TruckProperties.Program.cs"
++++ b/.checks/truck-properties/Program.cs
+@@ -128,6 +128,16 @@ internal static class Program
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+         Check(Convert.ToString(row.Cells["FuelCapacity"].FormattedValue) == "100 (80)" && row.Cells["FuelCapacity"].Style.BackColor == Color.Honeydew,
+             "applied fuel retains original-value annotation and applied highlight");
++        var changedOnly = (CheckBox)Field(tab, "_changedOnly");
++        _ = grid.Handle; changedOnly.Checked = true; Application.DoEvents();
++        Check(grid.Rows.Cast<DataGridViewRow>().Count(r => r.Visible) == 1, "Truck properties changed-only includes applied changes and hides unchanged trucks");
++        var headers = Field(tab, "_tableHeaders");
++        var filter = Call(headers, "AddFilter", "Truck", null, Array.Empty<string>())!;
++        Call(filter, "SelectValues", new object[] { new[] { "unknown" } }); Application.DoEvents();
++        Check(!grid.Rows.Cast<DataGridViewRow>().Any(r => r.Visible), "truck changed-only combines with column filters");
++        changedOnly.Checked = false; Application.DoEvents();
++        Check(grid.Rows.Cast<DataGridViewRow>().Count(r => r.Visible) == 1, "disabling truck changed-only retains the column filter");
++        Call(filter, "Clear"); Application.DoEvents();
+         All(tab).OfType<Button>().Single(button => button.Text == "Order by tier").PerformClick();
+         Check(grid.SortedColumn?.Name == "Tier", "tier sort wired to table");
+         grid.Rows[0].Cells["Tier"].Value = "S"; grid.Rows[1].Cells["Tier"].Value = "SS";
+diff --git "a/.checks\\ChangedRowsBaseline\\FrameFuel.Program.cs" b/.checks/FrameFuelRegression/Program.cs
+index 5bd83c2..90b8fe4 100644
+--- "a/.checks\\ChangedRowsBaseline\\FrameFuel.Program.cs"
++++ b/.checks/FrameFuelRegression/Program.cs
+@@ -30,8 +30,12 @@ static class Program
+   Set(tab,"_catalog",catalog);Set(tab,"_loadedWorkspace",workspace);Set(tab,"_fuelRows",rows);Invoke(tab,"ApplyFilter");
+   var grid=(DataGridView)F(tab,"_addons");var multiplier=(TrackBar)F(tab,"_fuelMultiplier");
+   decimal Fuel()=> (decimal)((DataTable)grid.DataSource!).Rows.Cast<DataRow>().Single(r=>(string)r["ID"]=="tank")["Fuel (L)"];
++  var changedOnly=(CheckBox)F(tab,"_changedOnly");_=grid.Handle;changedOnly.Checked=true;Application.DoEvents();
++  Check(grid.Rows.Count==0,"frame changed-only hides unchanged capacities");
+   multiplier.Value=1;Check(Fuel()==25m,"moving slider leaves fuel unchanged");Invoke(tab,"MultiplyFuel");Check(Fuel()==15m,"half multiplier rounds ties upward");
+   multiplier.Value=4;Invoke(tab,"MultiplyFuel");Invoke(tab,"MultiplyFuel");Check(Fuel()==60m,"repeated multiplications use current preview");
++  Application.DoEvents();Check(grid.Rows.Count==1&&grid.Rows[0].Cells["ID"].Value?.ToString()=="tank","frame changed-only updates after fuel previews change");
++  changedOnly.Checked=false;Application.DoEvents();Check(grid.Rows.Count==3,"frame changed-only can restore all rows");
+   Check(!((IEnumerable)Call("FrameAddonFuelStore","Pending",workspace)!).Cast<object>().Any() && File.ReadAllText(original)==text,"preview neither stages nor writes source");
+   void Layout(Control c){_=c.Handle;c.PerformLayout();foreach(Control child in c.Controls)Layout(child);}
+   Layout(form);

@@ -1,0 +1,560 @@
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementStore.cs b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+index aeab368..b9cc107 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementStore.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+@@ -34,6 +34,70 @@ internal static class TruckReplacementStore
+         lock (SaveGate) return SaveCore(workspace, current, replacement);
+     }
+ 
++    internal const string RepairRequired = "Invalid scene boundaries — repair required";
++
++    public static int RepairSavedMaps(string workspace)
++    {
++        lock (SaveGate)
++        {
++            var repaired = 0;
++            foreach (var (map, path) in SavedMaps(workspace))
++            {
++                var data = RegionTruckCatalogService.ReadMapData(path) ?? throw new InvalidDataException("Missing scene for " + map);
++                try { ValidateScene(data); continue; } catch (InvalidDataException) { }
++                var archive = path.EndsWith(".pak", StringComparison.OrdinalIgnoreCase);
++                var backups = Path.Combine(Root(workspace), "backups", map);
++                var original = Path.Combine(backups, archive ? "original.pak" : "original.bin");
++                var baseline = RegionTruckCatalogService.ReadMapData(original) ?? throw new InvalidDataException("Missing original scene for " + map);
++                ValidateScene(baseline);
++                var delta = data.Length - baseline.Length;
++                var oldBoundary = BinaryPrimitives.ReadInt32LittleEndian(baseline.AsSpan(4, 4));
++                var newBoundary = (long)oldBoundary + delta;
++                // Recognize only the old writer's failure: unchanged envelope and unchanged data after the header.
++                if (data.Length < 12 || !data.AsSpan(0, 12).SequenceEqual(baseline.AsSpan(0, 12))
++                    || newBoundary < 12 || newBoundary > data.Length
++                    || !baseline.AsSpan(oldBoundary).SequenceEqual(data.AsSpan((int)newBoundary)))
++                    throw new InvalidDataException("Cannot safely repair " + map + ": its changes do not match the old writer's format.");
++                var sourceHash = FileHash(path); var originalHash = FileHash(original);
++                if (archive) VerifyOtherEntries(original, path);
++                var fixedData = (byte[])data.Clone();
++                BinaryPrimitives.WriteInt32LittleEndian(fixedData.AsSpan(4, 4), (int)newBoundary);
++                BinaryPrimitives.WriteInt32LittleEndian(fixedData.AsSpan(8, 4), fixedData.Length);
++                ValidateScene(fixedData);
++                var previous = Path.Combine(backups, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff") + "-" + Guid.NewGuid().ToString("N") + (archive ? ".pak" : ".bin"));
++                Backup(path, previous);
++                var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++                try
++                {
++                    // Use the original archive layout, preserving the replacement scene and every other entry.
++                    if (archive) MapArchiveWriter.Write(original, temporary, fixedData); else File.WriteAllBytes(temporary, fixedData);
++                    var written = archive ? ReadArchiveMetadata(temporary) : File.ReadAllBytes(temporary);
++                    if (!written.AsSpan().SequenceEqual(fixedData) || sourceHash != FileHash(path) || originalHash != FileHash(original))
++                        throw new IOException("The repaired map did not pass verification, or its source changed.");
++                    File.Move(temporary, path, overwrite: true); repaired++;
++                }
++                finally { if (File.Exists(temporary)) File.Delete(temporary); }
++            }
++            return repaired;
++        }
++    }
++
++    private static void VerifyOtherEntries(string original, string edited)
++    {
++        using var a = ZipFile.OpenRead(original); using var b = ZipFile.OpenRead(edited);
++        var entries = b.Entries.ToDictionary(entry => entry.FullName.Replace('\\', '/'), StringComparer.OrdinalIgnoreCase);
++        if (a.Entries.Count != entries.Count) throw new InvalidDataException("Map repair would change unrelated archive entries.");
++        foreach (var entry in a.Entries)
++        {
++            var name = entry.FullName.Replace('\\', '/');
++            if (!entries.TryGetValue(name, out var other)) throw new InvalidDataException("Map repair would remove an archive entry.");
++            if (name.Equals(SceneEntry, StringComparison.OrdinalIgnoreCase)) continue;
++            using var first = entry.Open(); using var second = other.Open();
++            if (entry.Length != other.Length || !SHA256.HashData(first).AsSpan().SequenceEqual(SHA256.HashData(second)))
++                throw new InvalidDataException("Map repair found unrelated changes. Restore or review those entries first.");
++        }
++    }
++
+     public static SavedTruckReplacement SaveBatch(string workspace, IReadOnlyList<(RegionTruckEntry Original, ReplacementTruck Replacement)> changes)
+     {
+         lock (SaveGate)
+@@ -88,14 +152,7 @@ internal static class TruckReplacementStore
+         {
+             if (archive)
+             {
+-                File.Copy(source, temporary, overwrite: false);
+-                using var zip = ZipFile.Open(temporary, ZipArchiveMode.Update);
+-                var entries = zip.Entries.Where(entry => entry.FullName.Replace('\\', '/').Equals(SceneEntry, StringComparison.OrdinalIgnoreCase)).ToArray();
+-                if (entries.Length != 1) throw new InvalidDataException("Expected exactly one scene metadata entry in the map archive.");
+-                var name = entries[0].FullName; var modified = entries[0].LastWriteTime; var attributes = entries[0].ExternalAttributes;
+-                entries[0].Delete();
+-                var created = zip.CreateEntry(name, CompressionLevel.Optimal); created.LastWriteTime = modified; created.ExternalAttributes = attributes;
+-                using var stream = created.Open(); stream.Write(patched);
++                MapArchiveWriter.Write(source, temporary, patched);
+             }
+             else File.WriteAllBytes(temporary, patched);
+             // Read back the staged output before publishing it atomically.
+@@ -132,6 +189,8 @@ internal static class TruckReplacementStore
+ 
+     internal static byte[] Patch(byte[] data, RegionTruckEntry current, ReplacementTruck replacement)
+     {
++        ValidateScene(data);
++        var headerEnd = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(4, 4));
+         var offset = current.BinaryOffset;
+         if (offset < 0 || !RegionTruckCatalogService.TryString(data, offset, out var model, out var idOffset)
+             || model != current.TruckCode || !RegionTruckCatalogService.TryString(data, idOffset, out var id, out var transform)
+@@ -148,6 +207,7 @@ internal static class TruckReplacementStore
+             if (!RegionTruckCatalogService.TryString(data, end, out _, out end)) throw new InvalidDataException("Incomplete placement equipment record.");
+         if (end + 4 > data.Length) throw new InvalidDataException("Missing wheel scale in placement record.");
+         end += 4;
++        if (offset < 12 || end > headerEnd) throw new InvalidDataException("The placement lies outside the supported scene header.");
+         using var output = new MemoryStream(); using var writer = new BinaryWriter(output, Encoding.ASCII, leaveOpen: true);
+         writer.Write(data.AsSpan(0, offset));
+         WriteString(writer, replacement.Truck.Code);
+@@ -161,10 +221,24 @@ internal static class TruckReplacementStore
+         writer.Write(data.AsSpan(end)); // Preserve the untouched placement suffix and all following data.
+         writer.Flush();
+         var patched = output.ToArray();
++        // The scene envelope stores the end of its variable-length header and the full file length.
++        // Vehicle records belong to that header; moving its tail requires updating both boundaries.
++        BinaryPrimitives.WriteInt32LittleEndian(patched.AsSpan(4, 4), checked(headerEnd + patched.Length - data.Length));
++        BinaryPrimitives.WriteInt32LittleEndian(patched.AsSpan(8, 4), patched.Length);
++        ValidateScene(patched);
+         ValidatePlacements(data, patched, current, replacement);
+         return patched;
+     }
+ 
++    internal static void ValidateScene(byte[] data)
++    {
++        if (data.Length < 12 || BinaryPrimitives.ReadUInt32LittleEndian(data) is not (20190654u or 20190655u))
++            throw new InvalidDataException("Unsupported map scene format; no map was written.");
++        var headerEnd = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(4, 4));
++        if (headerEnd < 12 || headerEnd > data.Length || BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(8, 4)) != data.Length)
++            throw new InvalidDataException("The map scene has invalid size boundaries. Restore the original map or repair the saved workspace map before editing it.");
++    }
++
+     private static void WriteString(BinaryWriter writer, string value)
+     {
+         if (value.Length > 255 || value.Any(character => character is < ' ' or > '~')) throw new InvalidDataException("Unsupported non-ASCII or oversized truck/part identifier.");
+diff --git a/src/SnowPakTool.Desktop/MapArchiveWriter.cs b/src/SnowPakTool.Desktop/MapArchiveWriter.cs
+new file mode 100644
+index 0000000..91c8795
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/MapArchiveWriter.cs
+@@ -0,0 +1,108 @@
++using System.Buffers.Binary;
++using System.IO.Compression;
++using System.Text;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>Replaces scene bytes without rebuilding the other PAK records.</summary>
++internal static class MapArchiveWriter
++{
++    internal static void Write(string source, string destination, byte[] scene)
++    {
++        if (Path.GetFullPath(source).Equals(Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase))
++            throw new IOException("Map output must be separate from its input.");
++        TruckReplacementStore.ValidateScene(scene);
++        using var input = File.OpenRead(source);
++        // Game archives can have padding after the ZIP end record.
++        var tail = new byte[(int)Math.Min(input.Length, 1024 * 1024)];
++        input.Position = input.Length - tail.Length; input.ReadExactly(tail);
++        var endIndex = -1;
++        for (var i = tail.Length - 22; i >= 0; i--)
++            if (U32(tail, i) == 0x06054b50 && i + 22 + U16(tail, i + 20) <= tail.Length) { endIndex = i; break; }
++        if (endIndex < 0) throw new InvalidDataException("The map archive has no ZIP end record.");
++        var end = tail.AsSpan(endIndex, 22).ToArray();
++        var endPosition = input.Length - tail.Length + endIndex;
++        var directoryOffset = U32(end, 16); var directorySize = U32(end, 12); var count = U16(end, 10);
++        if (U16(end, 4) != 0 || U16(end, 6) != 0 || U16(end, 8) != count || count == ushort.MaxValue
++            || directoryOffset == uint.MaxValue || directorySize > int.MaxValue || (long)directoryOffset + directorySize != endPosition)
++            throw new InvalidDataException("Unsupported multi-volume or ZIP64 map archive.");
++        var directory = new byte[(int)directorySize]; input.Position = directoryOffset; input.ReadExactly(directory);
++        var records = new List<int>(); var target = -1; var cursor = 0;
++        for (var i = 0; i < count; i++)
++        {
++            if (cursor + 46 > directory.Length || U32(directory, cursor) != 0x02014b50) throw new InvalidDataException("Invalid map archive directory.");
++            var size = 46 + U16(directory, cursor + 28) + U16(directory, cursor + 30) + U16(directory, cursor + 32);
++            if (cursor + size > directory.Length || U16(directory, cursor + 34) != 0 || U32(directory, cursor + 42) == uint.MaxValue)
++                throw new InvalidDataException("Unsupported map archive entry.");
++            var name = Encoding.UTF8.GetString(directory, cursor + 46, U16(directory, cursor + 28)).Replace('\\', '/');
++            if (name.Equals("[scene]/data_for_ssl.bin", StringComparison.OrdinalIgnoreCase))
++            {
++                if (target >= 0) throw new InvalidDataException("Duplicate map scene entries.");
++                target = cursor;
++            }
++            records.Add(cursor); cursor += size;
++        }
++        if (cursor != directory.Length || target < 0) throw new InvalidDataException("Expected one scene entry in the map archive.");
++        var localOffset = U32(directory, target + 42); var method = U16(directory, target + 10);
++        var flags = U16(directory, target + 8); var oldSize = U32(directory, target + 20);
++        if ((flags & 9) != 0 || method is not (0 or 8) || oldSize == uint.MaxValue || U32(directory, target + 24) == uint.MaxValue)
++            throw new InvalidDataException("Unsupported encrypted, streamed or ZIP64 scene entry.");
++        input.Position = localOffset; var local = new byte[30]; input.ReadExactly(local);
++        if (U32(local, 0) != 0x04034b50 || U16(local, 6) != flags || U16(local, 8) != method
++            || U32(local, 14) != U32(directory, target + 16) || U32(local, 18) != oldSize || U32(local, 22) != U32(directory, target + 24))
++            throw new InvalidDataException("The scene ZIP headers disagree.");
++        var nameExtra = new byte[U16(local, 26) + U16(local, 28)]; input.ReadExactly(nameExtra);
++        if (!nameExtra.AsSpan(0, U16(local, 26)).SequenceEqual(directory.AsSpan(target + 46, U16(directory, target + 28))))
++            throw new InvalidDataException("The scene ZIP names disagree.");
++        var dataOffset = input.Position; var oldEnd = checked(dataOffset + oldSize);
++        if (oldEnd > directoryOffset || records.Any(record => U32(directory, record + 42) > localOffset && U32(directory, record + 42) < oldEnd))
++            throw new InvalidDataException("Overlapping scene ZIP records.");
++        byte[] payload = scene;
++        if (method == 8)
++        {
++            using var compressed = new MemoryStream();
++            using (var deflate = new DeflateStream(compressed, CompressionLevel.Optimal, leaveOpen: true)) deflate.Write(scene);
++            payload = compressed.ToArray();
++        }
++        var crc = Crc(scene); var delta = (long)payload.Length - oldSize;
++        static uint Zip32(long value) => value is >= 0 and < uint.MaxValue ? (uint)value : throw new InvalidDataException("The modified map requires ZIP64.");
++        Put(local, 14, crc); Put(local, 18, (uint)payload.Length); Put(local, 22, (uint)scene.Length);
++        Put(directory, target + 16, crc); Put(directory, target + 20, (uint)payload.Length); Put(directory, target + 24, (uint)scene.Length);
++        foreach (var record in records)
++        {
++            var offset = U32(directory, record + 42);
++            if (offset > localOffset) Put(directory, record + 42, Zip32(offset + delta));
++        }
++        Put(end, 16, Zip32(directoryOffset + delta));
++        using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write);
++        input.Position = 0; Copy(input, output, localOffset);
++        output.Write(local); output.Write(nameExtra); output.Write(payload);
++        input.Position = oldEnd; Copy(input, output, directoryOffset - oldEnd);
++        output.Write(directory); output.Write(end);
++        input.Position = endPosition + 22; Copy(input, output, input.Length - input.Position);
++    }
++
++    private static void Copy(Stream input, Stream output, long count)
++    {
++        var buffer = new byte[128 * 1024];
++        while (count > 0)
++        {
++            var length = (int)Math.Min(count, buffer.Length); input.ReadExactly(buffer.AsSpan(0, length));
++            output.Write(buffer, 0, length); count -= length;
++        }
++    }
++
++    private static uint Crc(byte[] bytes)
++    {
++        var crc = uint.MaxValue;
++        foreach (var value in bytes)
++        {
++            crc ^= value;
++            for (var bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0u : 0xedb88320u);
++        }
++        return ~crc;
++    }
++    private static ushort U16(byte[] bytes, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset, 2));
++    private static uint U32(byte[] bytes, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4));
++    private static void Put(byte[] bytes, int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset, 4), value);
++}
+diff --git a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+index 72151ef..c36bb0e 100644
+--- a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+@@ -83,6 +83,8 @@ internal static class WorkspaceChangeAudit
+             if (!File.Exists(backup)) { rows.Add(new(WorkspaceChange.InFiles, map, "Edited map (original backup unavailable)", "Unknown", path)); continue; }
+             var before = RegionTruckCatalogService.ReadMapData(backup); var after = RegionTruckCatalogService.ReadMapData(path);
+             if (before is null || after is null) throw new InvalidDataException("Cannot read map metadata for " + map);
++            try { TruckReplacementStore.ValidateScene(after); }
++            catch (InvalidDataException) { rows.Add(new(WorkspaceChange.InFiles, map, TruckReplacementStore.RepairRequired, "Original scene", "Use Repair saved maps")); }
+             if (before.AsSpan().SequenceEqual(after)) continue;
+             var old = RegionTruckCatalogService.ReadPlacements(before, codes).ToLookup(Identity);
+             var updated = RegionTruckCatalogService.ReadPlacements(after, codes).ToLookup(Identity);
+diff --git a/src/SnowPakTool.Desktop/StartChangesPanel.cs b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+index 85df43d..ee9dd05 100644
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -16,6 +16,7 @@ internal sealed class StartChangesPanel : UserControl
+     private readonly Button _savePakButton = new() { Text = "Apply pending PAK edits", AutoSize = true, Enabled = false };
+     private readonly Button _applyMapsButton = new() { Text = "Apply pending map changes", AutoSize = true, Enabled = false };
+     private readonly Button _discardMap = new() { Text = "Discard selected pending change", AutoSize = true, Enabled = false };
++    private readonly Button _repairMaps = new() { Text = "Repair saved maps", AutoSize = true, Enabled = false };
+     private readonly List<Label> _legend = [];
+     private int _request;
+     private string _displayedWorkspace = "";
+@@ -39,7 +40,7 @@ internal sealed class StartChangesPanel : UserControl
+         { flow.WrapContents = false; flow.AutoSizeMode = AutoSizeMode.GrowAndShrink; flow.Padding = Padding.Empty; }
+         pakActions.Dock = DockStyle.None; pakActions.Margin = Padding.Empty; pakTools.Controls.Add(pakActions); pakTools.Controls.Add(_savePakButton);
+         var mapTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+-        mapTools.Controls.Add(_applyMapsButton); mapTools.Controls.Add(_discardMap);
++        mapTools.Controls.Add(_applyMapsButton); mapTools.Controls.Add(_discardMap); mapTools.Controls.Add(_repairMaps);
+         split.Panel1.Controls.Add(Section("PAK", pakTools, _pak)); split.Panel2.Controls.Add(Section("Map files", mapTools, _maps));
+         layout.Controls.Add(split, 0, 1); Controls.Add(layout);
+         _refresh.Click += async (_, _) => await RefreshAsync();
+@@ -49,6 +50,17 @@ internal sealed class StartChangesPanel : UserControl
+             await RefreshAsync(); if (error is not null) _status.Text = error;
+         };
+         _applyMapsButton.Click += async (_, _) => await _applyMaps();
++        _repairMaps.Click += async (_, _) =>
++        {
++            var workspacePath = _workspace().Trim(); _repairMaps.Enabled = false;
++            try
++            {
++                var repaired = await Task.Run(() => TruckReplacementStore.RepairSavedMaps(workspacePath));
++                await _reloadRegions(); await RefreshAsync();
++                _status.Text = $"Repaired {repaired} saved map(s); previous versions backed up. Game files were not changed.";
++            }
++            catch (Exception ex) { await RefreshAsync(); _status.Text = "Could not repair maps: " + ex.Message; }
++        };
+         _discardMap.Click += async (_, _) =>
+         {
+             if (_maps.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is WorkspaceChange { State: WorkspaceChange.Pending, Key.Length: > 0 } change)
+@@ -66,7 +78,7 @@ internal sealed class StartChangesPanel : UserControl
+         { await InvokeAsync(async (CancellationToken _) => { await RefreshAsync(); }); return; }
+         var request = ++_request; var workspace = _workspace().Trim();
+         if (_displayedWorkspace != workspace) { Bind(_pak, []); Bind(_maps, []); _displayedWorkspace = workspace; }
+-        _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = false;
++        _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
+         if (!Directory.Exists(workspace)) { Bind(_pak, []); Bind(_maps, []); _status.Text = "Choose a workspace."; return; }
+         _status.Text = "Comparing files…"; _refresh.Enabled = false;
+         try
+@@ -80,6 +92,7 @@ internal sealed class StartChangesPanel : UserControl
+                 Bind(_pak, result.Pak.Concat(pending).ToArray()); Bind(_maps, result.Maps);
+                 _savePakButton.Enabled = pending.Count > 0;
+                 _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
++                _repairMaps.Enabled = result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
+                 _status.Text = $"{result.Pak.Count + result.Maps.Count(change => change.State == WorkspaceChange.InFiles)} in files · {pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending)} pending";
+             });
+         }
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 7c3ac2d..76703d6 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -1,4 +1,5 @@
+ using System.IO.Compression;
++using System.Buffers.Binary;
+ using System.Reflection;
+ using System.Text;
+ using System.Text.Json;
+@@ -148,7 +149,7 @@ internal static class Program
+             "Visual addon names include categories and exclude drivetrain components");
+         File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "gmc-details-preview.txt"), detailText);
+         ReplacementPopupRegression(workspace, gmc, catalog.EquipmentCatalog!);
+-        RealMapReplacementRegression(catalog, gmc);
++        RealMapReplacementRegression(catalog, gmc, workspace);
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "gmc_9500_diff_lock_default") is { IsVisual: true, Category: "diff_lock" }, "User's visual group follows tuning folders even for functional diff locks");
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "frame_addon_sideboard_2") is { IsVisual: false, Category: "frame_addons" }, "Shared bed is outside the tuning group");
+         Check(gmc.Addons == "None" && gmc.FrameAddons == "Sideboard Bed" && !gmc.AddonDetails.Contains("gmc_9500_diff_lock_default")
+@@ -280,7 +281,7 @@ internal static class Program
+         Console.WriteLine("PASS: map equipment, confirmed exceptions, checkbox filters, overlay search, tile counts, editable unknowns and persistent availability choices.");
+     }
+ 
+-    private static void RealMapReplacementRegression(RegionTruckCatalog catalog, RegionTruckEntry discovery)
++    private static void RealMapReplacementRegression(RegionTruckCatalog catalog, RegionTruckEntry discovery, string workspace)
+     {
+         var equipment = catalog.EquipmentCatalog!;
+         var replacement = new ReplacementTruck(new("tayga_6436", "Tayga 6436", "Offroad"), equipment.ResolveDefault("tayga_6436"), equipment.ComparisonProperties("tayga_6436"));
+@@ -289,7 +290,14 @@ internal static class Program
+         foreach (var current in new[] { discovery, task })
+         {
+             var data = RegionTruckCatalogService.ReadMapData(current.Source)!;
++            // An installed/overlaid map can still be an old-writer output. Exercise the preserved original instead.
++            try { TruckReplacementStore.ValidateScene(data); }
++            catch (InvalidDataException)
++            {
++                data = RegionTruckCatalogService.ReadMapData(WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "backups", current.MapCode, "original.pak"))!;
++            }
+             var patched = TruckReplacementStore.Patch(data, current, replacement);
++            CheckSceneSplice(data, patched);
+             var oldRows = RegionTruckCatalogService.ReadPlacements(data, codes); var rows = RegionTruckCatalogService.ReadPlacements(patched, codes);
+             Check(oldRows.Count == rows.Count && oldRows.Zip(rows).All(pair => pair.First.Id == pair.Second.Id && pair.First.Transform!.SequenceEqual(pair.Second.Transform!)),
+                 "Real map patch preserves all placement IDs, positions and orientations");
+@@ -313,6 +321,8 @@ internal static class Program
+         var saveWorkspace = Path.Combine(run, "workspace"); Directory.CreateDirectory(saveWorkspace);
+         current = current with { Source = pak };
+         var saved = TruckReplacementStore.Save(saveWorkspace, current, target);
++        CheckSceneSplice(RegionTruckCatalogService.ReadMapData(pak)!, RegionTruckCatalogService.ReadMapData(saved.OutputPath)!);
++        CheckArchiveLayout(pak, saved.OutputPath);
+         Check(File.ReadAllBytes(pak).SequenceEqual(originalBytes) && File.ReadAllBytes(saved.OriginalBackupPath).SequenceEqual(originalBytes), "Input archive stays untouched and original backup is byte-identical");
+         using (var zip = ZipFile.OpenRead(saved.OutputPath))
+         { using var reader = new StreamReader(zip.GetEntry("unrelated_payload.bin")!.Open()); Check(reader.ReadToEnd() == "unrelated payload remains unchanged", "Saving preserves unrelated archive entries"); }
+@@ -346,6 +356,11 @@ internal static class Program
+         try { TruckReplacementStore.Patch(File.ReadAllBytes(bin), unnamed with { BinaryOffset = unnamed.BinaryOffset + 1 }, target); }
+         catch (InvalidDataException) { invalidRejected = true; }
+         Check(invalidRejected, "Invalid placement boundaries are rejected");
++        var malformed = File.ReadAllBytes(bin); BinaryPrimitives.WriteInt32LittleEndian(malformed.AsSpan(8, 4), malformed.Length - 1);
++        var malformedRejected = false;
++        try { TruckReplacementStore.Patch(malformed, unnamed, target); } catch (InvalidDataException) { malformedRejected = true; }
++        Check(malformedRejected, "Invalid scene envelopes are rejected before any save");
++        RepairRegression(run, pak, current, target);
+         var overlayRoot = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "updated"); Directory.CreateDirectory(overlayRoot);
+         File.Copy(saved.OutputPath, Path.Combine(overlayRoot, "level_us_01_01.pak"), overwrite: true);
+         var reloaded = RegionTruckCatalogService.Load(workspace, maps, new Dictionary<string, string>(), new Dictionary<string, string>(), new RegionTruckAvailabilityStore(Path.Combine(run, "availability.json")));
+@@ -399,6 +414,85 @@ internal static class Program
+         Console.WriteLine("PASS: replacement saving, byte-identical backups, repeat revisions, task/discovery identity, stale rejection, overlay reload and unrelated archive content.");
+     }
+ 
++    private static void CheckSceneSplice(byte[] before, byte[] after)
++    {
++        TruckReplacementStore.ValidateScene(after);
++        var boundary = BinaryPrimitives.ReadInt32LittleEndian(before.AsSpan(4, 4));
++        var nextBoundary = BinaryPrimitives.ReadInt32LittleEndian(after.AsSpan(4, 4));
++        Check(nextBoundary - boundary == after.Length - before.Length && before.AsSpan(boundary).SequenceEqual(after.AsSpan(nextBoundary)),
++            "Variable-length replacements update both scene boundaries and retain the complete payload after the header");
++        Check(before.AsSpan(12, 4).SequenceEqual(after.AsSpan(12, 4)), "Scene payload prefix is preserved, not mistaken for a checksum");
++    }
++
++    private static void CheckArchiveLayout(string original, string edited)
++    {
++        using var a = ZipFile.OpenRead(original); using var b = ZipFile.OpenRead(edited);
++        Check(a.Entries.Select(entry => entry.FullName).SequenceEqual(b.Entries.Select(entry => entry.FullName)), "PAK entry order is preserved");
++        var before = File.ReadAllBytes(original); var after = File.ReadAllBytes(edited);
++        var first = LocalRecords(before); var second = LocalRecords(after);
++        Check(first.Count == second.Count, "Local entry count stays unchanged");
++        for (var i = 0; i < first.Count; i++)
++        {
++            var x = first[i]; var y = second[i];
++            Check(x.Name == y.Name && x.Method == y.Method, "Local ZIP order and original stored/deflate methods are preserved");
++            if (!x.Name.Replace('\\', '/').Equals("[scene]/data_for_ssl.bin", StringComparison.OrdinalIgnoreCase))
++                Check(before.AsSpan(x.Offset, x.Length).SequenceEqual(after.AsSpan(y.Offset, y.Length)), "Unrelated local ZIP records remain byte-identical");
++        }
++        foreach (var entry in b.Entries) { using var stream = entry.Open(); stream.CopyTo(Stream.Null); }
++    }
++
++    private static List<(string Name, ushort Method, int Offset, int Length)> LocalRecords(byte[] bytes)
++    {
++        var rows = new List<(string, ushort, int, int)>(); var offset = 0;
++        while (offset + 30 <= bytes.Length && BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4)) == 0x04034b50)
++        {
++            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset + 26, 2));
++            var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset + 28, 2));
++            var length = checked(30 + nameLength + extraLength + (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset + 18, 4)));
++            rows.Add((Encoding.UTF8.GetString(bytes, offset + 30, nameLength), BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset + 8, 2)), offset, length));
++            offset += length;
++        }
++        return rows;
++    }
++
++    private static void RepairRegression(string run, string source, RegionTruckEntry current, ReplacementTruck replacement)
++    {
++        var workspace = Path.Combine(run, "repair-workspace");
++        var root = Path.Combine(workspace, "region-maps"); var backups = Path.Combine(root, "backups", current.MapCode);
++        Directory.CreateDirectory(backups); Directory.CreateDirectory(Path.Combine(root, "updated"));
++        var baselinePath = Path.Combine(backups, "original.pak");
++        // Use a stored scene in the middle of the archive, as in the game PAKs.
++        var baseline = RegionTruckCatalogService.ReadMapData(source)!;
++        using (var zip = ZipFile.Open(baselinePath, ZipArchiveMode.Create))
++        {
++            using (var s = zip.CreateEntry("before.bin", CompressionLevel.Optimal).Open()) s.Write(new byte[200]);
++            using (var s = zip.CreateEntry("[scene]/data_for_ssl.bin", CompressionLevel.NoCompression).Open()) s.Write(baseline);
++            using (var s = zip.CreateEntry("after.bin", CompressionLevel.NoCompression).Open()) s.Write(Encoding.ASCII.GetBytes("untouched"));
++        }
++        // Include trailing PAK padding and retain it through both writing and repair.
++        using (var padding = File.Open(baselinePath, FileMode.Append)) padding.Write(new byte[484]);
++        var edited = Path.Combine(root, "updated", current.MapCode + ".pak");
++        File.Copy(baselinePath, edited);
++        var valid = TruckReplacementStore.Patch(baseline, current, replacement); var broken = (byte[])valid.Clone();
++        baseline.AsSpan(0, 12).CopyTo(broken);
++        using (var zip = ZipFile.Open(edited, ZipArchiveMode.Update))
++        { zip.GetEntry("[scene]/data_for_ssl.bin")!.Delete(); using var stream = zip.CreateEntry("[scene]/data_for_ssl.bin", CompressionLevel.Optimal).Open(); stream.Write(broken); }
++        var oldBytes = File.ReadAllBytes(edited); var originalBytes = File.ReadAllBytes(baselinePath);
++        Check(TruckReplacementStore.RepairSavedMaps(workspace) == 1, "Old writer output is repairable in the workspace");
++        Check(RegionTruckCatalogService.ReadMapData(edited)!.SequenceEqual(valid), "Repair retains selected model/equipment and fixes both scene boundaries");
++        CheckArchiveLayout(baselinePath, edited);
++        Check(File.ReadAllBytes(baselinePath).SequenceEqual(originalBytes) && Directory.GetFiles(backups).Where(path => path != baselinePath).Any(path => File.ReadAllBytes(path).SequenceEqual(oldBytes)),
++            "Repair preserves the original backup and backs up the preceding broken output");
++        Check(TruckReplacementStore.RepairSavedMaps(workspace) == 0, "Repair is idempotent");
++        File.WriteAllBytes(edited, oldBytes);
++        using (var zip = ZipFile.Open(edited, ZipArchiveMode.Update))
++        { zip.GetEntry("after.bin")!.Delete(); using var s = zip.CreateEntry("after.bin").Open(); s.WriteByte(123); }
++        var unsafeBytes = File.ReadAllBytes(edited); var rejected = false;
++        try { TruckReplacementStore.RepairSavedMaps(workspace); } catch (InvalidDataException) { rejected = true; }
++        Check(rejected && File.ReadAllBytes(edited).SequenceEqual(unsafeBytes), "Repair rejects unrelated changes without publishing an output");
++        Console.WriteLine("PASS: scene size boundaries, PAK record order/compression/raw bytes, old-output repair, backups and unsafe-repair rejection.");
++    }
++
+     private static void WorkspaceLayoutRegression()
+     {
+         var root = Path.Combine(AppContext.BaseDirectory, "layout-" + Guid.NewGuid().ToString("N"));
+@@ -521,6 +615,7 @@ internal static class Program
+     private static byte[] BuildMap(params string[] ids)
+     {
+         using var memory = new MemoryStream(); using var writer = new BinaryWriter(memory);
++        writer.Write(20190654u); writer.Write(0u); writer.Write(0u);
+         WriteString("test_truck"); writer.Write(new byte[70]); // A reference without a transform must not become a placement.
+         foreach (var id in ids)
+         {
+@@ -534,7 +629,12 @@ internal static class Program
+                          id switch { "AWARD" => "chains_1", "REMOVE" => "offroad_1", "UNKNOWN" => "allterrain_1", "UNLINKED" => "mudtires_1", _ => "" } }) WriteString(field);
+             writer.Write(new byte[26]);
+         }
+-        return memory.ToArray();
++        var headerEnd = (int)memory.Length;
++        writer.Write(Encoding.ASCII.GetBytes("unchanged scene payload after header"));
++        var data = memory.ToArray();
++        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(4, 4), headerEnd);
++        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(8, 4), data.Length);
++        return data;
+         void WriteString(string value) { writer.Write((ushort)(value.Length + 1)); writer.Write(Encoding.ASCII.GetBytes(value)); writer.Write((byte)0); }
+     }
+     private static T Field<T>(object target, string name) => (T)target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(target)!;
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 57742a3..1b6c286 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -10,6 +10,7 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/MapArchiveWriter.cs" Link="MapArchiveWriter.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/PendingTruckReplacements.cs" Link="PendingTruckReplacements.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs" Link="WorkspaceChangeAudit.cs" />
+diff --git a/.checks/MapSceneSmoke/Program.cs b/.checks/MapSceneSmoke/Program.cs
+new file mode 100644
+index 0000000..01ac6d8
+--- /dev/null
++++ b/.checks/MapSceneSmoke/Program.cs
+@@ -0,0 +1,31 @@
++using System.Buffers.Binary;
++using System.IO.Compression;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++var assembly = Assembly.Load("SnowPakTool.Desktop");
++object? Call(string type, string method, params object?[] values) => assembly.GetType("SnowPakTool.Desktop." + type)!
++    .GetMethod(method, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, values);
++var workspace = Path.GetFullPath(args[0]);
++var scratch = Path.Combine(AppContext.BaseDirectory, "real-map-" + Guid.NewGuid().ToString("N"));
++var root = Path.Combine(scratch, "region-maps");
++Directory.CreateDirectory(Path.Combine(root, "backups", "level_us_01_01"));
++Directory.CreateDirectory(Path.Combine(root, "updated"));
++var baseline = Path.Combine(root, "backups", "level_us_01_01", "original.pak");
++var output = Path.Combine(root, "updated", "level_us_01_01.pak");
++var source = Path.Combine(workspace, "region-maps", "updated", "level_us_01_01.pak");
++string Hash(string path) { using var file = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(file)); }
++byte[] Scene(string path) { using var zip = ZipFile.OpenRead(path); using var input = zip.Entries.Single(e => e.FullName.Replace('\\', '/') == "[scene]/data_for_ssl.bin").Open(); using var memory = new MemoryStream(); input.CopyTo(memory); return memory.ToArray(); }
++var sourceHash = Hash(source);
++File.Copy(Path.Combine(workspace, "region-maps", "backups", "level_us_01_01", "original.pak"), baseline);
++File.Copy(source, output);
++var broken = Scene(output); var original = Scene(baseline); var originalHash = Hash(baseline);
++if ((int)Call("TruckReplacementStore", "RepairSavedMaps", scratch)! != 1) throw new Exception("Expected one repaired map.");
++var fixedScene = Scene(output); Call("TruckReplacementStore", "ValidateScene", fixedScene);
++if (!broken.AsSpan(12).SequenceEqual(fixedScene.AsSpan(12))) throw new Exception("Repair changed truck or scene payload.");
++if (Hash(source) != sourceHash || Hash(baseline) != originalHash) throw new Exception("Repair changed an input map.");
++if ((int)Call("TruckReplacementStore", "RepairSavedMaps", scratch)! != 0) throw new Exception("Repair is not idempotent.");
++Console.WriteLine(JsonSerializer.Serialize(new { Output = output, Original = baseline, HeaderEndBefore = BinaryPrimitives.ReadInt32LittleEndian(broken.AsSpan(4, 4)),
++    HeaderEndAfter = BinaryPrimitives.ReadInt32LittleEndian(fixedScene.AsSpan(4, 4)), StoredLength = BinaryPrimitives.ReadInt32LittleEndian(fixedScene.AsSpan(8, 4)),
++    ActualLength = fixedScene.Length, OriginalLength = original.Length, SourceUnchanged = true }, new JsonSerializerOptions { WriteIndented = true }));
+diff --git a/.checks/MapSceneSmoke/MapSceneSmoke.csproj b/.checks/MapSceneSmoke/MapSceneSmoke.csproj
+new file mode 100644
+index 0000000..2a46b7c
+--- /dev/null
++++ b/.checks/MapSceneSmoke/MapSceneSmoke.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>
+diff --git a/README.md b/README.md
+index 456c317..8c1a574 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,8 @@ dotnet run --project .\src\SnowPakTool.Desktop\SnowPakTool.Desktop.csproj
+ 
+ The UI uses the original SnowPakTool cache-block and PAK writer classes and writes to a new output file without replacing the input archive.
+ 
++Map truck replacements are queued in the popup and written from **Start → Map files**. The map writer updates both scene size boundaries, preserves the PAK entry order and each entry's compression method, and copies unrelated ZIP records unchanged. Original maps and previous edited versions remain backed up under `workspace/region-maps/backups`. **Repair saved maps** rebuilds outputs produced by the older writer using their original archive layout, while retaining the selected trucks. Repair verifies the unchanged scene payload and unrelated archive contents before replacing a workspace output; it never writes installed game files. Reload and review any pending replacements after repairing their source map.
++
+ As an example, here's how to increase first and third person FOV slider ranges (they're normally limited to 130 max):
+ 
+ ```bat

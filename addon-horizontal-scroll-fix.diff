@@ -1,0 +1,227 @@
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer → Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+-**Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
++**Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Large catalogs use indexed accessibility row names and navigation so horizontal scrollbar drags do not repeatedly scan the full table; accessible values, selection, sorting and filtering are retained. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+ **Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions queue original pickup restoration, including after Apply. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Stage changes** in either upgrade tab snapshots all pickup changes together with exploration flags. Upgrades found on any resulting map are exploration-locked; upgrades absent from all maps are unlocked. Unrandomized maps retain their current pickups and count toward these flags. Tire sizes sharing a definition share one flag: any discoverable size locks that variant. The full current pickup inventory is scanned; unreadable settings or unresolved pickup definitions block staging rather than guessing absence. Source catalog warnings remain visible.
+ 
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -7,7 +7,7 @@
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
+     private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+-    private readonly DataGridView _addons = CreateGrid();
++    private readonly DataGridView _addons = CreateGrid(new BoundCatalogGrid());
+     private readonly DataGridView _properties = CreateGrid();
+     private AddonCatalog? _catalog;
+     private string? _loadedWorkspace;
+@@ -141,13 +141,17 @@
+         }
+     }
+ 
+-    private static DataGridView CreateGrid() => new()
++    private static DataGridView CreateGrid(DataGridView? grid = null)
+     {
+-        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+-        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
+-        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
+-        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
+-        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
+-        RowTemplate = { Height = 26 }
+-    };
++        grid ??= new DataGridView();
++        grid.Dock = DockStyle.Fill;
++        grid.ReadOnly = true;
++        grid.AllowUserToAddRows = grid.AllowUserToDeleteRows = grid.AllowUserToResizeRows = grid.RowHeadersVisible = grid.MultiSelect = false;
++        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
++        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
++        grid.Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f);
++        grid.ColumnHeadersDefaultCellStyle.Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold);
++        grid.RowTemplate.Height = 26;
++        return grid;
++    }
+ }
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/BoundCatalogGrid.cs
+@@ -0,0 +1,70 @@
++namespace SnowPakTool.Desktop;
++
++/// <summary>
++/// A bound catalog uses DataView filtering, so grid row indexes already are visible
++/// indexes. Avoid WinForms' repeated visible-row searches when UI Automation asks
++/// for names while scrolling a large catalog. Keep the standard accessibility
++/// objects and their navigation, values, selection and table patterns.
++/// </summary>
++internal sealed class BoundCatalogGrid : DataGridView
++{
++    public BoundCatalogGrid() => RowTemplate = new CatalogRow();
++
++    protected override void OnColumnAdded(DataGridViewColumnEventArgs e)
++    {
++        if (e.Column is DataGridViewTextBoxColumn) e.Column.CellTemplate = new CatalogCell();
++        base.OnColumnAdded(e);
++    }
++
++    private static int RowStart => AppContext.TryGetSwitch("System.Windows.Forms.DataGridViewUIAStartRowCountAtZero", out var zero) && zero ? 0 : 1;
++
++    private sealed class CatalogRow : DataGridViewRow
++    {
++        public CatalogRow() { }
++        protected override AccessibleObject CreateAccessibilityInstance() => new CatalogRowAccessibility(this);
++
++        private sealed class CatalogRowAccessibility(CatalogRow row) : DataGridViewRowAccessibleObject(row)
++        {
++            public override string Name => row.Index < 0 ? "" : $"Row {row.Index + RowStart}";
++
++            public override AccessibleObject? Navigate(AccessibleNavigation direction)
++            {
++                if (row.Index < 0 || row.DataGridView is not { } grid) return null;
++                return direction switch
++                {
++                    AccessibleNavigation.Next or AccessibleNavigation.Down => row.Index + 1 < grid.Rows.Count
++                        ? grid.Rows[row.Index + 1].AccessibilityObject : null,
++                    AccessibleNavigation.Previous or AccessibleNavigation.Up => row.Index > 0
++                        ? grid.Rows[row.Index - 1].AccessibilityObject
++                        : grid.ColumnHeadersVisible ? grid.AccessibilityObject.GetChild(0) : null,
++                    _ => base.Navigate(direction)
++                };
++            }
++        }
++    }
++
++    private sealed class CatalogCell : DataGridViewTextBoxCell
++    {
++        public CatalogCell() { }
++        protected override AccessibleObject CreateAccessibilityInstance() => new CatalogCellAccessibility(this);
++
++        private sealed class CatalogCellAccessibility(CatalogCell cell) : DataGridViewTextBoxCellAccessibleObject(cell)
++        {
++            public override string? Name
++            {
++                get
++                {
++                    if (cell.RowIndex < 0 || cell.OwningColumn is not { } column) return "";
++                    var name = $"{column.HeaderText} Row {cell.RowIndex + RowStart}";
++                    if (column.SortMode == DataGridViewColumnSortMode.NotSortable) return name;
++                    return name + (column.HeaderCell.SortGlyphDirection switch
++                    {
++                        SortOrder.Ascending => ", Sorted ascending",
++                        SortOrder.Descending => ", Sorted descending",
++                        _ => ", Not sorted"
++                    });
++                }
++            }
++        }
++    }
++}
+--- /dev/null
++++ b/.checks/AddonFreeze/Program.cs
+@@ -0,0 +1,99 @@
++using System.Reflection;
++using System.Diagnostics;
++static class Program
++{
++ static readonly Assembly App=Assembly.Load("SnowPakTool.Desktop");
++ static Type T(string n)=>App.GetType("SnowPakTool.Desktop."+n)!;
++ static object F(object o,string n)=>o.GetType().GetField(n,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(o)!;
++ static IEnumerable<Control> All(Control c){yield return c;foreach(Control x in c.Controls)foreach(var y in All(x))yield return y;}
++ [STAThread]static void Main(string[] args)
++ {
++  if(!args.Contains("--test"))
++  {
++   Application.EnableVisualStyles();Application.SetHighDpiMode(HighDpiMode.SystemAware);
++   var trace=Path.Combine(AppContext.BaseDirectory,"native-scroll.log");File.WriteAllText(trace,"begin\n");
++   using var window=(Form)Activator.CreateInstance(T("MainForm"))!;window.Text="Addon scrollbar diagnostic";
++   ((TextBox)F(window,"_workspacePath")).Text=@"S:\snowrunner_Shenanigans\AI\workspace";
++   var addon=F(F(window,"_truckEditTab"),"_addonsTab");var g=(DataGridView)F(addon,"_addons");
++   var watchers=new List<NativeTrace>();
++   void Attach(Control c,string label){if(c.IsHandleCreated)watchers.Add(new(c.Handle,trace,label));else c.HandleCreated+=(_,_)=>watchers.Add(new(c.Handle,trace,label));}
++   Attach(g,"grid");foreach(Control c in g.Controls)Attach(c,c.GetType().Name);
++   g.Scroll+=(_,e)=>File.AppendAllText(trace,$"{DateTime.Now:O} EVENT {e.ScrollOrientation} {e.Type} {e.NewValue}\n");
++   g.CurrentCellChanged+=(_,_)=>File.AppendAllText(trace,"CELL\n");
++   window.Shown+=(_,_)=>
++   {
++    var nav=All(window).OfType<TabControl>().Single(t=>t.Name=="MainNavigation");var e=nav.TabPages["Editors"]!.Controls.OfType<TabControl>().Single();
++    e.SelectedTab=e.TabPages["Addons"];nav.SelectedTab=nav.TabPages["Editors"];
++   };
++   Application.Run(window);return;
++  }
++  var clock=Stopwatch.StartNew();void Log(string s)=>Console.WriteLine($"{clock.Elapsed.TotalSeconds:F2}s {s}");
++  Application.SetHighDpiMode(HighDpiMode.SystemAware);
++  using var form=(Form)Activator.CreateInstance(T("MainForm"))!;
++  ((TextBox)F(form,"_workspacePath")).Text="";
++  var host=form.Controls.OfType<Panel>().Single(p=>p.Controls.OfType<TabControl>().Any(t=>t.Name=="MainNavigation"));
++  using var canvas=new Panel{Size=new Size(1100,850)};canvas.Controls.Add(host);canvas.CreateControl();host.CreateControl();
++  var main=All(host).OfType<TabControl>().Single(t=>t.Name=="MainNavigation");
++  var editors=main.TabPages["Editors"]!.Controls.OfType<TabControl>().Single();
++  var addons=F(F(form,"_truckEditTab"),"_addonsTab");var grid=(DataGridView)F(addons,"_addons");
++  grid.DataBindingComplete+=(_,_)=>Log("bound "+grid.Rows.Count+" rows");
++  using var timer=new System.Windows.Forms.Timer{Interval=100};var ticks=0;timer.Tick+=(_,_)=>ticks++;timer.Start();
++  Log("setting workspace");((TextBox)F(form,"_workspacePath")).Text=@"S:\snowrunner_Shenanigans\AI\workspace";
++  Log("selecting Addons");editors.SelectedTab=editors.TabPages["Addons"];main.SelectedTab=main.TabPages["Editors"];
++  Log("selected");
++  var deadline=DateTime.UtcNow.AddSeconds(50);
++  while(DateTime.UtcNow<deadline&&(grid.Rows.Count==0||(bool)F(addons,"_loading"))){Application.DoEvents();Thread.Sleep(5);}
++  Log("completed: "+((Label)F(addons,"_status")).Text+"; ticks="+ticks);
++  if(grid.Rows.Count<5000)throw new Exception("Catalog not loaded");
++  var start=clock.Elapsed.TotalSeconds;Application.DoEvents();Log("post-load DoEvents "+(clock.Elapsed.TotalSeconds-start));
++  grid.CurrentCellChanged+=(_,_)=>Log("current cell changed");grid.Scroll+=(_,e)=>Log("scroll "+e.ScrollOrientation+" "+e.NewValue);
++  for(var c=1;c<grid.Columns.Count-1;c++)
++  {
++   Log("horizontal column "+c);grid.FirstDisplayedScrollingColumnIndex=c;Application.DoEvents();
++   using var bitmap=new Bitmap(canvas.Width,canvas.Height);canvas.DrawToBitmap(bitmap,new Rectangle(Point.Empty,canvas.Size));
++   Log("painted "+c);
++  }
++  var bar=grid.Controls.OfType<HScrollBar>().Single();
++  var scroll=typeof(ScrollBar).GetMethod("OnScroll",BindingFlags.NonPublic|BindingFlags.Instance)!;
++  Log("native thumb events");
++  for(var offset=0;offset<bar.Maximum-bar.LargeChange;offset+=20)
++   scroll.Invoke(bar,new object[]{new ScrollEventArgs(ScrollEventType.ThumbTrack,offset,ScrollOrientation.HorizontalScroll)});
++  Log("native thumb events finished");
++  var names=Stopwatch.StartNew();var count=0;
++  foreach(DataGridViewRow row in grid.Rows)
++  {
++   if(row.AccessibilityObject.Name!=$"Row {row.Index+1}")throw new Exception("Accessible row identity");
++   var next=row.AccessibilityObject.Navigate(AccessibleNavigation.Next);
++   if(row.Index+1<grid.Rows.Count && next?.Name!=$"Row {row.Index+2}")throw new Exception("Accessible sibling navigation");
++   foreach(DataGridViewCell cell in row.Cells)
++   {
++    if(!cell.AccessibilityObject.Name!.Contains($"Row {row.Index+1}"))throw new Exception("Accessible cell identity");
++    count++;
++   }
++  }
++  Log($"PASS {count} cell and {grid.Rows.Count} row accessibility names in {names.Elapsed.TotalSeconds:F2}s");
++  if(names.Elapsed>TimeSpan.FromSeconds(5))throw new Exception("Accessibility name enumeration too slow");
++  var headers=T("TableHeaderBehavior").GetMethod("Attach")!.Invoke(null,new object?[]{grid,null,null,null})!;
++  var filter=headers.GetType().GetMethod("AddFilter")!.Invoke(headers,new object?[]{"Type",null,Array.Empty<string>()})!;
++  filter.GetType().GetMethod("SelectValues")!.Invoke(filter,new object[]{new[]{"Engine"}});Application.DoEvents();
++  if(grid.Rows.Count==0||grid.Rows.Count>=6092||grid.Rows[0].AccessibilityObject.Name!="Row 1")throw new Exception("Filtered row numbering");
++  headers.GetType().GetMethod("SetSort")!.Invoke(headers,new object[]{"ID",SortOrder.Descending});Application.DoEvents();
++  if(!grid.Rows[0].Cells["ID"].AccessibilityObject.Name!.Contains("Sorted descending"))throw new Exception("Accessible sort state");
++  if(!grid.Rows[0].Cells["ID"].AccessibilityObject.Value!.Equals(Convert.ToString(grid.Rows[0].Cells["ID"].Value)))throw new Exception("Accessible value lost");
++  grid.Rows[0].Cells[0].AccessibilityObject.Select(AccessibleSelection.TakeSelection|AccessibleSelection.TakeFocus);
++  if(grid.CurrentCell!=grid.Rows[0].Cells[0])throw new Exception("Accessible selection lost");
++  Log("PASS filtered/sorted accessible row identity, values and sort state");
++ }
++ sealed class NativeTrace:NativeWindow
++ {
++  readonly string path,label;
++  public NativeTrace(IntPtr handle,string p,string l){path=p;label=l;AssignHandle(handle);}
++  protected override void WndProc(ref Message m)
++  {
++   var log=m.Msg is 0x114 or 0x2114 or 0x201 or 0x200 or 0x202 or 0xA1 or 0xA0 or 0xA2;
++   if(log)File.AppendAllText(path,$"{DateTime.Now:O} {label} enter {m.Msg:X} {m.WParam}\n");
++   base.WndProc(ref m);
++   if(log)File.AppendAllText(path,$"{DateTime.Now:O} {label} exit {m.Msg:X}\n");
++  }
++ }
++}
+--- /dev/null
++++ b/.checks/AddonFreeze/AddonFreeze.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>

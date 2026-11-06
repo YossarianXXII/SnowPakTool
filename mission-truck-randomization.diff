@@ -1,0 +1,580 @@
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -63,7 +63,7 @@
+             _ownedContentTab.EnsureLoaded();
+             return _ownedContentTab.GetAvailableCustomGroupingTrucks();
+         });
+-        _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync);
++        _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync, RandomizeMissionsAsync);
+         _truckRandomizationTab.ConfigureMapStaging(_regionsTrucksTab.StageChangesAsync, () =>
+             Directory.Exists(_workspacePath.Text.Trim()) && PendingTruckReplacements.HasUnstagedChanges(_workspacePath.Text.Trim()));
+         _regionsTrucksTab.ChangesStaged += async () =>
+@@ -447,6 +447,21 @@
+         await _regionsTrucksTab.RefreshChangesAsync();
+     }
+ 
++    private async Task RandomizeMissionsAsync(MissionTruckDifficulty difficulty, IProgress<RandomizationLogEntry> progress)
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) throw new InvalidOperationException("Choose an extracted workspace on Start first.");
++        await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++        _ownedContentTab.EnsureLoaded();
++        var ownedRegions = WorkspaceDataCache.GetRegionMetadata(workspace)
++            .Where(pair => pair.Value.IsBaseGame || _ownedRegionState.IsOwned(pair.Key)).Select(pair => pair.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var enabledTrucks = _ownedContentTab.GetAvailableCustomGroupingTrucks();
++        var regionTiers = RegionTierListStore.Load();
++        var catalog = await _regionsTrucksTab.GetRandomizationCatalogAsync();
++        await Task.Run(() => MissionTruckRandomizer.Randomize(workspace, catalog, ownedRegions, enabledTrucks, regionTiers, difficulty, progress));
++        await _regionsTrucksTab.RefreshChangesAsync();
++    }
++
+     private static void ExtractPak(string pakPath, string workspace)
+     {
+         using var archive = ZipFile.OpenRead(pakPath);
+--- a/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
++++ b/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
+@@ -53,7 +53,7 @@
+         var sourceClasses = catalog.Entries.Concat(pendingChanges.Select(change => change.Original))
+             .GroupBy(entry => entry.StablePlacementKey, StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(group => group.Key, group => SourceClass(group.First()), StringComparer.OrdinalIgnoreCase);
+-        var heavyAssignments = assignments.Values.Where(item => SameClass(
++        var heavyAssignments = assignments.Values.Where(item => !item.MissionOnly && SameClass(
+             string.IsNullOrEmpty(item.OriginalClass) ? sourceClasses.GetValueOrDefault(item.PlacementKey, "") : item.OriginalClass, "HEAVY_DUTY")).ToArray();
+         var heavyCount = heavyAssignments.Length;
+         var offroadCount = heavyAssignments.Count(item => SameClass(item.Target.Class, "OFFROAD"));
+--- a/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
++++ b/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+@@ -5,7 +5,7 @@
+ internal sealed record PendingTruckReplacement(string Key, RegionTruckEntry Original, CustomTruck Target, DateTimeOffset QueuedAt,
+     MapTruckEquipment? Configuration = null, bool ResetOriginal = false, bool Randomized = false, bool Staged = true);
+ internal sealed record TruckRandomizationAssignment(string PlacementKey, string RegionCode, CustomTruck Target,
+-    MapTruckEquipment Configuration, int Seed, DateTimeOffset CreatedAt, string OriginalClass = "");
++    MapTruckEquipment Configuration, int Seed, DateTimeOffset CreatedAt, string OriginalClass = "", bool MissionOnly = false);
+ 
+ /// <summary>Drafts, staged intent and assignments share one atomic file. Only Start applies staged map writes.</summary>
+ internal static class PendingTruckReplacements
+@@ -82,7 +82,7 @@
+     }
+ 
+     public static void QueueRandomization(string workspace,
+-        IReadOnlyList<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)> changes, int seed)
++        IReadOnlyList<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)> changes, int seed, bool missionOnly = false)
+     {
+         lock (Gate)
+         {
+@@ -98,7 +98,7 @@
+                 state.Pending.RemoveAll(item => existing.Contains(item));
+                 state.Pending.Add(new(Key(entry), entry, target, DateTimeOffset.UtcNow, configuration, Randomized: true, Staged: false));
+                 state.Assignments.Add(new(entry.StablePlacementKey, entry.RegionCode, target, configuration, seed, DateTimeOffset.UtcNow,
+-                    entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class));
++                    entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class, missionOnly));
+             }
+             if (changes.Count > 0) Write(workspace, state);
+         }
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,12 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
++**Randomizer → Truck randomization → Missions** uses the same editable rule list, compact add/edit/remove glyphs, run button, Stage changes button, default-hidden detailed logs and region completion messages as Obtainable. Its saved **Easy / Moderate / Hard** selector controls vehicle weight only: Easy favors lighter models, Moderate gives equal model weights, and Hard favors heavier models. Vehicle weight is the sum of bare vehicle physics bodies, resolving shared/local body templates and inherited definitions; cargo, frame addons and truck tier/class labels do not determine weight. Equal masses share a weight percentile, with a smooth bias that keeps all weights possible. The pool uses enabled trucks, including unranked models, across all classes. Original mission addon requirements are ignored and replacement default equipment is used.
++
++Mission tires use **region difficulty only**, independently of finalized progression and the weight selector: D favors Highway, C All-terrain, B/A Offroad, and S Mudtires, with a 20% adjacent-category variation draw clamped at the endpoints. Unsupported categories fall back to the nearest supported category; use the smallest supported size and first variant. Regions without a difficulty tier and vehicles with unreadable mass are reported and skipped. Selection prefers models not yet represented in the region, then least-used models, counting existing assignments and drafts. Saved assignments stay fixed across mode/ownership changes, and mission rolls do not consume the obtainable HEAVY_DUTY exception allowance. Existing empty Missions rule lists receive these defaults once; custom notes are preserved and later intentional empty lists stay empty. Rule prose remains editable notes; it does not change the algorithm.
++
++Only mission-only map placements in owned regions are processed; obtainable and unverified placements are excluded. Original task IDs and reward/removal scripts remain unchanged. Results and original/current comparisons appear in **Randomizer → Map trucks**, with the existing reset actions. Randomization saves a draft only. **Stage changes** in either pane or Map trucks stages all map drafts; **Start → Apply** writes staged maps with the original archives preserved. Both randomization buttons are disabled during a run or staging operation. Mission logs hide replacement identities; optional detail entries reveal tire fallbacks in their original order.
++
+ Truck randomization controls sit directly below the actual rule text, with scrolling when longer rule lists need it. Logs, details and rule text use the configurable very light gray (RGB 248/248/248) **Text areas** background. In **Editors -> Winches**, Truck winch compatibility uses the existing whole-tab search, header filters for truck/class, and Compatible / Not compatible filters for each winch class. The header filters leave compatibility edits intact. Shared table headers reserve space only for icons that are present, with compact arrow/funnel spacing and unpadded text.
+ 
+ Sortable/filterable tables share the same header controls across Owned content, Engine compatibility, Truck properties, Map trucks, Cargo and its details, replacement candidates/comparisons, Start change lists, rank XP values, and file-conflict review. Click a heading to cycle ascending -> descending -> off; off restores the original/model order while retaining column filters. Funnels open checkbox filters, filled blue when active; right-click headers for explicit sort/filter/reset commands. Filters combine across columns, support numeric and blank values, and remain applied when the table refreshes. Class/DLC/tire/availability dropdown filters now live in their respective headers. Map availability keeps unverified placements visible and editable. Region tiles, column visibility and comparison-mode controls retain their separate purposes; the XP region list continues to follow Region progression. Sorting/filtering affect the display, so rank values retain their rank identities, row actions retain their record identities, and hidden records remain part of staging/Apply as before.
+@@ -22,7 +28,7 @@
+ 
+ Navigation uses four main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization, Map trucks); and **Editors** (Truck properties first, Engines, Winches, Addons, Experience / Ranks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results remain in their own Map trucks sub-tab; randomization logs do not reveal replacement choices.
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization** and **Map trucks**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Randomizer → Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization** and **Map trucks**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts with the five mission randomization rules. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Randomizer → Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is available in the matching Missions pane. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The region checklist and graphs follow the saved Region progression order, refreshed whenever the editor is opened; regions absent from that order append in the usual release order. Local sorting/dragging and the old separately saved XP region order no longer override it. Included-region selections, curve controls and staged rank XP are preserved. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+--- a/src/SnowPakTool.Desktop/TruckRandomizationEquipment.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationEquipment.cs
+@@ -124,13 +124,20 @@
+ 
+     public bool TryRandomizationConfiguration(RegionTruckEntry original, string truck, int requestedTires,
+         out MapTruckEquipment configuration, out bool tireFallback)
++        => TryRandomizationConfigurationCore(original, truck, requestedTires, out configuration, out tireFallback);
++
++    public bool TryMissionConfiguration(string truck, int requestedTires, out MapTruckEquipment configuration, out bool tireFallback)
++        => TryRandomizationConfigurationCore(null, truck, requestedTires, out configuration, out tireFallback);
++
++    private bool TryRandomizationConfigurationCore(RegionTruckEntry? original, string truck, int requestedTires,
++        out MapTruckEquipment configuration, out bool tireFallback)
+     {
+         lock (_gate)
+         {
+             configuration = MapTruckEquipment.Unknown; tireFallback = false;
+-            var baseline = original.OriginalEquipment ?? original.RawEquipment;
+-            if (baseline is not { Parsed: true }) return false;
+-            var required = ResolveCore(original.BaselineTruckCode, baseline).InstalledAddons!
++            var baseline = original?.OriginalEquipment ?? original?.RawEquipment;
++            if (original is not null && baseline is not { Parsed: true }) return false;
++            var required = original is null ? [] : ResolveCore(original.BaselineTruckCode, baseline!).InstalledAddons!
+                 .Select(addon => (addon.Id, Kind: RequiredAddonKind(addon.Id))).Where(item => item.Kind is not null)
+                 .DistinctBy(item => item.Id, StringComparer.OrdinalIgnoreCase).Select(item => (Kind: item.Kind!, Original: item.Id)).ToArray();
+             _randomAddons ??= _files.Keys.Where(id => FileChain(id).FirstOrDefault()?.Xml.Name.LocalName == "TruckAddon")
+--- a/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
+@@ -5,7 +5,9 @@
+ internal sealed class TruckRandomizationRules
+ {
+     public List<string> Obtainable { get; set; } = [.. TruckRandomizationTab.DefaultObtainableRules];
+-    public List<string> Missions { get; set; } = [];
++    public List<string> Missions { get; set; } = [.. TruckRandomizationTab.DefaultMissionRules];
++    public bool MissionRulesInitialized { get; set; }
++    public MissionTruckDifficulty MissionDifficulty { get; set; } = MissionTruckDifficulty.Moderate;
+ }
+ 
+ internal sealed class TruckRandomizationRuleStore
+@@ -18,7 +20,7 @@
+ 
+     public TruckRandomizationRules Load()
+     {
+-        if (!File.Exists(_path)) return new();
++        if (!File.Exists(_path)) return new() { MissionRulesInitialized = true };
+         var rules = JsonSerializer.Deserialize<TruckRandomizationRules>(File.ReadAllText(_path))
+             ?? throw new JsonException("The saved rule list is empty.");
+         Validate(rules);
+@@ -28,12 +30,19 @@
+         const string previousProgressionTireRule = "Roll tires separately for each truck using finalized region progression, region difficulty tier and the separate tire difficulty. The first region requests 99% Highway / 1% All-terrain; better tires become more likely later. Hard still allows 30% Mudtires in the final S-tier region. Use the nearest compatible category, smallest size and first variant.";
+         tireRuleIndex = rules.Obtainable.IndexOf(previousProgressionTireRule);
+         if (tireRuleIndex >= 0) rules.Obtainable[tireRuleIndex] = TruckRandomizationTab.DefaultObtainableRules[4];
++        if (!rules.MissionRulesInitialized)
++        {
++            if (rules.Missions.Count == 0) rules.Missions.AddRange(TruckRandomizationTab.DefaultMissionRules);
++            rules.MissionRulesInitialized = true;
++            Save(rules);
++        }
+         return rules;
+     }
+ 
+     public void Save(TruckRandomizationRules rules)
+     {
+         Validate(rules);
++        rules.MissionRulesInitialized = true;
+         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
+         var temporaryFile = _path + ".tmp";
+         File.WriteAllText(temporaryFile, JsonSerializer.Serialize(rules, new JsonSerializerOptions { WriteIndented = true }));
+@@ -42,7 +51,7 @@
+ 
+     private static void Validate(TruckRandomizationRules rules)
+     {
+-        if (rules.Obtainable is null || rules.Missions is null ||
++        if (!Enum.IsDefined(rules.MissionDifficulty) || rules.Obtainable is null || rules.Missions is null ||
+             rules.Obtainable.Concat(rules.Missions).Any(string.IsNullOrWhiteSpace))
+             throw new JsonException("Each pane must contain a list of non-empty rules.");
+     }
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -11,6 +11,22 @@
+         "Roll tires separately for each truck using finalized region progression, region difficulty tier and Hard tire calculations. The first region requests 99% Highway / 1% All-terrain; better tires become more likely later, with 30% Mudtires in the final S-tier region. Use the nearest compatible category, smallest size and first variant.",
+         "If the original truck has any of the following addons installed, the replacement must support and have those addons installed too: Sideboard Bed, Saddle High, Saddle Low, Avto-23 Heavy Crane, Van Body Addon, Log Carrier Front, Short logging frame, Seismic Vibrator Module, or Metal Detector Module Frame."
+     ];
++
++    internal static readonly string[] DefaultMissionRules =
++    [
++        "Randomize mission-only trucks in owned regions using enabled trucks. Keep saved assignments fixed when ownership or difficulty changes.",
++        "Choose freely across truck classes and tiers. Ignore the original truck's addon requirements and use replacement default equipment. Preserve the mission's existing reward/removal behavior.",
++        "Choose supported tires using the region difficulty tier, with variation toward neighboring categories. Use the nearest supported category, smallest size and first variant.",
++        "Keep a mixture of light and heavy vehicles based on actual vehicle physics mass: Easy favors lighter vehicles, Moderate is balanced, and Hard favors heavier vehicles. All weights remain possible in every mode.",
++        "Prefer different models within each region. Use models not yet represented before repeating, then choose among the least-used models while retaining the selected weight bias."
++    ];
++
++    private readonly Func<MissionTruckDifficulty, IProgress<RandomizationLogEntry>, Task>? _runMissions;
++    private readonly List<RandomizationLogEntry> _missionLogEntries = [];
++    private readonly CheckBox _missionShowDetails = new() { Text = "Show detailed logs", AutoSize = true, Checked = false, Margin = new Padding(8, 6, 0, 0) };
++    private readonly Button _missionRandomize = new() { Text = "Randomize mission trucks", AutoSize = true };
++    private readonly Button _missionStageChanges = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
++    private readonly TextBox _missionMessages = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, MaxLength = int.MaxValue };
+ 
+     private readonly TruckRandomizationRuleStore _store;
+     private readonly ToolTip _actionTips = new();
+@@ -31,22 +47,28 @@
+ 
+     public TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable) : this(runObtainable, new TruckRandomizationRuleStore()) { }
+ 
++    public TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable,
++        Func<MissionTruckDifficulty, IProgress<RandomizationLogEntry>, Task>? runMissions)
++        : this(runObtainable, new TruckRandomizationRuleStore(), runMissions) { }
++
+     internal TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable, TruckRandomizationRuleStore store)
++        : this(runObtainable, store, null) { }
++
++    internal TruckRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? runObtainable, TruckRandomizationRuleStore store,
++        Func<MissionTruckDifficulty, IProgress<RandomizationLogEntry>, Task>? runMissions)
+     {
+         _store = store;
+         _runObtainable = runObtainable;
++        _runMissions = runMissions;
+         _randomize.Enabled = runObtainable is not null;
++        _missionRandomize.Enabled = runMissions is not null;
+         _randomize.Click += async (_, _) => await RandomizeAsync();
++        _missionRandomize.Click += async (_, _) => await RandomizeMissionsAsync();
+         _showDetails.CheckedChanged += (_, _) => RenderMessages();
++        _missionShowDetails.CheckedChanged += (_, _) => RenderMissionMessages();
+         VisibleChanged += (_, _) => RefreshStagingState();
+-        _stageChanges.Click += async (_, _) =>
+-        {
+-            if (_stageMapChanges is null || _running) return;
+-            _stageChanges.Enabled = false;
+-            try { await _stageMapChanges(); AddMessage(new("Map changes staged. Apply them from Start → Map files.")); }
+-            catch (Exception ex) { AddMessage(new("Could not stage map changes: " + ex.Message)); }
+-            finally { RefreshStagingState(); }
+-        };
++        _stageChanges.Click += async (_, _) => await StageMapChangesAsync(false);
++        _missionStageChanges.Click += async (_, _) => await StageMapChangesAsync(true);
+         Disposed += (_, _) => { _actionTips.Dispose(); _glyphFont.Dispose(); };
+         try { _rules = _store.Load(); }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+@@ -170,7 +192,35 @@
+             layout.Controls.Add(_messages, 0, 3);
+         }
+         else
+-            layout.Controls.Add(new Label { Text = "Mission randomization is not configured.", AutoSize = true }, 0, 2);
++        {
++            var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++            var difficulty = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
++            difficulty.Controls.Add(new Label { Text = "Vehicle weight:", AutoSize = true, Margin = new Padding(0, 5, 6, 0) });
++            foreach (var mode in Enum.GetValues<MissionTruckDifficulty>())
++            {
++                var radio = new RadioButton { Text = mode.ToString(), AutoSize = true, Checked = _rules.MissionDifficulty == mode,
++                    AccessibleName = "Mission weight difficulty " + mode };
++                radio.CheckedChanged += (_, _) =>
++                {
++                    if (!radio.Checked) return;
++                    _rules.MissionDifficulty = mode;
++                    try { _store.Save(_rules); }
++                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { _status.Text = "Could not save mission difficulty: " + ex.Message; }
++                };
++                difficulty.Controls.Add(radio);
++            }
++            actions.Controls.Add(difficulty);
++            actions.Controls.Add(_missionRandomize);
++            actions.Controls.Add(_missionStageChanges);
++            actions.Controls.Add(_missionShowDetails);
++            actions.Controls.Add(new Label
++            {
++                Text = "Easy favors light vehicles; Hard favors heavy vehicles. Tires use region difficulty with variance. Review/reset in Randomizer → Map trucks; stage here or there, then apply from Start.",
++                AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(400, 0)
++            });
++            layout.Controls.Add(actions, 0, 2);
++            layout.Controls.Add(_missionMessages, 0, 3);
++        }
+         var fitting = false;
+         void FitRules()
+         {
+@@ -179,7 +229,7 @@
+             try
+             {
+                 var controlsHeight = layout.GetControlFromPosition(0, 2)?.GetPreferredSize(new Size(layout.ClientSize.Width, 0)).Height ?? 0;
+-                var limit = Math.Max(48, layout.ClientSize.Height - header.PreferredSize.Height - controlsHeight - (title == "Obtainable" ? 130 : 0));
++                var limit = Math.Max(48, layout.ClientSize.Height - header.PreferredSize.Height - controlsHeight - 130);
+                 var desired = list.Height;
+                 var height = Math.Clamp(desired, 24, limit);
+                 if (Math.Abs(layout.RowStyles[1].Height - height) > 1) layout.RowStyles[1].Height = height;
+@@ -211,8 +261,57 @@
+ 
+     public void RefreshStagingState()
+     {
+-        try { _stageChanges.Enabled = !_running && _stageMapChanges is not null && _hasMapDrafts?.Invoke() == true; }
+-        catch (Exception) { _stageChanges.Enabled = false; }
++        if (IsDisposed) return;
++        _randomize.Enabled = !_running && _runObtainable is not null;
++        _missionRandomize.Enabled = !_running && _runMissions is not null;
++        var ready = false;
++        try { ready = !_running && _stageMapChanges is not null && _hasMapDrafts?.Invoke() == true; }
++        catch (Exception) { }
++        _stageChanges.Enabled = _missionStageChanges.Enabled = ready;
++    }
++
++    private async Task StageMapChangesAsync(bool missions)
++    {
++        if (_stageMapChanges is null || _running) return;
++        _running = true; RefreshStagingState();
++        void Message(string text) { if (missions) AddMissionMessage(new(text)); else AddMessage(new(text)); }
++        try { await _stageMapChanges(); Message("Map changes staged. Apply them from Start → Map files."); }
++        catch (Exception ex) { Message("Could not stage map changes: " + ex.Message); }
++        finally { _running = false; RefreshStagingState(); }
++    }
++
++    private async Task RandomizeMissionsAsync()
++    {
++        if (_runMissions is null || !_missionRandomize.Enabled || _running) return;
++        _running = true; RefreshStagingState();
++        _missionLogEntries.Clear(); _missionMessages.Clear();
++        AddMissionMessage(new("Preparing owned regions and enabled trucks…"));
++        try
++        {
++            await _runMissions(_rules.MissionDifficulty, new Progress<RandomizationLogEntry>(entry =>
++            {
++                if (!_missionMessages.IsDisposed) AddMissionMessage(entry);
++            }));
++            AddMissionMessage(new("Finished. Review the draft, stage changes here or in Map trucks, then apply from Start."));
++        }
++        catch (InvalidOperationException ex) { AddMissionMessage(new("Error: " + ex.Message)); }
++        catch (Exception) { AddMissionMessage(new("Error: could not read or save the mission plan. Check the workspace and reload map data.")); }
++        finally { _running = false; RefreshStagingState(); }
++    }
++
++    private void AddMissionMessage(RandomizationLogEntry entry)
++    {
++        if (_missionMessages.IsDisposed) return;
++        _missionLogEntries.Add(entry);
++        if (!entry.IsDetail || _missionShowDetails.Checked) _missionMessages.AppendText(entry.Message + Environment.NewLine);
++    }
++
++    private void RenderMissionMessages()
++    {
++        _missionMessages.Text = string.Concat(_missionLogEntries.Where(entry => !entry.IsDetail || _missionShowDetails.Checked)
++            .Select(entry => entry.Message + Environment.NewLine));
++        _missionMessages.SelectionStart = _missionMessages.TextLength;
++        _missionMessages.ScrollToCaret();
+     }
+ 
+     private async Task RandomizeAsync()
+--- a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+@@ -117,7 +117,7 @@
+                             $"{map}|{first.Id}|{first.X:R}|{first.Y:R}|{first.Z:R}|{originalRows.IndexOf(first)}")))
+                     {
+                         if (first.TruckCode != second.TruckCode || !PendingTruckReplacements.EquipmentEqual(first.Equipment, second.Equipment))
+-                            rows.Add(new(WorkspaceChange.InFiles, map, "Obtainable randomization", "Original placement", "Saved — details in Map trucks"));
++                            rows.Add(new(WorkspaceChange.InFiles, map, "Truck randomization", "Original placement", "Saved — details in Map trucks"));
+                         continue;
+                     }
+                     var label = first?.Id is { Length: > 0 } id ? id : $"Placement at {first?.X ?? second!.X:0.#}; {first?.Z ?? second!.Z:0.#}";
+@@ -132,7 +132,7 @@
+         }
+         foreach (var change in pendingChanges)
+             rows.Add(change.Randomized || change.ResetOriginal
+-                ? new(WorkspaceChange.Pending, change.Original.MapCode, change.ResetOriginal ? "Reset to original" : "Obtainable randomization",
++                ? new(WorkspaceChange.Pending, change.Original.MapCode, change.ResetOriginal ? "Reset to original" : "Truck randomization",
+                     "Current placement", change.ResetOriginal ? "Original truck and equipment" : "Queued — details in Map trucks", change.Key)
+                 : new(WorkspaceChange.Pending, change.Original.MapCode,
+                 (change.Original.PlacementId.Length > 0 ? change.Original.PlacementId : $"Placement at {change.Original.X:0.#}; {change.Original.Z:0.#}") + " / Truck",
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/MissionTruckDifficulty.cs
+@@ -0,0 +1,3 @@
++namespace SnowPakTool.Desktop;
++
++internal enum MissionTruckDifficulty { Easy, Moderate, Hard }
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckMassCatalog.cs
+@@ -0,0 +1,74 @@
++using System.Globalization;
++using System.Text.RegularExpressions;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed partial class TruckEquipmentCatalog
++{
++    private readonly Dictionary<string, double?> _vehicleMasses = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, XElement?> _massDocuments = new(StringComparer.OrdinalIgnoreCase);
++
++    // Bare vehicle physics bodies, including mirrors and other template bodies; no cargo or frame addons.
++    public double? VehicleMassKg(string truck)
++    {
++        lock (_gate)
++        {
++            if (_vehicleMasses.TryGetValue(truck, out var known)) return known;
++            var masses = new Dictionary<string, double?>(StringComparer.Ordinal);
++            foreach (var definition in FileChain(truck).Reverse())
++            {
++                var physics = definition.Xml.Element("PhysicsModel");
++                if (physics is null) continue;
++                if ((string?)physics.Attribute("_noinherit") == "true") masses.Clear();
++                var templates = new Dictionary<string, XElement>(StringComparer.OrdinalIgnoreCase);
++                var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++                void AddTemplates(string path)
++                {
++                    if (!visited.Add(path) || visited.Count > 32) return;
++                    var document = MassDocument(path);
++                    var section = document?.Element("_templates");
++                    if (section is null) return;
++                    foreach (var include in Split((string?)section.Attribute("Include")))
++                        AddTemplates(WorkspaceOriginals.GetCurrentPath(_workspace, Path.Combine("[media]", "_templates", include + ".xml")));
++                    foreach (var template in section.Element("Body")?.Elements() ?? []) templates[template.Name.LocalName] = template;
++                }
++                AddTemplates(definition.Path);
++                double? Mass(XElement body, HashSet<string> seen)
++                {
++                    if (body.Attribute("Mass") is { } attribute)
++                        return double.TryParse(attribute.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mass)
++                            && double.IsFinite(mass) && mass >= 0 ? mass : null;
++                    var template = (string?)body.Attribute("_template");
++                    return template is not null && seen.Add(template) && templates.TryGetValue(template, out var source) ? Mass(source, seen) : null;
++                }
++                foreach (var body in physics.Descendants("Body"))
++                {
++                    var key = string.Join("/", body.AncestorsAndSelf().TakeWhile(element => element != physics).Reverse()
++                        .Where(element => element.Name.LocalName == "Body")
++                        .Select(element => (string?)element.Attribute("ModelFrame") ?? "#" + element.ElementsBeforeSelf("Body").Count()));
++                    if ((string?)body.Attribute("_noinherit") == "true")
++                        foreach (var previous in masses.Keys.Where(previous => previous == key || previous.StartsWith(key + "/", StringComparison.Ordinal)).ToArray()) masses.Remove(previous);
++                    var value = Mass(body, new(StringComparer.OrdinalIgnoreCase));
++                    if (value.HasValue || !masses.ContainsKey(key) || body.Attribute("Mass") is not null || body.Attribute("_template") is not null) masses[key] = value;
++                }
++            }
++            var total = masses.Count > 0 && masses.Values.All(value => value.HasValue) ? masses.Values.Sum(value => value!.Value) : 0;
++            return _vehicleMasses[truck] = total > 0 && double.IsFinite(total) ? total : null;
++        }
++    }
++
++    private XElement? MassDocument(string path)
++    {
++        if (_massDocuments.TryGetValue(path, out var cached)) return cached;
++        if (!File.Exists(path)) return _massDocuments[path] = null;
++        try
++        {
++            var text = Regex.Replace(WorkspaceDataCache.ReadAllText(path), @"<\?xml[\s\S]*?\?>", "");
++            text = Regex.Replace(text, @"<(/?)([A-Za-z_][\w.-]*):", "<$1$2_");
++            return _massDocuments[path] = XElement.Parse("<Root>" + text + "</Root>");
++        }
++        catch (Exception ex) when (ex is System.Xml.XmlException or IOException or UnauthorizedAccessException)
++        { return _massDocuments[path] = null; }
++    }
++}
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/MissionTruckRandomizer.cs
+@@ -0,0 +1,132 @@
++using System.Buffers.Binary;
++using System.Security.Cryptography;
++using System.Text;
++
++namespace SnowPakTool.Desktop;
++
++internal static class MissionTruckRandomizer
++{
++    internal static double Weight(double percentile, MissionTruckDifficulty difficulty) => difficulty switch
++    {
++        MissionTruckDifficulty.Easy => Math.Exp(-3 * percentile),
++        MissionTruckDifficulty.Hard => Math.Exp(3 * percentile),
++        _ => 1
++    };
++
++    internal static int TireCategory(int difficulty, Random random)
++    {
++        var category = difficulty switch { 0 => 0, 1 => 1, 2 or 3 => 2, _ => 3 };
++        if (random.NextDouble() < 0.2) category = Math.Clamp(category + (random.Next(2) == 0 ? -1 : 1), 0, 3);
++        return category;
++    }
++
++    private static string TireLabel(int category) => new[] { "Highway", "All-terrain", "Offroad", "Mudtires" }[category];
++
++    public static void Randomize(string workspace, RegionTruckCatalog catalog, IReadOnlySet<string> ownedRegions,
++        IReadOnlyList<CustomTruck> enabledTrucks, IReadOnlyList<GroupState> regionTiers, MissionTruckDifficulty difficulty,
++        IProgress<RandomizationLogEntry> log, int? seed = null)
++    {
++        if (!Enum.IsDefined(difficulty)) throw new ArgumentOutOfRangeException(nameof(difficulty));
++        var equipment = catalog.EquipmentCatalog ?? throw new InvalidOperationException("Load map and equipment data before randomizing.");
++        void Summary(string message) => log.Report(new(message));
++        void Detail(string message) => log.Report(new(message, true));
++        var enabled = enabledTrucks.DistinctBy(truck => truck.Code, StringComparer.OrdinalIgnoreCase).ToArray();
++        var fleet = enabled.Select(truck => (Truck: truck, Mass: equipment.VehicleMassKg(truck.Code)))
++            .Where(item => item.Mass.HasValue).OrderBy(item => item.Mass).ThenBy(item => item.Truck.Code, StringComparer.OrdinalIgnoreCase).ToArray();
++        if (fleet.Length == 0) throw new InvalidOperationException("No enabled trucks have readable vehicle mass. Check the workspace vehicle definitions.");
++        if (fleet.Length < enabled.Length) Summary($"{enabled.Length - fleet.Length} enabled truck(s) excluded because their vehicle mass could not be read.");
++        // Equal masses share an average percentile; XML/file ordering must not influence the bias.
++        var percentiles = fleet.Select((item, index) => (item, index)).GroupBy(pair => pair.item.Mass!.Value)
++            .SelectMany(group => group.Select(pair => (pair.item.Truck.Code, Percentile: group.Average(pair => pair.index) / Math.Max(1, fleet.Length - 1))))
++            .ToDictionary(pair => pair.Code, pair => pair.Percentile, StringComparer.OrdinalIgnoreCase);
++        var tierByRegion = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        foreach (var tier in regionTiers)
++            foreach (var code in tier.TruckCodes)
++                if (RegionProgressionService.TierDifficulty(tier.Name) is { } value) tierByRegion.TryAdd(code, value);
++        var assignments = PendingTruckReplacements.LoadAssignments(workspace).ToDictionary(item => item.PlacementKey, StringComparer.OrdinalIgnoreCase);
++        var pending = PendingTruckReplacements.Load(workspace);
++        var resetKeys = pending.Where(change => change.ResetOriginal).Select(change => change.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var pendingKeys = pending.Where(change => !change.ResetOriginal).Select(change => change.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var pendingOffsets = pending.Where(change => !change.ResetOriginal).Select(change => change.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var uses = assignments.Values.GroupBy(item => item.Target.Code, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
++        var regions = catalog.Entries.Where(entry => ownedRegions.Contains(entry.RegionCode) && entry.Availability == "Mission/task only")
++            .GroupBy(entry => entry.RegionCode, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase).ToArray();
++        if (regions.Length == 0) throw new InvalidOperationException("No mission-only truck placements were found in owned regions.");
++        var configurations = new Dictionary<(string Code, int Category), (MapTruckEquipment Equipment, bool Fallback)?>();
++        (MapTruckEquipment Equipment, bool Fallback)? Configuration(string code, int category)
++        {
++            var key = (code, category);
++            if (!configurations.TryGetValue(key, out var result))
++            {
++                result = equipment.TryMissionConfiguration(code, category, out var configuration, out var fallback) ? (configuration, fallback) : null;
++                configurations[key] = result;
++            }
++            return result;
++        }
++        var runSeed = seed ?? Random.Shared.Next();
++        foreach (var region in regions)
++        {
++            var name = region.First().Region;
++            if (!tierByRegion.TryGetValue(region.Key, out var regionTier))
++            { Summary($"{name}: unchanged — assign this region a difficulty tier before randomizing mission trucks."); continue; }
++            var regionalTargets = assignments.Values.Where(item => item.RegionCode.Equals(region.Key, StringComparison.OrdinalIgnoreCase))
++                .ToDictionary(item => item.PlacementKey, item => item.Target.Code, StringComparer.OrdinalIgnoreCase);
++            foreach (var change in pending.Where(change => !change.ResetOriginal && change.Original.RegionCode.Equals(region.Key, StringComparison.OrdinalIgnoreCase)))
++                regionalTargets[change.Original.StablePlacementKey] = change.Target.Code;
++            foreach (var entry in region.Where(entry => entry.TruckChanged && !resetKeys.Contains(entry.StablePlacementKey))) regionalTargets.TryAdd(entry.StablePlacementKey, entry.TruckCode);
++            var regionalUses = regionalTargets.Values.GroupBy(code => code, StringComparer.OrdinalIgnoreCase)
++                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
++            var counts = new Dictionary<string, int>(uses, StringComparer.OrdinalIgnoreCase);
++            var planned = new List<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)>();
++            var kept = 0; var skipped = 0; var fallbacks = 0;
++            foreach (var entry in region.OrderBy(entry => entry.StablePlacementKey, StringComparer.Ordinal))
++            {
++                var label = $"{name} / {entry.Map} / placement {entry.PlacementIndex + 1}";
++                if (!resetKeys.Contains(entry.StablePlacementKey) && (entry.FileEntry is not null || pendingKeys.Contains(entry.StablePlacementKey)
++                    || pendingOffsets.Contains(entry.MapCode + "|" + entry.PlacementId + "|" + entry.BinaryOffset)))
++                { kept++; Detail($"{label}: kept the existing draft or staged change."); continue; }
++                if (assignments.TryGetValue(entry.StablePlacementKey, out var saved))
++                {
++                    if (entry.TruckCode.Equals(saved.Target.Code, StringComparison.OrdinalIgnoreCase) && PendingTruckReplacements.EquipmentEqual(entry.RawEquipment, saved.Configuration))
++                    { kept++; Detail($"{label}: kept the saved assignment."); }
++                    else { skipped++; Detail($"{label}: saved assignment differs from the current map; reset this placement before randomizing it again."); }
++                    continue;
++                }
++                if (entry.TruckChanged || !PendingTruckReplacements.EquipmentEqual(entry.RawEquipment, entry.OriginalEquipment))
++                { kept++; Detail($"{label}: preserved an existing edit."); continue; }
++                if (entry.RawEquipment is not { Parsed: true } || entry.PlacementIndex < 0)
++                { skipped++; Detail($"{label}: unchanged — original placement equipment could not be read safely."); continue; }
++                var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(FormattableString.Invariant($"mission|{runSeed}|{entry.StablePlacementKey}")));
++                var random = new Random(BinaryPrimitives.ReadInt32LittleEndian(bytes));
++                var category = TireCategory(regionTier, random);
++                var candidates = fleet.Where(item => !item.Truck.Code.Equals(entry.BaselineTruckCode, StringComparison.OrdinalIgnoreCase)
++                    && Configuration(item.Truck.Code, category).HasValue).ToArray();
++                if (candidates.Length == 0)
++                { skipped++; Detail($"{label}: unchanged — no different enabled truck has usable tires and readable mass."); continue; }
++                var minimumUses = candidates.Min(item => regionalUses.GetValueOrDefault(item.Truck.Code));
++                candidates = candidates.Where(item => regionalUses.GetValueOrDefault(item.Truck.Code) == minimumUses).ToArray();
++                double SelectionWeight(CustomTruck truck) => Weight(percentiles[truck.Code], difficulty) / Math.Pow(1 + counts.GetValueOrDefault(truck.Code), 0.25);
++                var roll = random.NextDouble() * candidates.Sum(item => SelectionWeight(item.Truck));
++                var candidate = candidates[^1];
++                foreach (var item in candidates) { roll -= SelectionWeight(item.Truck); if (roll <= 0) { candidate = item; break; } }
++                var (configuration, fallback) = Configuration(candidate.Truck.Code, category)!.Value;
++                planned.Add((entry.FileEntry ?? entry, candidate.Truck, configuration));
++                regionalUses[candidate.Truck.Code] = minimumUses + 1;
++                counts[candidate.Truck.Code] = counts.GetValueOrDefault(candidate.Truck.Code) + 1;
++                Detail($"{label}: selected using {difficulty} vehicle-weight bias; original class, truck tier and addon requirements were not used."
++                    + (minimumUses > 0 ? " Regional reuse was necessary; a least-used model was selected." : " Selected a model not yet represented in this region."));
++                var actual = equipment.ConfiguredTireCategory(configuration);
++                if (fallback) { fallbacks++; Detail($"{label}: tire category {TireLabel(category)} → {actual} (requested category unsupported; nearest compatible category used)."); }
++                Detail($"{label}: requested {TireLabel(category)} tires from region difficulty with variance; planned {actual}, smallest size and first variant, with replacement default equipment.");
++            }
++            try { PendingTruckReplacements.QueueRandomization(workspace, planned, runSeed, missionOnly: true); }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
++            { Summary($"{name}: error — the mission plan could not be saved. Previous assignments were preserved."); continue; }
++            uses = counts;
++            if (skipped > 0) Summary($"{name}: {skipped} unchanged — no valid replacement, unreadable placement, or saved assignment conflict; enable detailed logs for reasons.");
++            Summary($"{name}: complete — {planned.Count} mission trucks randomized, {kept} kept, {skipped} unchanged."
++                + (fallbacks > 0 ? $" Nearest compatible tire category used for {fallbacks} placement(s)." : ""));
++        }
++    }
++}

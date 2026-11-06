@@ -1,0 +1,191 @@
+--- AppColors.cs
++++ AppColors.cs
+@@ -43,6 +43,11 @@
+         ["TierC"] = new("TierC", "C — Yellow", "Tier C background and header", Color.FromArgb(255, 220, 65)),
+         ["TierD"] = new("TierD", "D — Orange", "Tier D background and header", Color.FromArgb(220, 125, 40)),
+         ["TierFX"] = new("TierFX", "FX — Red", "Tier FX background and header", Color.FromArgb(225, 65, 65)),
++        ["TruckClassHeavy"] = new("TruckClassHeavy", "Heavy", "Truck tile title and class background", Color.FromArgb(38, 38, 38)),
++        ["TruckClassHeavyDuty"] = new("TruckClassHeavyDuty", "Heavy-duty", "Truck tile title and class background", Color.FromArgb(78, 82, 86)),
++        ["TruckClassOffroad"] = new("TruckClassOffroad", "Offroad", "Truck tile title and class background", Color.FromArgb(66, 105, 74)),
++        ["TruckClassScout"] = new("TruckClassScout", "Scout", "Truck tile title and class background", Color.FromArgb(61, 88, 125)),
++        ["TruckClassHighway"] = new("TruckClassHighway", "Highway", "Truck tile title and class background", Color.FromArgb(132, 115, 48)),
+         ["Surface"] = new("Surface", "Surface", "Table and graph backgrounds", Color.White),
+         ["AlternateRow"] = new("AlternateRow", "Alternate row", "Alternating table rows", Color.FromArgb(248, 248, 248)),
+         ["SelectionBlue"] = new("SelectionBlue", "Selected cell", "Selected compatibility cells", Color.FromArgb(205, 226, 247)),
+--- SettingsTab.cs
++++ SettingsTab.cs
+@@ -28,6 +28,7 @@
+         foreach (Control control in _colors.Controls.Cast<Control>().ToArray()) control.Dispose();
+         var generalRows = CreateColorPane("General colors");
+         var tierRows = CreateColorPane("Tier colors");
++        var classRows = CreateColorPane("Truck class colors");
+         foreach (var entry in AppColors.GetEntries())
+         {
+             var row = new TableLayoutPanel
+@@ -56,7 +57,8 @@
+             row.Controls.Add(name, 1, 0);
+             row.Controls.Add(new Label { Text = entry.Usage, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(3, 0, 0, 0) }, 2, 0);
+             row.Controls.Add(code, 3, 0);
+-            (entry.Key.StartsWith("Tier", StringComparison.Ordinal) ? tierRows : generalRows).Controls.Add(row);
++            (entry.Key.StartsWith("TruckClass", StringComparison.Ordinal) ? classRows :
++                entry.Key.StartsWith("Tier", StringComparison.Ordinal) ? tierRows : generalRows).Controls.Add(row);
+         }
+         _colors.ResumeLayout();
+     }
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -14,6 +14,7 @@
+     private readonly bool _tierList;
+     private readonly List<GroupView> _groupViews = [];
+     private string? _lastTruckSignature;
++    private readonly HashSet<string> _availableTruckCodes = new(StringComparer.OrdinalIgnoreCase);
+     private TileFlowPanel? _unsortedTiles;
+     private ColumnStyle? _unsortedColumnStyle;
+ private FlowLayoutPanel? _groupList;
+@@ -177,7 +178,7 @@
+         _groupList!.Controls.SetChildIndex(view.Panel, targetIndex);
+         _groupList.PerformLayout();
+         UpdateGroupMoveButtons();
+-        _status.Text = $"Group order changed. Save {(_tierList ? "tiers" : "groups")} to keep changes.";
++        SaveGroups();
+     }
+ 
+     private void UpdateGroupMoveButtons()
+@@ -201,6 +202,8 @@
+             return;
+         _lastTruckSignature = signature;
+         var truckByCode = trucks.ToDictionary(truck => truck.Code, StringComparer.OrdinalIgnoreCase);
++        _availableTruckCodes.Clear();
++        _availableTruckCodes.UnionWith(truckByCode.Keys);
+         var groupedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+         foreach (var view in _groupViews)
+         {
+@@ -211,10 +214,11 @@
+             }
+ 
+             view.State.TruckCodes = view.State.TruckCodes
+-                .Where(code => truckByCode.ContainsKey(code) && groupedCodes.Add(code))
++                .Where(code => groupedCodes.Add(code))
+                 .ToList();
+             foreach (var code in view.State.TruckCodes)
+-                AddTileTo(view.Tiles, truckByCode[code]);
++                if (truckByCode.TryGetValue(code, out var truck))
++                    AddTileTo(view.Tiles, truck);
+         }
+ 
+         foreach (Control tile in _unsortedTiles.Controls.Cast<Control>().ToArray())
+@@ -229,7 +233,7 @@
+             AddTileTo(_unsortedTiles, truck);
+         }
+         UpdateUnsortedPaneWidth();
+-        _status.Text = $"Loaded {trucks.Count} available trucks. Save {(_tierList ? "tiers" : "groups")} to keep changes.";
++        _status.Text = $"Loaded {trucks.Count} available trucks. Changes save automatically.";
+     }
+ 
+     private void AddTileTo(TileFlowPanel panel, CustomTruck truck)
+@@ -258,7 +262,7 @@
+         AddGroupPane(state, _groupList!);
+         _lastTruckSignature = null;
+         RefreshOwnedTrucks();
+-        _status.Text = $"Group added. Save {(_tierList ? "tiers" : "groups")} to keep changes.";
++        SaveGroups();
+     }
+ 
+     private void EditGroup(GroupState state, GroupBox panel, Label description)
+@@ -279,7 +283,7 @@
+         state.Description = dialog.Description.Trim();
+         panel.Text = state.Name;
+         description.Text = state.Description;
+-        _status.Text = $"Group updated. Save {(_tierList ? "tiers" : "groups")} to keep changes.";
++        SaveGroups();
+     }
+ 
+     private void RemoveGroup(GroupState state)
+@@ -304,21 +308,25 @@
+         view.Panel.Dispose();
+         _lastTruckSignature = null;
+         RefreshOwnedTrucks();
+-        _status.Text = "Group removed. Its trucks are in Unsorted; save groups to keep changes.";
++        SaveGroups();
+     }
+ 
+     private void SyncGroupAssignments()
+     {
+         foreach (var view in _groupViews)
+         {
++            // Keep assignments for trucks hidden by ownership/workspace filtering.
++            var unavailable = view.State.TruckCodes.Where(code => !_availableTruckCodes.Contains(code)).ToArray();
+             view.State.TruckCodes = view.Tiles.Controls.Cast<Control>()
+                 .Select(tile => tile.Tag as string)
+                 .Where(code => !string.IsNullOrWhiteSpace(code))
+                 .Cast<string>()
++                .Concat(unavailable)
++                .Distinct(StringComparer.OrdinalIgnoreCase)
+                 .ToList();
+         }
+ 
+-        _status.Text = $"Assignments changed. Save {(_tierList ? "tiers" : "groups")} to keep changes.";
++        SaveGroups();
+     }
+ 
+     private void SaveGroups()
+@@ -332,7 +340,8 @@
+         }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+         {
+-            MessageBox.Show(this, $"Could not save custom groups: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
++            _status.Text = $"Save failed: {ex.Message}";
++            MessageBox.Show(this, $"Could not save {(_tierList ? "tiers" : "custom groups")}: {ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+         }
+     }
+ 
+@@ -597,6 +606,25 @@
+         tile.Controls.Add(classOverlay);
+         name.BringToFront();
+         classOverlay.BringToFront();
++        void ApplyClassColor()
++        {
++            var key = truck.Class.Replace("-", "").Replace(" ", "").Replace("_", "").ToLowerInvariant() switch
++            {
++                "heavy" => "TruckClassHeavy",
++                "heavyduty" => "TruckClassHeavyDuty",
++                "offroad" => "TruckClassOffroad",
++                "scout" => "TruckClassScout",
++                "highway" => "TruckClassHighway",
++                _ => null
++            };
++            var background = key is null ? Color.FromArgb(32, 38, 45) : AppColors.Get(key);
++            name.BackColor = classOverlay.BackColor = background;
++            name.ForeColor = classOverlay.ForeColor = background.GetBrightness() < 0.55f ? Color.White : Color.Black;
++        }
++        ApplyClassColor();
++        EventHandler colorsChanged = (_, _) => ApplyClassColor();
++        AppColors.Changed += colorsChanged;
++        tile.Disposed += (_, _) => AppColors.Changed -= colorsChanged;
+         return tile;
+     }
+ 
+--- CustomGroupStore.cs
++++ CustomGroupStore.cs
+@@ -51,6 +51,8 @@
+     public static void Save(IReadOnlyList<GroupState> groups)
+     {
+         Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
+-        File.WriteAllText(StateFile, JsonSerializer.Serialize(groups, new JsonSerializerOptions { WriteIndented = true }));
++        var temporaryFile = StateFile + ".tmp";
++        File.WriteAllText(temporaryFile, JsonSerializer.Serialize(groups, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporaryFile, StateFile, overwrite: true);
+     }
+ }
+--- TierListStore.cs
++++ TierListStore.cs
+@@ -30,6 +30,8 @@
+     public static void Save(IReadOnlyList<GroupState> tiers)
+     {
+         Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
+-        File.WriteAllText(StateFile, JsonSerializer.Serialize(tiers, new JsonSerializerOptions { WriteIndented = true }));
++        var temporaryFile = StateFile + ".tmp";
++        File.WriteAllText(temporaryFile, JsonSerializer.Serialize(tiers, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporaryFile, StateFile, overwrite: true);
+     }
+ }

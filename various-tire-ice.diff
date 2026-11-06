@@ -1,0 +1,539 @@
+--- a/src/SnowPakTool.Desktop/Application/MainForm.cs
++++ b/src/SnowPakTool.Desktop/Application/MainForm.cs
+@@ -9,6 +9,7 @@
+     private readonly TextBox _pakPath = new() { Dock = DockStyle.Fill };
+     private readonly TextBox _workspacePath = new() { Dock = DockStyle.Fill };
+     private readonly ExperienceEditorTab _experienceTab;
++    private readonly VariousEditorTab _variousTab;
+     private readonly OwnedContentTab _ownedContentTab;
+     private readonly CustomGroupWipTab _customGroupWipTab;
+     private readonly CustomGroupWipTab _tierListTab;
+@@ -55,6 +56,7 @@
+             try { _workspacePath.Text = WorkspaceLayout.Migrate(_workspacePath.Text).Root; }
+             catch (Exception ex) { AppendLog("Workspace layout could not be upgraded: " + ex.Message); }
+         }
++        _variousTab = new VariousEditorTab(() => _workspacePath.Text.Trim());
+         _experienceTab = new ExperienceEditorTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+         _ownedContentTab = new OwnedContentTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+         _customGroupWipTab = new CustomGroupWipTab(_ownedContentTab.GetAvailableCustomGroupingTrucks);
+@@ -166,6 +168,7 @@
+             ApplyMapChangesAsync, () => _regionsTrucksTab.RefreshChangesAsync());
+         _startChanges.ChangesApplied += async () =>
+         {
++            _variousTab.WorkspaceUpdated();
+             if (!_sharedPresetApplied) return;
+             try { await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim(), forceReload: true); }
+             catch (Exception ex) { AppendLog("Preset applied; workspace refresh reported: " + ex.Message); }
+@@ -206,6 +209,8 @@
+         foreach (var name in new[] { "Engines", "Winches", "Addons", "Frame addons" })
+             editorTabs.TabPages.Add(truckEditorPages.Single(page => page.Name == name));
+         editorTabs.TabPages.Add(experiencePage);
++        var variousPage = Page("Various", "Various", _variousTab);
++        editorTabs.TabPages.Add(variousPage);
+         var editorsPage = Page("Editors", "Editors", editorTabs);
+         var regionsTrucksPage = Page("Map trucks", "MapTrucks", _regionsTrucksTab);
+         var trucksCargoPage = Page("Cargo", "Cargo", _trucksCargoTab);
+@@ -237,6 +242,7 @@
+         }
+         _startChanges.PendingCountChanged += ShowPendingCount;
+         _experienceTab.StagingChanged += RefreshPendingCount;
++        _variousTab.StagingChanged += RefreshPendingCount;
+         _trucksCargoTab.StagingChanged += RefreshPendingCount;
+         void LoadTierRegions(string workspace)
+         {
+@@ -283,6 +289,7 @@
+                     else _regionProgressionTab.RefreshRegions();
+                 }
+                 else if (selectedPage == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
++                else if (selectedPage == variousPage) _variousTab.EnsureLoaded();
+                 else if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+                 else if (selectedPage == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
+                 else if (selectedMain == editorsPage)
+@@ -419,6 +426,7 @@
+             AppendLog($"Workspace merge: {mergeStats.Added} added, {mergeStats.Replaced} replaced, {mergeStats.Unchanged} unchanged.");
+             await WorkspaceDataCache.PreloadAsync(workspace, forceReload: true);
+             _experienceTab.WorkspaceUpdated();
++            _variousTab.WorkspaceUpdated();
+             _ownedContentTab.WorkspaceUpdated();
+             _truckEditTab.WorkspaceUpdated();
+             if (_startChanges is not null) await _startChanges.RefreshAsync();
+@@ -444,6 +452,8 @@
+                 _truckEditTab.ExportPreview(temporary);
+                 _truckPropertiesTab.ExportPreview(temporary);
+                 _trucksCargoTab.ExportPreview(temporary);
++                _variousTab.ExportPreview(temporary);
++                TireIceStore.Apply(temporary);
+                 TruckPropertiesStore.Apply(temporary);
+                 FrameAddonFuelStore.Apply(temporary);
+                 CargoMassStore.Apply(temporary);
+@@ -468,7 +478,7 @@
+             var preset = SharedPreset.Read(dialog.FileName);
+             var editorChanges = _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
+                 .Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
+-                .Concat(CargoMassStore.Pending(workspace)).Concat(_trucksCargoTab.PresetPreviewChanges())
++                .Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(_variousTab.PresetPreviewChanges()).Concat(_trucksCargoTab.PresetPreviewChanges())
+                 .Concat(AddonExplorationStore.Pending(workspace)).Concat(UpgradeChanges.Pending(workspace))
+                 .Concat(_truckPropertiesTab.PresetPreviewChanges()).Concat(_truckEditTab.PresetPreviewChanges())
+                 .Concat(_experienceTab.PresetPreviewChanges()).ToArray();
+@@ -528,7 +538,7 @@
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(CargoMassStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -546,6 +556,7 @@
+         if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
+         if (FrameAddonFuelStore.Pending(workspace).Any()) _truckEditTab.ApplyFrameAddonFuelChanges(workspace);
+         if (CargoMassStore.Pending(workspace).Any()) { CargoMassStore.Apply(workspace); _trucksCargoTab.InvalidateCatalog(); }
++        if (TireIceStore.Pending(workspace).Any()) { TireIceStore.Apply(workspace); _variousTab.WorkspaceUpdated(); }
+         if (AddonExplorationStore.Pending(workspace).Any()) _truckEditTab.ApplyAddonExplorationChanges(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+--- a/src/SnowPakTool.Desktop/Presets/SharedPreset.cs
++++ b/src/SnowPakTool.Desktop/Presets/SharedPreset.cs
+@@ -169,7 +169,7 @@
+     private static string InputStamp(string workspace, string preferences)
+     {
+         var files = Files(WorkspaceOriginals.GetUpdatedRoot(workspace))
+-            .Concat(new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "winches", "upgrade-randomization", "region-maps" }
++            .Concat(new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "various", "winches", "upgrade-randomization", "region-maps" }
+                 .SelectMany(p => Files(WorkspaceOriginals.GetMetadataPath(workspace, p))))
+             .Concat(PlanningFiles.Select(p => Path.Combine(preferences, p)))
+             .Append(WorkspaceOriginals.GetMetadataPath(workspace, "progression-settings.json"))
+@@ -195,7 +195,7 @@
+         {
+             CopyTree(WorkspaceOriginals.GetOriginalRoot(workspace), Path.Combine(temporary, "initial.pak", "original_files"));
+             CopyTree(WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(temporary, "initial.pak", "updated"));
+-            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "winches", "upgrade-randomization" })
++            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "various", "winches", "upgrade-randomization" })
+                 CopyTree(WorkspaceOriginals.GetMetadataPath(workspace, relative), Path.Combine(temporary, relative));
+             var pending = PendingTruckReplacements.Load(workspace);
+             var savedMaps = TruckReplacementStore.SavedMaps(workspace).ToArray();
+@@ -395,7 +395,7 @@
+                 var safe = SafePath(root, Relative(root, file));
+                 if (targets.Add(safe)) Prepare(safe, null);
+             }
+-            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json", "cargo-mass/pending-changes.json",
++            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json", "cargo-mass/pending-changes.json", "various/pending-changes.json",
+                 "winches/pending-changes.json", "upgrade-randomization/staged.json", "upgrade-randomization/draft.json",
+                 "upgrade-randomization/addon-exploration.json" })
+             {
+--- a/README.md
++++ b/README.md
+@@ -129,3 +129,5 @@
+ Truck properties, Addons and Frame addons each have a Show changed only toggle button. It includes preview/staged differences from current files and applied values differing from preserved originals. In Frame addons this includes fuel and tracked price/rank/exploration changes. It combines with header filters and stays enabled across reloads and addon-view switches; turning it off retains other filters. The toggle changes visibility only: Stage and global reset actions still include hidden rows.
+ 
+ Frame addon fuel multiplication skips explicit zero capacities, rounds nonzero results to 5 L, and uses 0-10,000 L bounds. Restoring fuel keeps the exact original integer capacity without rounding it. Truck fuel bounds are unchanged. Truck properties reset also preserves original attribute absence: an introduced UnlockByExploration=false is staged as an attribute removal, so Start no longer retains Not present -> false after reset/apply. XML difference auditing compares parsed properties and ignores whitespace, line-ending and encoding-only differences; real added/removed/changed attributes remain listed.
++
++Editors > Various has an Ignore ice on all tires toggle. On previews IsIgnoreIce="true" on every TruckWheels/TruckTires/TruckTire/WheelFriction, adding local overrides for inherited tires, and on friction templates (including local tire templates) across base and DLC wheel files. Off previews restoration of preserved original ice settings, retaining chained tires. Stage changes persists the snapshot; Start > Apply pending changes writes only the updated overlay. Revert unstaged/staged controls follow the other editors. Shared presets include this preview and staging. Pack a new PAK and install manually.
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/Editors/Various/TireIceStore.cs
+@@ -0,0 +1,185 @@
++using System.Text.Json;
++using System.Text.RegularExpressions;
++using System.Xml;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record TireIceTarget(string Path, string Identity, bool Exists, string? Value, int Offset, int Length);
++internal sealed record TireIceEdit(string RelativeFile, string Path, string Identity, bool BeforeExists, string? Before,
++    bool AfterExists, string? After);
++
++internal static class TireIceStore
++{
++    private static readonly Regex Attribute = new("\\s+IsIgnoreIce\\s*=\\s*(?<q>[\"'])(?<value>[^\"']*)\\k<q>");
++    private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "various", "pending-changes.json");
++    private sealed record Node(string Name, string Path, string Identity, int Offset, int Length, bool Empty);
++
++    // Read XML fragments (the game's templates and definitions are sibling roots), retaining exact tag offsets.
++    internal static List<TireIceTarget> Targets(string text)
++    {
++        var lines = new List<int> { 0 };
++        for (var i = 0; i < text.Length; i++) if (text[i] == '\n') lines.Add(i + 1);
++        var stack = new List<Node>();
++        var counts = new List<Dictionary<string, int>> { new(StringComparer.Ordinal) };
++        var targets = new List<TireIceTarget>();
++        var tires = new List<Node>();
++        using var reader = XmlReader.Create(new StringReader(text), new XmlReaderSettings
++        { ConformanceLevel = ConformanceLevel.Fragment, DtdProcessing = DtdProcessing.Prohibit });
++        while (reader.Read())
++        {
++            if (reader.NodeType != XmlNodeType.Element) continue;
++            while (stack.Count > reader.Depth) stack.RemoveAt(stack.Count - 1);
++            while (counts.Count > reader.Depth + 1) counts.RemoveAt(counts.Count - 1);
++            var siblings = counts[reader.Depth];
++            siblings.TryGetValue(reader.Name, out var index); siblings[reader.Name] = ++index;
++            var path = string.Join("/", stack.Select(n => n.Path.Split('/')[^1]).Append(reader.Name + "[" + index + "]"));
++            var identity = string.Join("/", stack.Select(n => n.Identity.Split('\n')[^1])) + "\n" + reader.Name + "|"
++                + reader.GetAttribute("Name") + "|" + reader.GetAttribute("Mesh") + "|" + reader.GetAttribute("_template");
++            var info = (IXmlLineInfo)reader;
++            var offset = lines[info.LineNumber - 1] + info.LinePosition - 2;
++            var end = offset; var quote = '\0';
++            for (; end < text.Length; end++)
++            {
++                var c = text[end];
++                if (quote != '\0') { if (c == quote) quote = '\0'; }
++                else if (c is '\'' or '"') quote = c;
++                else if (c == '>') break;
++            }
++            if (offset < 0 || end == text.Length || text[offset] != '<') throw new InvalidDataException("Could not locate tire XML tag.");
++            var node = new Node(reader.Name, path, identity, offset, end - offset + 1, reader.IsEmptyElement);
++            var tire = reader.Name == "TruckTire" && stack.Select(n => n.Name).SequenceEqual(new[] { "TruckWheels", "TruckTires" });
++            if (tire) tires.Add(node);
++            var direct = reader.Name == "WheelFriction" && stack.Select(n => n.Name).SequenceEqual(new[] { "TruckWheels", "TruckTires", "TruckTire" });
++            var template = stack.Count == 2 && stack[0].Name == "_templates" && stack[1].Name == "WheelFriction";
++            var tireTemplate = reader.Name == "WheelFriction" && stack.Count == 3
++                && stack[0].Name == "_templates" && stack[1].Name == "TruckTire";
++            if (direct || template || tireTemplate)
++                targets.Add(new(path, direct ? stack[^1].Identity : identity, true, reader.GetAttribute("IsIgnoreIce"), offset, node.Length));
++            if (!reader.IsEmptyElement) { stack.Add(node); counts.Add(new(StringComparer.Ordinal)); }
++        }
++        foreach (var tire in tires)
++        {
++            var path = tire.Path + "/WheelFriction[1]";
++            if (targets.Any(t => t.Path == path)) continue;
++            // Missing local friction inherits from templates. Add an explicit override on each tire.
++            targets.Add(new(path, tire.Identity, false, null, tire.Offset, tire.Length));
++        }
++        if (targets.Select(t => t.Path).Distinct().Count() != targets.Count) throw new InvalidDataException("Duplicate tire friction target.");
++        return targets;
++    }
++
++    internal static IEnumerable<string> Files(string workspace) => WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
++        .Where(file => { var p = WorkspaceOriginals.GetRelativePath(workspace, file).Replace('\\', '/');
++            return p.Contains("/classes/wheels/", StringComparison.OrdinalIgnoreCase) || p.Contains("/_templates/", StringComparison.OrdinalIgnoreCase); });
++
++    internal static List<TireIceEdit> Preview(string workspace, bool enabled)
++    {
++        var edits = new List<TireIceEdit>();
++        foreach (var file in Files(workspace))
++        {
++            var relative = WorkspaceOriginals.GetRelativePath(workspace, file);
++            var current = Targets(File.ReadAllText(file));
++            var originalPath = WorkspaceOriginals.GetOriginalReadPath(workspace, relative);
++            var original = File.Exists(originalPath) ? Targets(File.ReadAllText(originalPath)).ToDictionary(t => t.Path) : [];
++            foreach (var target in current)
++            {
++                if (!enabled && (!original.TryGetValue(target.Path, out var baseline) || baseline.Identity != target.Identity))
++                    throw new InvalidDataException($"Cannot restore original tire friction: {relative} / {target.Path}");
++                var afterExists = enabled || original[target.Path].Exists;
++                var after = enabled ? "true" : original[target.Path].Value;
++                if (target.Exists != afterExists || target.Value != after)
++                    edits.Add(new(relative, target.Path, target.Identity, target.Exists, target.Value, afterExists, after));
++            }
++        }
++        return edits;
++    }
++
++    private static void Validate(IEnumerable<TireIceEdit> edits)
++    {
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var edit in edits)
++        {
++            var path = edit.RelativeFile.Replace('\\', '/');
++            if (!path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
++                || path.Split('/').Any(p => p is "" or "." or "..") || path.Contains(':')
++                || !(path.Contains("/classes/wheels/", StringComparison.OrdinalIgnoreCase) || path.Contains("/_templates/", StringComparison.OrdinalIgnoreCase))
++                || string.IsNullOrEmpty(edit.Path) || string.IsNullOrEmpty(edit.Identity)
++                || !seen.Add(path + "|" + edit.Path) || !edit.BeforeExists && edit.Before is not null || !edit.AfterExists && edit.After is not null
++                || edit.After is not null && edit.After is not ("true" or "false"))
++                throw new InvalidDataException("Invalid or duplicate tire ice edit.");
++        }
++    }
++    internal static List<TireIceEdit> Load(string workspace)
++    {
++        var path = PendingPath(workspace);
++        var edits = File.Exists(path) ? JsonSerializer.Deserialize<List<TireIceEdit>>(File.ReadAllText(path))
++            ?? throw new InvalidDataException("Missing tire ice edits.") : [];
++        Validate(edits); return edits;
++    }
++    internal static void Save(string workspace, List<TireIceEdit> edits)
++    {
++        Validate(edits);
++        TruckPropertiesStore.WriteAtomic(PendingPath(workspace), JsonSerializer.Serialize(edits, new JsonSerializerOptions { WriteIndented = true }));
++    }
++    internal static IEnumerable<WorkspaceChange> Changes(string workspace, IEnumerable<TireIceEdit> edits) => edits.Select(e => new WorkspaceChange(
++        WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, e.RelativeFile), e.Path + "/@IsIgnoreIce", e.Before ?? "Not present", e.After ?? "Not present"));
++    internal static IEnumerable<WorkspaceChange> Pending(string workspace) => Changes(workspace, Load(workspace));
++
++    internal static string Patch(string text, IReadOnlyList<TireIceEdit> edits)
++    {
++        Validate(edits);
++        var targets = Targets(text).ToDictionary(t => t.Path);
++        var patches = new List<(int Offset, int Length, string Text)>();
++        foreach (var edit in edits)
++        {
++            if (!targets.TryGetValue(edit.Path, out var target) || target.Identity != edit.Identity)
++                throw new InvalidDataException("Tire definition changed since staging: " + edit.Path);
++            if (target.Exists == edit.AfterExists && target.Value == edit.After) continue;
++            if (target.Exists != edit.BeforeExists || target.Value != edit.Before)
++                throw new InvalidDataException("Tire ice setting changed since staging: " + edit.Path);
++            var tag = text.Substring(target.Offset, target.Length);
++            if (!target.Exists)
++            {
++                if (!edit.AfterExists) continue;
++                var child = "<WheelFriction IsIgnoreIce=\"" + edit.After + "\" />";
++                if (tag.EndsWith("/>", StringComparison.Ordinal))
++                    patches.Add((target.Offset, target.Length, tag[..^2] + ">" + child + "</TruckTire>"));
++                else patches.Add((target.Offset + target.Length, 0, child));
++                continue;
++            }
++            var attribute = Attribute.Match(tag);
++            if (!edit.AfterExists)
++            {
++                var remainder = Attribute.Replace(tag, "");
++                // Only remove the introduced empty override. Preserve any later, unrelated friction edits.
++                if (!Regex.IsMatch(remainder, @"^<WheelFriction\s*/>$"))
++                    throw new InvalidDataException("The added tire friction override has other properties. Reload before restoring: " + edit.Path);
++                patches.Add((target.Offset, target.Length, ""));
++            }
++            else if (attribute.Success)
++            {
++                var match = edit.After is null ? (Group)attribute : attribute.Groups["value"];
++                patches.Add((target.Offset + match.Index, match.Length, edit.After ?? ""));
++            }
++            else if (edit.After is not null)
++                patches.Add((target.Offset + tag.Length - (tag.EndsWith("/>", StringComparison.Ordinal) ? 2 : 1), 0, " IsIgnoreIce=\"" + edit.After + "\""));
++        }
++        foreach (var patch in patches.OrderByDescending(p => p.Offset)) text = text.Remove(patch.Offset, patch.Length).Insert(patch.Offset, patch.Text);
++        _ = Targets(text);
++        return text;
++    }
++    internal static void Apply(string workspace)
++    {
++        var outputs = Load(workspace).GroupBy(e => e.RelativeFile, StringComparer.OrdinalIgnoreCase).Select(group =>
++        {
++            var source = WorkspaceOriginals.GetCurrentPath(workspace, group.Key);
++            return (Source: source, Text: Patch(File.ReadAllText(source), group.ToArray()));
++        }).ToArray();
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(workspace, output.Source);
++            TruckPropertiesStore.WriteAtomic(path, output.Text); WorkspaceDataCache.InvalidateFile(path);
++        }
++        Save(workspace, []);
++    }
++}
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/Editors/Various/VariousEditorTab.cs
+@@ -0,0 +1,97 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed class VariousEditorTab : UserControl
++{
++    private readonly Func<string> _workspace;
++    private readonly CheckBox _ignoreIce = new() { Text = "Ignore ice on all tires", Appearance = Appearance.Button, AutoSize = true };
++    private readonly Button _stage = new() { Text = "Stage changes", AutoSize = true };
++    private readonly Button _reload = new() { Text = "Reload", AutoSize = true };
++    private readonly Button _revert = new() { Text = "Revert unstaged edits", AutoSize = true };
++    private readonly Button _clear = new() { Text = "Revert staged changes", AutoSize = true };
++    private readonly Label _status = new() { AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
++    private List<TireIceEdit> _preview = [];
++    private string? _loadedWorkspace;
++    private bool _loading;
++    internal event Action? StagingChanged;
++
++    public VariousEditorTab(Func<string> workspace)
++    {
++        _workspace = workspace;
++        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false,
++            AutoScroll = true, Padding = new Padding(12) };
++        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
++        actions.Controls.AddRange([_reload, _stage, _revert, _clear]);
++        layout.Controls.Add(actions);
++        layout.Controls.Add(_ignoreIce);
++        layout.Controls.Add(new Label { AutoSize = true, Text = "On: all tires ignore ice, including inherited tires and friction templates.\nOff: restore original ice settings, keeping original chained-tire behavior.\nStage changes, then use Start → Apply pending changes." });
++        layout.Controls.Add(_status);
++        Controls.Add(layout);
++        _ignoreIce.CheckedChanged += (_, _) =>
++        {
++            if (_loading) return;
++            Run(() => { _preview = TireIceStore.Preview(LoadedWorkspace(), _ignoreIce.Checked); UpdateStatus(); }, reloadOnError: true);
++        };
++        _stage.Click += (_, _) => Run(() => { TireIceStore.Save(LoadedWorkspace(), _preview); StagingChanged?.Invoke(); UpdateStatus(); });
++        _reload.Click += (_, _) => Run(Reload);
++        _revert.Click += (_, _) => Run(Reload);
++        _clear.Click += (_, _) => Run(() => { TireIceStore.Save(LoadedWorkspace(), []); Reload(); StagingChanged?.Invoke(); });
++        _ignoreIce.Enabled = _stage.Enabled = _revert.Enabled = _clear.Enabled = false;
++        _status.Text = "Choose a workspace and unpack a PAK to load tire settings.";
++    }
++
++    internal void EnsureLoaded()
++    {
++        if (_loadedWorkspace != _workspace()) Run(Reload);
++    }
++    internal void WorkspaceUpdated() { _loadedWorkspace = null; }
++    private string LoadedWorkspace()
++    {
++        var workspace = _workspace();
++        if (_loadedWorkspace != workspace || !Directory.Exists(workspace))
++            throw new InvalidOperationException("Reload tire settings for the selected workspace before editing.");
++        return workspace;
++    }
++    private void Reload()
++    {
++        var workspace = _workspace();
++        var targets = TireIceStore.Files(workspace).SelectMany(file => TireIceStore.Targets(File.ReadAllText(file))
++            .Select(t => (File: WorkspaceOriginals.GetRelativePath(workspace, file), Target: t))).ToArray();
++        _preview = TireIceStore.Load(workspace);
++        var staged = _preview.ToDictionary(e => e.RelativeFile.Replace('\\', '/') + "|" + e.Path, StringComparer.OrdinalIgnoreCase);
++        _loading = true;
++        try
++        {
++            _ignoreIce.Checked = targets.Length > 0 && targets.All(t => staged.TryGetValue(t.File.Replace('\\', '/') + "|" + t.Target.Path, out var e)
++                ? e.AfterExists && e.After == "true" : t.Target.Exists && t.Target.Value == "true");
++        }
++        finally { _loading = false; }
++        _loadedWorkspace = workspace;
++        _ignoreIce.Enabled = targets.Length > 0;
++        UpdateStatus();
++        if (targets.Length == 0) _status.Text = "No tire friction definitions found. Unpack an initial PAK first.";
++    }
++    private void UpdateStatus()
++    {
++        var staged = TireIceStore.Load(_workspace());
++        _stage.Enabled = _ignoreIce.Enabled;
++        _revert.Enabled = !_preview.SequenceEqual(staged);
++        _clear.Enabled = staged.Count > 0;
++        _status.Text = $"Preview: {_preview.Count:N0} attribute changes in {_preview.Select(e => e.RelativeFile).Distinct(StringComparer.OrdinalIgnoreCase).Count():N0} files. Staged: {staged.Count:N0}.";
++    }
++    private void Run(Action action, bool reloadOnError = false)
++    {
++        try { UseWaitCursor = true; action(); }
++        catch (Exception ex)
++        {
++            if (reloadOnError) { try { Reload(); } catch { _ignoreIce.Enabled = false; } }
++            _status.Text = ex.Message;
++        }
++        finally { UseWaitCursor = false; }
++    }
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => _loadedWorkspace == _workspace()
++        ? TireIceStore.Changes(_workspace(), _preview) : [];
++    internal void ExportPreview(string temporary)
++    {
++        if (_loadedWorkspace == _workspace()) TireIceStore.Save(temporary, _preview);
++    }
++}
+--- /dev/null
++++ b/.checks/VariousRegression/VariousRegression.csproj
+@@ -0,0 +1,8 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++  <ItemGroup>
++    <Compile Include="../../src/SnowPakTool.Desktop/Editors/Various/*.cs" Link="%(Filename)%(Extension)" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
++  </ItemGroup>
++</Project>
+--- /dev/null
++++ b/.checks/VariousRegression/Program.cs
+@@ -0,0 +1,106 @@
++using SnowPakTool.Desktop;
++using System.Security.Cryptography;
++using System.Reflection;
++
++internal static class Program
++{
++    private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
++    [STAThread]
++    private static void Main(string[] args)
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "case-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(Path.Combine(root, "initial.pak", "original_files"));
++        const string relative = "[media]/classes/wheels/test.xml";
++        const string sample = "<!-- keep -->\r\n<_templates><WheelFriction><Default BodyFriction='2'/><Chains IsIgnoreIce='true'/></WheelFriction><TruckTire><Mud><WheelFriction _template='Default'/></Mud></TruckTire></_templates>\r\n<TruckWheels><TruckTires><TruckTire Name='one'><WheelFriction BodyFriction='3' IsIgnoreIce='false'/><GameData Price='10'/></TruckTire><TruckTire Name='inherited' _template='Mud'/></TruckTires><TruckRims><TruckRim Name='untouched'/></TruckRims></TruckWheels>";
++        var original = WorkspaceOriginals.GetOriginalPath(root, relative);
++        Directory.CreateDirectory(Path.GetDirectoryName(original)!); File.WriteAllText(original, sample);
++        var edits = TireIceStore.Preview(root, true);
++        Check(edits.Count == 4, "Includes global/local templates, explicit and inherited tires; chains unchanged");
++        TireIceStore.Save(root, edits);
++        Check(TireIceStore.Load(root).SequenceEqual(edits), "Staging persists");
++        Check(File.ReadAllText(original) == sample && !File.Exists(WorkspaceOriginals.GetUpdatedPath(root, relative)), "Preview/stage preserves files");
++        var changed = TireIceStore.Patch(sample, edits);
++        Check(TireIceStore.Targets(changed).All(t => t.Exists && t.Value == "true"), "All targets enabled");
++        Check(changed.Contains("BodyFriction='3'") && changed.Contains("<GameData Price='10'/>") && changed.StartsWith("<!-- keep -->\r\n"), "Unrelated text preserved");
++        Check(TireIceStore.Patch(changed, edits) == changed, "Idempotent apply");
++        try { TireIceStore.Patch(sample.Replace("Name='one'", "Name='different'"), edits); throw new Exception("Missed identity conflict"); }
++        catch (InvalidDataException) { }
++        try { TireIceStore.Patch(sample.Replace("IsIgnoreIce='false'", "IsIgnoreIce='changed'"), edits); throw new Exception("Missed value conflict"); }
++        catch (InvalidDataException) { }
++        TireIceStore.Apply(root);
++        Check(TireIceStore.Load(root).Count == 0, "Applied snapshot cleared");
++        Check(File.ReadAllText(original) == sample, "Original remains immutable");
++        var reset = TireIceStore.Preview(root, false);
++        var restored = TireIceStore.Patch(changed, reset);
++        Check(TireIceStore.Targets(restored).Select(t => (t.Path,t.Exists,t.Value)).SequenceEqual(TireIceStore.Targets(sample).Select(t => (t.Path,t.Exists,t.Value))), "Restores exact attribute presence and chain values");
++        TireIceStore.Save(root, reset); TireIceStore.Apply(root);
++        Check(TireIceStore.Preview(root, false).Count == 0, "Reset leaves no further changes");
++
++        var conflictRoot = Path.Combine(root, "conflict");
++        Directory.CreateDirectory(Path.Combine(conflictRoot, "initial.pak", "original_files"));
++        foreach (var name in new[] { "a.xml", "z.xml" })
++        {
++            var path = WorkspaceOriginals.GetOriginalPath(conflictRoot, "[media]/classes/wheels/" + name);
++            Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, sample);
++        }
++        TireIceStore.Save(conflictRoot, TireIceStore.Preview(conflictRoot, true));
++        File.WriteAllText(WorkspaceOriginals.GetOriginalPath(conflictRoot, "[media]/classes/wheels/z.xml"), sample.Replace("Name='one'", "Name='conflict'"));
++        try { TireIceStore.Apply(conflictRoot); throw new Exception("Missed second-file conflict"); }
++        catch (InvalidDataException) { }
++        Check(!Directory.Exists(WorkspaceOriginals.GetUpdatedRoot(conflictRoot)), "Validates all files before any output");
++        Check(TireIceStore.Load(conflictRoot).Count == 8, "Conflict retains staged snapshot");
++
++        using (var tab = new VariousEditorTab(() => root))
++        {
++            tab.EnsureLoaded();
++            var flags = BindingFlags.NonPublic | BindingFlags.Instance;
++            var toggle = (CheckBox)typeof(VariousEditorTab).GetField("_ignoreIce", flags)!.GetValue(tab)!;
++            var stage = (Button)typeof(VariousEditorTab).GetField("_stage", flags)!.GetValue(tab)!;
++            Check(toggle.Enabled && !toggle.Checked, "Toggle loads original mixed state");
++            toggle.Checked = true; stage.PerformClick();
++            Check(TireIceStore.Load(root).Count == 4, "Toggle and stage persist full snapshot");
++            toggle.Checked = false;
++            Check(TireIceStore.Load(root).Count == 4, "Later preview leaves staged snapshot unchanged");
++            using var restarted = new VariousEditorTab(() => root); restarted.EnsureLoaded();
++            Check(((CheckBox)typeof(VariousEditorTab).GetField("_ignoreIce", flags)!.GetValue(restarted)!).Checked, "Restart restores staged toggle");
++            restarted.Size = new Size(1000, 450); restarted.CreateControl();
++            using var bitmap = new Bitmap(restarted.Width, restarted.Height);
++            restarted.DrawToBitmap(bitmap, restarted.ClientRectangle);
++            bitmap.Save(Path.Combine(AppContext.BaseDirectory, "various-preview.png"));
++        }
++        Console.WriteLine("PASS: templates, inherited tires, presence restoration, conflict checks, staging, UI toggle and restart.");
++
++        if (args.Length == 0) return;
++        var source = args[0]; var real = Path.Combine(root, "real");
++        Directory.CreateDirectory(Path.Combine(real, "initial.pak", "original_files"));
++        var files = TireIceStore.Files(source).ToArray();
++        var hashes = files.ToDictionary(f => f, f => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f))));
++        foreach (var file in files)
++        {
++            var dest = WorkspaceOriginals.GetOriginalPath(real, WorkspaceOriginals.GetRelativePath(source, file));
++            Directory.CreateDirectory(Path.GetDirectoryName(dest)!); File.Copy(file, dest);
++        }
++        var realEdits = TireIceStore.Preview(real, true);
++        TireIceStore.Save(real, realEdits); TireIceStore.Apply(real);
++        var all = TireIceStore.Files(real).SelectMany(f => TireIceStore.Targets(File.ReadAllText(f))).ToArray();
++        Check(all.Length > 100 && all.All(t => t.Exists && t.Value == "true"), "Full real catalog coverage");
++        Check(TireIceStore.Preview(real, true).Count == 0, "Real enable idempotent");
++        var realReset = TireIceStore.Preview(real, false); TireIceStore.Save(real, realReset); TireIceStore.Apply(real);
++        Check(TireIceStore.Preview(real, false).Count == 0, "Full real catalog restoration");
++        foreach (var file in files) Check(hashes[file] == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))), "Source workspace untouched");
++        Console.WriteLine($"PASS: real catalog, {files.Length} files, {all.Length} friction targets, {realEdits.Count} edits; enable/reset in isolated copy only.");
++    }
++}
++
++namespace SnowPakTool.Desktop
++{
++    internal static class TruckPropertiesStore
++    {
++        internal static void WriteAtomic(string path, string text) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, text); }
++    }
++    internal static class WorkspaceDataCache
++    {
++        internal static bool TryGetCurrentFiles(string w, string r, string p, SearchOption s, out IEnumerable<string> files) { files = []; return false; }
++        internal static void InvalidateFile(string path) { }
++    }
++}

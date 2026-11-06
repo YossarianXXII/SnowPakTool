@@ -1,0 +1,411 @@
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+index 1251af4..2af8c03 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -7,6 +7,26 @@ internal sealed record TruckComparisonRow(string Property, string Current, strin
+ 
+ internal static class TruckReplacementComparison
+ {
++    private static readonly HashSet<string> HiddenProperties = new(StringComparer.OrdinalIgnoreCase)
++    {
++        "EngineMarkerOffset", "ShadowHideDistance", "HideDistance", "ExhaustStartTime", "EngineStartDelay",
++        "EngineIconScale", "EngineIconMesh", "SteerSpeed", "TruckImage"
++    };
++
++    private static bool HiddenCategory(string category)
++    {
++        var compact = category.Replace("_", "").Replace("-", "").Replace(" ", "").ToLowerInvariant();
++        return compact is "hoodornament" or "hoodornaments" or "miscellenious" or "miscellaneous";
++    }
++
++    private static bool HiddenProperty(string key)
++    {
++        var parts = key.Split('/', StringSplitOptions.TrimEntries);
++        if (parts[0].Equals("Wheels", StringComparison.OrdinalIgnoreCase))
++            return !key.Equals("Wheels / Compatible families and scale", StringComparison.OrdinalIgnoreCase);
++        return HiddenProperties.Contains(parts[^1])
++            || (parts.Length > 1 && parts[0] == "Addon socket options" && HiddenCategory(parts[1]));
++    }
+     public static IReadOnlyList<TruckComparisonRow> Build(RegionTruckEntry current, ReplacementTruck original, ReplacementTruck candidate)
+     {
+         var left = Values(new TruckEquipmentSummary(current.Tires, current.TireDetails, current.Addons, current.AddonDetails,
+@@ -19,9 +39,7 @@ internal static class TruckReplacementComparison
+ 
+     private static Dictionary<string, string> Values(TruckEquipmentSummary equipment, IReadOnlyDictionary<string, string> properties)
+     {
+-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+-        { ["Wheels / Installed category"] = equipment.Tires,
+-            ["Wheels / Installed tire, rim and scale"] = equipment.TireDetails };
++        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+         foreach (var item in equipment.InternalEquipment ?? [])
+         {
+             if (item.Slot == "Vehicle definition") continue;
+@@ -30,9 +48,10 @@ internal static class TruckReplacementComparison
+             values["Internal / " + item.Slot] = item.Name;
+         }
+         if (equipment.InstalledAddons is null) values["Installed addons"] = "Unknown — map equipment could not be read";
+-        else foreach (var group in equipment.InstalledAddons.Where(addon => !addon.IsVisual).GroupBy(addon => addon.Category.Length == 0 ? "Uncategorized" : addon.Category))
++        else foreach (var group in equipment.InstalledAddons.Where(addon => !addon.IsVisual && !HiddenCategory(addon.Category)).GroupBy(addon => addon.Category.Length == 0 ? "Uncategorized" : addon.Category))
+             values["Installed addons / " + group.Key.Replace('_', ' ')] = string.Join("\r\n", group.Select(addon => addon.Name).Order(StringComparer.CurrentCultureIgnoreCase));
+-        foreach (var (key, value) in properties) values[key] = value.Length == 0 ? "None specified" : value;
++        foreach (var (key, value) in properties)
++            if (!HiddenProperty(key)) values[key] = value.Length == 0 ? "None specified" : value;
+         return values;
+     }
+ }
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index 32837da..1bcab14 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -102,7 +102,7 @@ internal sealed class TruckEquipmentCatalog
+         Tires(wheelType).TryGetValue(tireId, out var tire);
+         var custom = tire is not null && _tireUsers.TryGetValue(tire.Identity, out var users) && users.Count == 1 && users.Contains(truck);
+         var inferredCategory = tire is null ? Category(tireId.Replace("allterain", "allterrain", StringComparison.OrdinalIgnoreCase)) : null;
+-        var category = custom ? "Custom" : tire?.Category ?? inferredCategory ?? "Unknown";
++        var category = custom ? $"Custom ({tire!.Category})" : tire?.Category ?? inferredCategory ?? "Unknown";
+         var tireDetails = $"{tire?.Name ?? tireId}\r\nWheel family: {wheelType}\r\nTire ID: {tireId}\r\nRim: {rim}"
+             + $"\r\nWheel scale: {(equipment.WheelScale is > 0 ? equipment.WheelScale.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " [map override]" : "vehicle default")}"
+             + $"\r\nWheel family: {(equipment.WheelType.Length > 0 ? "map override" : "vehicle default")}; tire: {(equipment.Tire.Length > 0 ? "map override" : "vehicle default")}."
+diff --git a/src/SnowPakTool.Desktop/TruckEditTab.cs b/src/SnowPakTool.Desktop/TruckEditTab.cs
+index 05b66b7..42775d8 100644
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -481,6 +481,7 @@ internal sealed class TruckEditTab : UserControl
+             var originalTypes = ReadWinchTypes(originalXml);
+             var truckData = TruckDataTag.Match(xml);
+             var truckClass = GetAttribute(truckData.Success ? truckData.Groups["attrs"].Value : string.Empty, "TruckType");
++            truckClass = TruckClasses.ForTruck(truck.Code, truckClass);
+             var rowValues = new object[] { truck.Name, string.IsNullOrWhiteSpace(truckClass) ? "—" : truckClass, "Open" }
+                 .Concat(_matrixWinchClasses.Select(winch => (object)(typeList.Contains(winch.Code)))).ToArray();
+             var rowData = new TruckRow(path, truck.Name, socket.Success, typeList, originalTypes, GetAttribute(socketAttributes, "Default"));
+diff --git a/src/SnowPakTool.Desktop/TruckCatalogService.cs b/src/SnowPakTool.Desktop/TruckCatalogService.cs
+index 2ac3c02..ea82884 100644
+--- a/src/SnowPakTool.Desktop/TruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/TruckCatalogService.cs
+@@ -12,7 +12,7 @@ internal static class TruckCatalogService
+ 
+     public static IReadOnlyList<CustomTruck> GetAvailableForGrouping(IEnumerable<TruckCatalogEntry> entries) =>
+         entries.Where(entry => entry.IsBaseGame || entry.IsOwned)
+-            .Select(entry => new CustomTruck(entry.Code, entry.Name, entry.Class))
++            .Select(entry => new CustomTruck(entry.Code, entry.Name, TruckClasses.ForTruck(entry.Code, entry.Class)))
+             .DistinctBy(truck => truck.Code, StringComparer.OrdinalIgnoreCase)
+             .ToArray();
+ }
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index 4731784..9732c8b 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -253,7 +253,7 @@ internal static class RegionTruckCatalogService
+                 var key = Regex.Match(root.Value, "\\bUiName\\s*=\\s*\"([^\"]+)\"").Groups[1].Value;
+                 var truckClass = Regex.Match(root.Value, "\\bTruckType\\s*=\\s*\"([^\"]+)\"").Groups[1].Value;
+                 var code = Path.GetFileNameWithoutExtension(file);
+-                trucks[code] = (names.GetValueOrDefault(key, code), truckClass);
++                trucks[code] = (names.GetValueOrDefault(key, code), TruckClasses.ForTruck(code, truckClass));
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { warnings.Add($"{file}: {ex.Message}"); }
+         }
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 9e0b575..2105378 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -49,3 +49,5 @@ The catalog matches placement IDs to nested task/contract settings in the active
+ Regions-Trucks waits for the shared workspace/ownership snapshot without waiting for unrelated editor warm-up. Map scanning matches known ASCII truck signatures before decoding placement records. Equipment definitions, parent chains, wheel families, addon sockets, default summaries and comparison properties are cached per catalog. Replacement popups reuse the region catalog, read the live enabled-truck selection each time, and calculate full comparisons only for the original and selected candidates; late background results cannot replace a newer selection. Reloading the workspace or invalidating a file changes the content version so stale catalogs are not reused. Reload maps after external workspace edits. See [loading-performance.md](../../loading-performance.md) for local benchmark results.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
++
++Small improvements: Engines uses a short one-line description; Custom tires include their underlying category. The shared search uses Tab/Shift+Tab to cycle focus through matches, wrapping at either end. Farming Tractor is an app-only class for Ankatra 1160, Futom 7290RA, Kirovets K-700 and K-7M; XML TruckType values are preserved. The Unpack / Pack tab has a bottom activity bar that animates while unpacking/merging or packing, and resets on completion, cancellation or error. Replacement comparisons hide hood-ornament and miscellaneous addon categories and the requested technical fields, with only Compatible families and scale under Wheels.
+diff --git a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+index c55c6e7..5994dda 100644
+--- a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
++++ b/src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+@@ -44,7 +44,7 @@ internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
+             var count = _liveSearch(ready ? _input.Text : "");
+             _hint.Text = !ready ? "Type at least 3 characters to search." :
+                 count == 0 ? "No matching text in the current view." :
+-                $"{count} match{(count == 1 ? "" : "es")}    Enter: confirm    Esc: close";
++                $"{count} match{(count == 1 ? "" : "es")}    Tab / Shift+Tab: navigate";
+         };
+         _input.KeyDown += (_, e) =>
+         {
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index 362f59f..d82579d 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -575,7 +575,8 @@ internal sealed class OwnedContentTab : UserControl
+                 var truckClass = Regex.Match(truckElement.Value, @"\bTruckType\s*=\s*""(?<class>[^""]+)""", RegexOptions.IgnoreCase)
+                     .Groups["class"].Value;
+ 
+-                result[Path.GetFileNameWithoutExtension(file)] = new TruckMetadata(truckName, string.IsNullOrWhiteSpace(truckClass) ? "—" : truckClass);
++                var code = Path.GetFileNameWithoutExtension(file);
++                result[code] = new TruckMetadata(truckName, TruckClasses.ForTruck(code, string.IsNullOrWhiteSpace(truckClass) ? "—" : truckClass));
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+             {
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index ef55db0..6089e4c 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -20,6 +20,7 @@ internal sealed class MainForm : Form
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+     private readonly Button _openButton = new() { Text = "Open workspace", AutoSize = true };
+     private readonly Button _packButton = new() { Text = "Pack to new PAK…", AutoSize = true };
++    private readonly ProgressBar _loadingBar = new() { Dock = DockStyle.Fill, Height = 18, Style = ProgressBarStyle.Blocks, MarqueeAnimationSpeed = 0 };
+     private readonly TextBox _log = new()
+     {
+         Multiline = true,
+@@ -64,11 +65,12 @@ internal sealed class MainForm : Form
+ 
+     private void BuildLayout()
+     {
+-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
++        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+ 
+         var title = new Label
+         {
+@@ -102,6 +104,7 @@ internal sealed class MainForm : Form
+         root.Controls.Add(actions, 0, 2);
+ 
+         root.Controls.Add(_log, 0, 3);
++        root.Controls.Add(_loadingBar, 0, 4);
+ 
+         var tabs = new TabControl { Dock = DockStyle.Fill };
+         var unpackPage = new TabPage("Unpack / Pack");
+@@ -543,6 +546,9 @@ internal sealed class MainForm : Form
+ 
+     private void SetBusy(bool busy)
+     {
++        _loadingBar.Style = busy ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
++        _loadingBar.MarqueeAnimationSpeed = busy ? 30 : 0;
++        _loadingBar.Value = 0;
+         _unpackButton.Enabled = !busy;
+         _packButton.Enabled = !busy && Directory.Exists(_workspacePath.Text.Trim());
+         _openButton.Enabled = !busy && Directory.Exists(_workspacePath.Text.Trim());
+diff --git a/src/SnowPakTool.Desktop/EngineEditTab.cs b/src/SnowPakTool.Desktop/EngineEditTab.cs
+index d0c561f..5bf1efb 100644
+--- a/src/SnowPakTool.Desktop/EngineEditTab.cs
++++ b/src/SnowPakTool.Desktop/EngineEditTab.cs
+@@ -153,7 +153,7 @@ internal sealed class EngineEditTab : UserControl
+         content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         content.Controls.Add(new Label
+         {
+-            Text = "Truck rows show compatible engine classes. Green adds and red removes a class compared with the original; save compatibility changes below. Engine properties are grouped by class; edit Updated and confirm to save.",
++            Text = "Edit truck engine compatibility and engine properties. Confirm changes to save.",
+             AutoSize = true,
+             Padding = new Padding(0, 0, 0, 8)
+         }, 0, 0);
+@@ -795,7 +795,7 @@ internal sealed class EngineEditTab : UserControl
+             var originalSocket = EngineSocket.Match(originalXml);
+             var originalTypes = ReadEngineTypes(originalSocket.Success ? originalSocket.Value : string.Empty);
+             var truckData = Regex.Match(xml, @"<TruckData\b(?<attrs>[^>]*)>", RegexOptions.IgnoreCase);
+-            var truckClass = FormatTruckClass(GetAttribute(truckData.Success ? truckData.Groups["attrs"].Value : string.Empty, "TruckType"));
++            var truckClass = TruckClasses.ForTruck(truck.Code, FormatTruckClass(GetAttribute(truckData.Success ? truckData.Groups["attrs"].Value : string.Empty, "TruckType")));
+             var rowData = new TruckRow(path, truck.Name, socket.Success, currentTypes, originalTypes, GetAttribute(socket.Success ? socket.Value : string.Empty, "Default"))
+             {
+                 IsSelected = true,
+diff --git a/src/SnowPakTool.Desktop/CurrentTabSearch.cs b/src/SnowPakTool.Desktop/CurrentTabSearch.cs
+index 45f19bb..421b778 100644
+--- a/src/SnowPakTool.Desktop/CurrentTabSearch.cs
++++ b/src/SnowPakTool.Desktop/CurrentTabSearch.cs
+@@ -21,7 +21,7 @@ internal interface ISearchGridViewport
+ }
+ 
+ /// <summary>One text search for every page: selected sub-tabs, controls, tables and their attached data.</summary>
+-internal sealed class CurrentTabSearch : IDisposable
++internal sealed class CurrentTabSearch : IDisposable, IMessageFilter
+ {
+     internal const int MinimumLength = 3;
+     private sealed record Hit(Action Highlight, Action Restore, Action<bool> Navigate);
+@@ -32,6 +32,8 @@ internal sealed class CurrentTabSearch : IDisposable
+     private QuickSearchOverlay? _popup;
+     private string _query = "";
+     private bool _disposed;
++    private Control? _owner;
++    private int _activeHit = -1;
+ 
+     public CurrentTabSearch(Func<Control?> getScope)
+     {
+@@ -43,23 +45,28 @@ internal sealed class CurrentTabSearch : IDisposable
+     {
+         if (_popup is not null) throw new InvalidOperationException("Search is already attached.");
+         _popup = new QuickSearchOverlay(owner, Find, Search);
++        _owner = owner;
++        Application.AddMessageFilter(this);
+         Watch(owner);
+     }
+ 
+     public int Search(string query)
+     {
++        var previousHit = string.Equals(_query, query.Trim(), StringComparison.CurrentCultureIgnoreCase) ? _activeHit : -1;
+         Clear();
+         _query = query.Trim();
+         if (_query.Length < MinimumLength || _getScope() is not { IsDisposed: false } scope) return 0;
+         Visit(scope);
++        _activeHit = Math.Min(previousHit, _hits.Count - 1);
+         foreach (var hit in _hits) hit.Highlight();
+-        if (_hits.Count > 0) _hits[0].Navigate(false);
++        if (_hits.Count > 0) _hits[Math.Max(0, _activeHit)].Navigate(false);
+         return _hits.Count;
+     }
+ 
+     public bool Find(string query)
+     {
+         if (Search(query) == 0) return false;
++        _activeHit = 0;
+         _hits[0].Navigate(true);
+         return true;
+     }
+@@ -70,6 +77,23 @@ internal sealed class CurrentTabSearch : IDisposable
+         foreach (var hit in _hits) hit.Restore();
+         _hits.Clear();
+         _query = "";
++        _activeHit = -1;
++    }
++
++    public bool MoveMatch(bool previous)
++    {
++        if (_hits.Count == 0 || _getScope() is not { IsDisposed: false, Visible: true }) return false;
++        _activeHit = _activeHit < 0 ? (previous ? _hits.Count - 1 : 0)
++            : (_activeHit + (previous ? -1 : 1) + _hits.Count) % _hits.Count;
++        _hits[_activeHit].Navigate(true);
++        return true;
++    }
++
++    public bool PreFilterMessage(ref Message message)
++    {
++        if (_disposed || _owner?.ContainsFocus != true || message.Msg != 0x100 || (Keys)message.WParam.ToInt32() != Keys.Tab
++            || (Control.ModifierKeys & (Keys.Control | Keys.Alt)) != Keys.None) return false;
++        return MoveMatch((Control.ModifierKeys & Keys.Shift) != Keys.None);
+     }
+ 
+     private bool Matches(string? text) => text?.Contains(_query, StringComparison.CurrentCultureIgnoreCase) == true;
+@@ -261,6 +285,7 @@ internal sealed class CurrentTabSearch : IDisposable
+     {
+         if (_disposed) return;
+         _disposed = true;
++        Application.RemoveMessageFilter(this);
+         _popup?.Dispose();
+         Clear();
+         _refresh.Dispose();
+diff --git a/.checks/RegionsTrucksRegression/SharedSearchRegression.cs b/.checks/RegionsTrucksRegression/SharedSearchRegression.cs
+index 4896e71..281f3e2 100644
+--- a/.checks/RegionsTrucksRegression/SharedSearchRegression.cs
++++ b/.checks/RegionsTrucksRegression/SharedSearchRegression.cs
+@@ -42,6 +42,17 @@ internal static class SharedSearchRegression
+         Check(search.Search("visible label") == 1 && label.BackColor == AppColors.Get("EngineMatch"), "Control text is searched");
+         search.Clear();
+         Check(label.BackColor == Color.Pink && label.ForeColor == Color.Blue, "Original control colors restored");
++        var firstMatch = new TextBox { Text = "navigation target first", Location = new Point(420, 115) };
++        var secondMatch = new TextBox { Text = "navigation target second", Location = new Point(550, 115) };
++        current.Controls.Add(firstMatch); current.Controls.Add(secondMatch);
++        Check(search.Search("navigation target") == 2 && search.MoveMatch(false), "Tab navigation starts at the first live result");
++        int ActiveHit() => (int)typeof(CurrentTabSearch).GetField("_activeHit", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(search)!;
++        Check(ActiveHit() == 0 && search.MoveMatch(false) && ActiveHit() == 1 && search.MoveMatch(false) && ActiveHit() == 0,
++            "Forward navigation advances and wraps");
++        Check(search.MoveMatch(true) && ActiveHit() == 1, "Backward navigation wraps to the previous match");
++        search.Search("navigation target"); Check(ActiveHit() == 1, "Refreshing a live query preserves the active result");
++        search.Clear(); Check(!search.MoveMatch(false), "Normal Tab behavior resumes without search results");
++        current.Controls.Remove(firstMatch); current.Controls.Remove(secondMatch); firstMatch.Dispose(); secondMatch.Dispose();
+         Check(search.Search("inactive_outer_marker") == 0 && search.Search("inactive_inner_marker") == 0, "Inactive tabs excluded at both levels");
+         Check(search.Search("active_inner_marker") == 1, "Active nested tab included");
+         Check(search.Search("alpha cell") == 1 && grid.Rows[0].Cells[0].Style.BackColor == AppColors.Get("EngineMatch"), "Table cells searched and highlighted");
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 61b4d8f..8b8b602 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -11,6 +11,7 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/TruckClasses.cs" Link="TruckClasses.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckPlacementOverrides.cs" Link="RegionTruckPlacementOverrides.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs" Link="RegionTruckAvailabilityStore.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 0643f47..311bc5c 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -66,7 +66,7 @@ internal static class Program
+         Check(overrideEquipment.Take(4).All(item => item.Id.EndsWith("_override") && item.Origin == "map override" && item.DefinitionDetails.Contains("TestValue=200")), "All four map component fields resolve independently of vehicle defaults");
+         Check(sample.Entries.Single(entry => entry.PlacementId == "").Tires == "Highway", "Empty map fields resolve vehicle default tires");
+         Check(sample.Entries.Single(entry => entry.PlacementId == "AWARD").Tires == "Ice", "Installed chained tire maps to Ice");
+-        Check(sample.Entries.Single(entry => entry.PlacementId == "REMOVE").Tires == "Custom", "Truck-exclusive tire classification");
++        Check(sample.Entries.Single(entry => entry.PlacementId == "REMOVE").Tires == "Custom (Offroad)", "Truck-exclusive tire classification includes its underlying class");
+         Check(sample.Entries.Single(entry => entry.PlacementId == "UNKNOWN").Tires == "All-terrain", "Map override belongs to the correct placement");
+         Check(sample.Entries.Single(entry => entry.PlacementId == "UNLINKED").Tires == "Mudtires", "Installed mud tire classification");
+         Check(new TruckEquipmentCatalog(fixture, new Dictionary<string, string>(), []).Resolve("test_truck", new(true, [], "wheels_test", "offroad_1", "")).Tires == "Offroad", "Installed offroad tire classification");
+@@ -81,7 +81,7 @@ internal static class Program
+             replacementCatalog.Resolve("test_truck", new(true, [], "", "", "")), replacementCatalog.ComparisonProperties("test_truck"));
+         var replacementRows = TruckReplacementComparison.Build(sample.Entries.Single(entry => entry.PlacementId == "AWARD"), replacementDefaults, replacementDefaults);
+         Check(replacementRows.Any(row => row.Property == "Internal / Engine" && row.Current == "engine_override" && row.Replacement == "engine_default")
+-            && replacementRows.Any(row => row.Property == "Wheels / Installed category" && row.Current == "Ice" && row.Replacement == "Highway")
++            && replacementRows.Where(row => row.Property.StartsWith("Wheels / ")).All(row => row.Property == "Wheels / Compatible families and scale")
+             && replacementRows.Any(row => row.Property.StartsWith("Installed addons") && row.Current.Contains("test_upgrade") && row.Replacement.Contains("test_stock"))
+             && !replacementRows.Any(row => row.Property.StartsWith("Addon socket options")),
+             "Replacement compares map equipment to defaults and always hides matching socket options");
+@@ -95,6 +95,20 @@ internal static class Program
+         Check(cleanRows.All(row => row.Property is not ("Truck" or "Class" or "Truck ID") && !row.Property.StartsWith("Internal settings")
+             && !row.Property.StartsWith("Internal resolution") && !row.Current.Contains("test_visual_frame") && !row.Replacement.Contains("test_visual_frame")),
+             "Comparison omits identity, component settings and installed visual addons");
++        var hidden = new[] { "EngineMarkerOffset", "ShadowHideDistance", "HideDistance", "ExhaustStartTime", "EngineStartDelay", "EngineIconScale", "EngineIconMesh", "SteerSpeed", "TruckImage" };
++        var noisyProperties = replacementDefaults.Properties.ToDictionary(pair => pair.Key, pair => pair.Value);
++        foreach (var property in hidden) noisyProperties["TruckData / " + property] = "hidden value";
++        noisyProperties["Addon socket options / hood ornaments / Test ornament"] = "Supported socket match";
++        noisyProperties["Addon socket options / miscellenious / Test horn"] = "Supported socket match";
++        noisyProperties["Wheels / wheels_test tires"] = "Individual tire variants";
++        var noisyEquipment = separated with { InstalledAddons = [.. separated.InstalledAddons!, new("ornament", "Test ornament", "hood_ornaments", "", false, "map"), new("horn", "Test horn", "miscellenious", "", false, "map")] };
++        var filteredRows = TruckReplacementComparison.Build(sample.Entries[0] with { InstalledAddons = noisyEquipment.InstalledAddons }, replacementDefaults,
++            replacementDefaults with { Properties = noisyProperties, Equipment = noisyEquipment });
++        Check(filteredRows.All(row => !hidden.Any(property => row.Property.EndsWith(" / " + property)) && !row.Property.Contains("hood ornaments")
++            && !row.Property.Contains("miscellenious") && !row.Current.Contains("Test ornament") && !row.Replacement.Contains("Test horn")
++            && (!row.Property.StartsWith("Wheels / ") || row.Property == "Wheels / Compatible families and scale")), "Replacement table hides queued cosmetic categories, technical fields and tire variants");
++        Check(new[] { "ankatra_1160", "futom_7290ra", "kirovets_k700", "kirovets_k7m" }.All(code => TruckClasses.ForTruck(code, "HEAVY") == "Farming Tractor")
++            && TruckClasses.ForTruck("gmc_9500", "HIGHWAY") == "HIGHWAY", "Farming Tractor is a separate application class for exactly the four requested trucks");
+         Check(ReferenceEquals(replacementCatalog.ResolveDefault("test_truck"), replacementCatalog.ResolveDefault("TEST_TRUCK"))
+             && ReferenceEquals(replacementCatalog.ComparisonProperties("test_truck"), replacementCatalog.ComparisonProperties("TEST_TRUCK")),
+             "Default summaries and comparison options are reused by model ID");
+diff --git a/SMALL_CHANGE_QUEUE.md b/SMALL_CHANGE_QUEUE.md
+index a25a505..af406e4 100644
+--- a/SMALL_CHANGE_QUEUE.md
++++ b/SMALL_CHANGE_QUEUE.md
+@@ -1,6 +1,8 @@
+ # Small change queue
+ 
+-Queued requests (6 of 10):
++Queued requests (0 of 10).
++
++Completed requests:
+ 
+ - Shorten the Engines tab description to no more than one row, ideally two sentences and at most three, explaining the tab's general purpose.
+ - In Game data → Regions-Trucks, show the underlying tire class in parentheses for Custom tires in the Tires column, e.g. `Custom (Offroad)` or `Custom (Mudtires)`.
+@@ -8,7 +10,4 @@ Queued requests (6 of 10):
+ - Add an app-internal Farming Tractor class for Ankatra 1160, Futom 7290RA, Kirovets K-700, and Kirovets K-7M.
+ - Add a loading/progress bar at the bottom of the Unpack / Pack tab.
+ - In the replacement popup comparison table, hide hood ornaments, `miscellenious`, `EngineMarkerOffset`, `ShadowHideDistance`, `HideDistance`, `ExhaustStartTime`, `EngineStartDelay`, `EngineIconScale`, `EngineIconMesh`, `SteerSpeed`, and `TruckImage`. For wheels, show only **Compatible families and scale**, without listing individual tire types in each family.
+-
+-Completed requests:
+-
+ - Close the search overlay when clicking anywhere (implemented in the shared search overlay).
+diff --git a/src/SnowPakTool.Desktop/TruckClasses.cs b/src/SnowPakTool.Desktop/TruckClasses.cs
+new file mode 100644
+index 0000000..0c4ff81
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckClasses.cs
+@@ -0,0 +1,13 @@
++namespace SnowPakTool.Desktop;
++
++/// <summary>Application classifications; game TruckType attributes remain untouched.</summary>
++internal static class TruckClasses
++{
++    public const string FarmingTractor = "Farming Tractor";
++    private static readonly HashSet<string> FarmingTractors = new(StringComparer.OrdinalIgnoreCase)
++    {
++        "ankatra_1160", "futom_7290ra", "kirovets_k700", "kirovets_k7m"
++    };
++
++    public static string ForTruck(string code, string gameClass) => FarmingTractors.Contains(code) ? FarmingTractor : gameClass;
++}

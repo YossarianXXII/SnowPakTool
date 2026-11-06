@@ -1,0 +1,655 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 352c690..142142e 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -20,6 +20,8 @@ internal sealed class MainForm : Form
+     private readonly RegionsTrucksTab _regionsTrucksTab;
+     private readonly TruckPropertiesTab _truckPropertiesTab;
+     private readonly TruckRandomizationTab _truckRandomizationTab;
++    private readonly UpgradeRandomizationTab _upgradeRandomizationTab;
++    private readonly MapUpgradesTab _mapUpgradesTab;
+     private StartChangesPanel? _startChanges;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+@@ -64,6 +66,8 @@ internal sealed class MainForm : Form
+             return _ownedContentTab.GetAvailableCustomGroupingTrucks();
+         });
+         _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync, RandomizeMissionsAsync);
++        _upgradeRandomizationTab = new UpgradeRandomizationTab();
++        _mapUpgradesTab = new MapUpgradesTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim());
+         _truckRandomizationTab.ConfigureMapStaging(_regionsTrucksTab.StageChangesAsync, () =>
+             Directory.Exists(_workspacePath.Text.Trim()) && PendingTruckReplacements.HasUnstagedChanges(_workspacePath.Text.Trim()));
+         _regionsTrucksTab.ChangesStaged += async () =>
+@@ -167,6 +171,9 @@ internal sealed class MainForm : Form
+         var regionsTrucksPage = Page("Map trucks", "MapTrucks", _regionsTrucksTab);
+         var trucksCargoPage = Page("Cargo", "Cargo", _trucksCargoTab);
+         randomizerTabs.TabPages.Add(regionsTrucksPage);
++        var upgradesPage = Page("Upgrades", "Upgrades", _upgradeRandomizationTab);
++        var mapUpgradesPage = Page("Map upgrades", "MapUpgrades", _mapUpgradesTab);
++        randomizerTabs.TabPages.AddRange([upgradesPage, mapUpgradesPage]);
+         editorTabs.TabPages.Add(trucksCargoPage);
+         tabs.TabPages.AddRange([unpackPage, planningPage, randomizerPage, editorsPage]);
+ 
+@@ -231,6 +238,7 @@ internal sealed class MainForm : Form
+                     _truckEditTab.EnsureEditorLoaded(selectedPage);
+                 }
+                 else if (selectedPage == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
++                else if (selectedPage == mapUpgradesPage) await _mapUpgradesTab.EnsureLoadedAsync();
+                 RefreshPendingCount();
+             }
+             catch (Exception ex) { if (!IsDisposed) AppendLog($"Page loading failed: {ex.Message}"); }
+diff --git a/README.md b/README.md
+index 096dd21..b44db6c 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,8 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++**Randomizer → Upgrades** prepares the upgrade workflow with one full-width rule pane, matching Truck randomization's add/edit/remove glyphs, automatically saved notes, Randomize / Stage changes buttons, detailed-log toggle and message area. Rules start empty and save separately from truck rules; an intentionally empty list remains empty. **Randomizer → Map upgrades** matches Map trucks' region tiles, map-folder Browse / Reload controls, region selection buttons, reset/staging controls, sortable/filterable table and resizable details split. Region tiles load from workspace metadata. Upgrade placement reading, replacement, randomization, reset and staging are not implemented yet; their action buttons remain disabled. Browse selects a folder and Reload refreshes workspace region metadata; neither scans upgrade placements or writes game files. Redistribution rules will be defined separately.
++
+ **Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+ **Start → Map files** groups truck/equipment changes (obtainable, mission and manual) across maps into one summary per region and state. Applied and pending rows retain their distinct colors. Summaries show change/map counts without replacement identities; hover to see the contributing map IDs and counts. Map repair and other metadata warnings remain separate rows. **Discard selected pending changes** discards the staged changes represented by that region summary in one atomic update; other regions, applied assignments and unstaged drafts remain intact. Pending badges and Apply still count/use individual changes.
+@@ -34,7 +36,7 @@ Sortable/filterable tables share the same header controls across Owned content,
+ 
+ On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to cycle ascending, descending, then off. Off restores the original base-game/release order and removes the arrow; active filters stay in effect. The active sort arrow appears at the right of the heading. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
+ 
+-Navigation uses four main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization, Map trucks); and **Editors** (Truck properties first, Engines, Winches, Addons, Experience / Ranks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results remain in their own Map trucks sub-tab; randomization logs do not reveal replacement choices.
++Navigation uses four main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization, Map trucks, Upgrades, Map upgrades); and **Editors** (Truck properties first, Engines, Winches, Addons, Experience / Ranks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results remain in their own Map trucks sub-tab; randomization logs do not reveal replacement choices.
+ 
+ The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization** and **Map trucks**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts with the five mission randomization rules. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Randomizer → Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is available in the matching Missions pane. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+diff --git a/.checks/Navigation/Program.cs b/.checks/Navigation/Program.cs
+index 6a2fa59..5a26d5c 100644
+--- a/.checks/Navigation/Program.cs
++++ b/.checks/Navigation/Program.cs
+@@ -18,7 +18,7 @@ internal static class Program
+   var main=All(host).OfType<TabControl>().Single(t=>t.Name=="MainNavigation");
+   Console.WriteLine("Actual tabs: "+string.Join(" | ",main.TabPages.Cast<TabPage>().Select(p=>p.Text)));
+   Check(main.TabPages.Cast<TabPage>().Select(p=>p.Text).SequenceEqual(new[]{"Start","Planning","Randomizer","Editors"}),"four main tabs in agreed order");
+-  var expected=new Dictionary<string,string[]>{{"Planning",new[]{"Owned content","Truck tiers","Region difficulty","Truck groups"}},{"Randomizer",new[]{"Region progression","Truck randomization","Map trucks"}},{"Editors",new[]{"Truck properties","Engines","Winches","Addons","Experience / Ranks","Cargo"}}};
++  var expected=new Dictionary<string,string[]>{{"Planning",new[]{"Owned content","Truck tiers","Region difficulty","Truck groups"}},{"Randomizer",new[]{"Region progression","Truck randomization","Map trucks","Upgrades","Map upgrades"}},{"Editors",new[]{"Truck properties","Engines","Winches","Addons","Experience / Ranks","Cargo"}}};
+   foreach(var (name,titles) in expected)
+   {
+    var page=main.TabPages[name]!;var child=page.Controls.OfType<TabControl>().Single();
+@@ -73,6 +73,17 @@ internal static class Program
+     Check(strip.GetPixel(bounds.Left+5,bounds.Top+5).ToArgb()==SystemColors.Highlight.ToArgb(),"selected tab has solid system highlight");
+    }
+   }
++  main.SelectedTab=main.TabPages["Randomizer"];
++  var randomizer=main.SelectedTab.Controls.OfType<TabControl>().Single();
++  foreach(var width in new[]{1100,760})
++  foreach(var name in new[]{"Upgrades","MapUpgrades"})
++  {
++   canvas.Width=width;randomizer.SelectedTab=randomizer.TabPages[name];
++   canvas.PerformLayout();host.PerformLayout();Application.DoEvents();
++   Check(randomizer.GetTabRect(randomizer.TabCount-1).Right<randomizer.Width,"all five Randomizer labels fit at "+width);
++   using var bitmap=new Bitmap(canvas.Width,canvas.Height);canvas.DrawToBitmap(bitmap,new Rectangle(Point.Empty,canvas.Size));
++   bitmap.Save(Path.Combine(AppContext.BaseDirectory,name+"-"+width+".png"));
++  }
+   var emptyWorkspace=Path.Combine(AppContext.BaseDirectory,"empty-workspace");Directory.CreateDirectory(emptyWorkspace);
+   ((TextBox)Field(form,"_workspacePath")).Text=emptyWorkspace;
+   Call(controller,"EnsureEditorLoaded",editors.TabPages["Engines"]);
+diff --git a/.checks/Navigation/Navigation.csproj b/.checks/Navigation/Navigation.csproj
+index 4358de5..f38a66d 100644
+--- a/.checks/Navigation/Navigation.csproj
++++ b/.checks/Navigation/Navigation.csproj
+@@ -1 +1,2 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>
++
+diff --git a/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs b/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+new file mode 100644
+index 0000000..dad8849
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+@@ -0,0 +1,305 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed class UpgradeRandomizationTab : UserControl
++{
++    private readonly UpgradeRandomizationRuleStore _store;
++    private readonly ToolTip _actionTips = new();
++    private readonly Font _glyphFont = new("Segoe MDL2 Assets", 10f);
++    private readonly UpgradeRandomizationRules _rules;
++    private readonly Func<IProgress<RandomizationLogEntry>, Task>? _run;
++    private readonly List<RandomizationLogEntry> _logEntries = [];
++    private readonly CheckBox _showDetails = new() { Text = "Show detailed logs", AutoSize = true, Checked = false, Margin = new Padding(8, 6, 0, 0) };
++    private readonly Button _randomize = new() { Text = "Randomize upgrades", AutoSize = true };
++    private readonly Button _stageChanges = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
++    private Func<Task>? _stageMapChanges;
++    private Func<bool>? _hasMapDrafts;
++    private bool _running;
++    private readonly TextBox _messages = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, MaxLength = int.MaxValue };
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 8) };
++
++    public UpgradeRandomizationTab() : this(null, new UpgradeRandomizationRuleStore()) { }
++
++    internal UpgradeRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? run,
++        UpgradeRandomizationRuleStore store)
++    {
++        _store = store;
++        _run = run;
++        _randomize.Enabled = run is not null;
++        _actionTips.SetToolTip(_randomize, "Available after upgrade randomization is implemented.");
++        _actionTips.SetToolTip(_stageChanges, "Available when upgrade map drafts can be staged.");
++        _randomize.Click += async (_, _) => await RandomizeAsync();
++        _showDetails.CheckedChanged += (_, _) => RenderMessages();
++        VisibleChanged += (_, _) => RefreshStagingState();
++        _stageChanges.Click += async (_, _) => await StageMapChangesAsync();
++        Disposed += (_, _) => { _actionTips.Dispose(); _glyphFont.Dispose(); };
++        try { _rules = _store.Load(); }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
++        {
++            _rules = new();
++            _status.Text = "Could not load saved rules: " + ex.Message;
++        }
++        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        var panes = new TableLayoutPanel
++        {
++            Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 1
++        };
++        panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        panes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        panes.Controls.Add(CreatePane("Upgrades", _rules.Rules, Padding.Empty), 0, 0);
++        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Upgrade randomization and map staging are not implemented yet.";
++        root.Controls.Add(panes, 0, 0);
++        root.Controls.Add(_status, 0, 1);
++        Controls.Add(root);
++    }
++
++    private GroupBox CreatePane(string title, List<string> rules, Padding margin)
++    {
++        var pane = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(10), Margin = margin };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 0, 0, 10) };
++        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        header.Controls.Add(new Label
++        {
++            Text = "Rules", AutoSize = true, Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold),
++            Anchor = AnchorStyles.Left, Margin = Padding.Empty
++        }, 0, 0);
++        var add = CreateGlyphAction("\uE710", $"Add {title} rule");
++        header.Controls.Add(add, 1, 0);
++        layout.Controls.Add(header, 0, 0);
++
++        // Rules stay at the top of each pane and scroll independently on small windows.
++        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty };
++        TextAreaStyle.Mark(scroll);
++        var list = new TableLayoutPanel
++        {
++            Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
++            ColumnCount = 3, Margin = Padding.Empty
++        };
++        list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
++        list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        list.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        TextAreaStyle.Mark(list);
++        void RefreshRules()
++        {
++            list.SuspendLayout();
++            foreach (var child in list.Controls.Cast<Control>().ToArray()) child.Dispose();
++            list.RowStyles.Clear();
++            list.RowCount = Math.Max(1, rules.Count);
++            if (rules.Count == 0)
++            {
++                var empty = new Label { Text = "No rules yet. Use + to add one.", AutoSize = true, Dock = DockStyle.Fill };
++                list.Controls.Add(empty, 0, 0);
++                list.SetColumnSpan(empty, 3);
++            }
++            for (var index = 0; index < rules.Count; index++)
++            {
++                var ruleIndex = index;
++                list.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++                list.Controls.Add(new Label { Text = $"{index + 1}.", AutoSize = true, Margin = new Padding(0, 5, 4, 8) }, 0, index);
++                list.Controls.Add(new Label
++                {
++                    Text = rules[index], AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 5, 8, 8)
++                }, 1, index);
++                var actions = new FlowLayoutPanel
++                {
++                    AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
++                    Margin = new Padding(0, 0, 0, 8)
++                };
++                var edit = CreateGlyphAction("\uE70F", $"Edit {title} rule {index + 1}");
++                var remove = CreateGlyphAction("\uE74D", $"Remove {title} rule {index + 1}");
++                edit.Click += (_, _) =>
++                {
++                    var text = EditRule($"Edit {title} rule {ruleIndex + 1}", rules[ruleIndex]);
++                    if (text is null) return;
++                    ChangeRules(rules, values => values[ruleIndex] = text, RefreshRules);
++                };
++                remove.Click += (_, _) => ChangeRules(rules, values => values.RemoveAt(ruleIndex), RefreshRules);
++                actions.Controls.Add(edit);
++                actions.Controls.Add(remove);
++                list.Controls.Add(actions, 2, index);
++            }
++            list.ResumeLayout(true);
++        }
++        add.Click += (_, _) =>
++        {
++            var text = EditRule($"Add {title} rule", "");
++            if (text is not null) ChangeRules(rules, values => values.Add(text), RefreshRules);
++        };
++        RefreshRules();
++        scroll.Controls.Add(list);
++        layout.Controls.Add(scroll, 0, 1);
++        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        actions.Controls.Add(_randomize);
++        actions.Controls.Add(_stageChanges);
++        actions.Controls.Add(_showDetails);
++        actions.Controls.Add(new Label
++        {
++            Text = "Review/reset in Randomizer → Map upgrades; stage here or there, then apply from Start.",
++            AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(600, 0)
++        });
++        layout.Controls.Add(actions, 0, 2);
++        layout.Controls.Add(_messages, 0, 3);
++        var fitting = false;
++        void FitRules()
++        {
++            if (fitting || layout.ClientSize.Height <= 0 || scroll.ClientSize.Width <= 0) return;
++            fitting = true;
++            try
++            {
++                var controlsHeight = layout.GetControlFromPosition(0, 2)?.GetPreferredSize(new Size(layout.ClientSize.Width, 0)).Height ?? 0;
++                var limit = Math.Max(48, layout.ClientSize.Height - header.PreferredSize.Height - controlsHeight - 130);
++                var desired = list.Height;
++                var height = Math.Clamp(desired, 24, limit);
++                if (Math.Abs(layout.RowStyles[1].Height - height) > 1) layout.RowStyles[1].Height = height;
++            }
++            finally { fitting = false; }
++        }
++        var fitQueued = false;
++        void QueueFit()
++        {
++            if (fitQueued || !layout.IsHandleCreated || layout.IsDisposed) return;
++            fitQueued = true;
++            layout.BeginInvoke((Action)(() =>
++            {
++                fitQueued = false;
++                if (!layout.IsDisposed) FitRules();
++            }));
++        }
++        layout.Layout += (_, _) => QueueFit();
++        layout.HandleCreated += (_, _) => QueueFit();
++        list.SizeChanged += (_, _) => QueueFit();
++        pane.Controls.Add(layout);
++        return pane;
++    }
++
++    public void ConfigureMapStaging(Func<Task> stage, Func<bool> hasDrafts)
++    {
++        _stageMapChanges = stage; _hasMapDrafts = hasDrafts; RefreshStagingState();
++    }
++
++    public void RefreshStagingState()
++    {
++        if (IsDisposed) return;
++        _randomize.Enabled = !_running && _run is not null;
++        var ready = false;
++        try { ready = !_running && _stageMapChanges is not null && _hasMapDrafts?.Invoke() == true; }
++        catch (Exception) { }
++        _stageChanges.Enabled = ready;
++    }
++
++    private async Task StageMapChangesAsync()
++    {
++        if (_stageMapChanges is null || _running) return;
++        _running = true; RefreshStagingState();
++        void Message(string text) => AddMessage(new(text));
++        try { await _stageMapChanges(); Message("Map changes staged. Apply them from Start → Map files."); }
++        catch (Exception ex) { Message("Could not stage map changes: " + ex.Message); }
++        finally { _running = false; RefreshStagingState(); }
++    }
++
++    private async Task RandomizeAsync()
++    {
++        if (_run is null || !_randomize.Enabled || _running) return;
++        _randomize.Enabled = false;
++        _running = true;
++        RefreshStagingState();
++        _logEntries.Clear();
++        _messages.Clear();
++        AddMessage(new("Preparing owned regions and upgrades…"));
++        try
++        {
++            await _run(new Progress<RandomizationLogEntry>(message =>
++            {
++                if (!_messages.IsDisposed) AddMessage(message);
++            }));
++            AddMessage(new("Finished. Review the draft, stage changes here or in Map upgrades, then apply from Start."));
++        }
++        catch (InvalidOperationException ex) { AddMessage(new("Error: " + ex.Message)); }
++        catch (Exception) { AddMessage(new("Error: could not read or save the upgrade plan. Check the workspace and reload map data.")); }
++        finally
++        {
++            _running = false;
++            RefreshStagingState();
++        }
++    }
++
++    private void AddMessage(RandomizationLogEntry entry)
++    {
++        _logEntries.Add(entry);
++        if (!entry.IsDetail || _showDetails.Checked) _messages.AppendText(entry.Message + Environment.NewLine);
++    }
++
++    private void RenderMessages()
++    {
++        _messages.Text = string.Concat(_logEntries.Where(entry => !entry.IsDetail || _showDetails.Checked)
++            .Select(entry => entry.Message + Environment.NewLine));
++        _messages.SelectionStart = _messages.TextLength;
++        _messages.ScrollToCaret();
++    }
++
++    private Button CreateGlyphAction(string glyph, string description)
++    {
++        var action = new Button
++        {
++            Text = glyph, Font = _glyphFont, Size = new Size(26, 26), Margin = Padding.Empty,
++            Padding = Padding.Empty, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
++            AccessibleName = description, AccessibleDescription = description,
++            UseVisualStyleBackColor = true
++        };
++        action.FlatAppearance.BorderSize = 0;
++        _actionTips.SetToolTip(action, description);
++        return action;
++    }
++
++    private void ChangeRules(List<string> rules, Action<List<string>> change, Action refresh)
++    {
++        var previous = rules.ToArray();
++        change(rules);
++        try { _store.Save(_rules); }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++        {
++            rules.Clear();
++            rules.AddRange(previous);
++            _status.Text = "Could not save rules: " + ex.Message;
++            MessageBox.Show(this, _status.Text, "Upgrades", MessageBoxButtons.OK, MessageBoxIcon.Error);
++            return;
++        }
++        refresh();
++        _status.Text = "Rule notes saved.";
++    }
++
++    private string? EditRule(string title, string value)
++    {
++        using var dialog = new Form
++        {
++            Text = title, StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false,
++            MinimizeBox = false, MaximizeBox = false, Size = new Size(580, 340), MinimumSize = new Size(380, 240)
++        };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 2 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        var text = new TextBox { Text = value, Multiline = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true, AccessibleName = "Rule text" };
++        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
++        var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
++        var save = new Button { Text = "Save", AutoSize = true, DialogResult = DialogResult.OK, Enabled = !string.IsNullOrWhiteSpace(value) };
++        text.TextChanged += (_, _) => save.Enabled = !string.IsNullOrWhiteSpace(text.Text);
++        buttons.Controls.Add(cancel);
++        buttons.Controls.Add(save);
++        layout.Controls.Add(text, 0, 0);
++        layout.Controls.Add(buttons, 0, 1);
++        dialog.Controls.Add(layout);
++        dialog.CancelButton = cancel;
++        dialog.Shown += (_, _) => { text.Focus(); text.SelectAll(); };
++        return dialog.ShowDialog(this) == DialogResult.OK ? text.Text.Trim() : null;
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs b/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+new file mode 100644
+index 0000000..e8c97e8
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+@@ -0,0 +1,41 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class UpgradeRandomizationRules
++{
++    public List<string> Rules { get; set; } = [];
++}
++
++internal sealed class UpgradeRandomizationRuleStore
++{
++    private readonly string _path;
++
++    public UpgradeRandomizationRuleStore(string? path = null) => _path = path ?? Path.Combine(
++        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++        "SnowPakTool.Desktop", "upgrade-randomization-rules.json");
++
++    public UpgradeRandomizationRules Load()
++    {
++        if (!File.Exists(_path)) return new();
++        var rules = JsonSerializer.Deserialize<UpgradeRandomizationRules>(File.ReadAllText(_path))
++            ?? throw new JsonException("The saved rule list is empty.");
++        Validate(rules);
++        return rules;
++    }
++
++    public void Save(UpgradeRandomizationRules rules)
++    {
++        Validate(rules);
++        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
++        var temporary = _path + ".tmp";
++        File.WriteAllText(temporary, JsonSerializer.Serialize(rules, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporary, _path, overwrite: true);
++    }
++
++    private static void Validate(UpgradeRandomizationRules rules)
++    {
++        if (rules.Rules is null || rules.Rules.Any(string.IsNullOrWhiteSpace))
++            throw new JsonException("Rules must be a list of non-empty notes.");
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/MapUpgradesTab.cs b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+new file mode 100644
+index 0000000..7593a41
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+@@ -0,0 +1,190 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++// Review surface for the upgrade workflow. Placement parsing and editing will be added
++// with the upgrade plan; never route these controls through truck replacement state.
++internal sealed class MapUpgradesTab : UserControl
++{
++    private readonly Func<string> _getWorkspacePath;
++    private readonly Func<string> _getPakPath;
++    private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
++    private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
++    private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
++    private readonly FlowLayoutPanel _regions = new()
++    {
++        Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
++        AutoScroll = true, Padding = new Padding(2), Margin = Padding.Empty
++    };
++    private readonly HashSet<string> _selectedRegions = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, RegionTileButton> _tiles = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 5, 4, 5) };
++    private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false };
++    private readonly DataGridView _upgrades = new()
++    {
++        Dock = DockStyle.Fill, ReadOnly = true, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
++        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
++        RowTemplate = { Height = 26 }
++    };
++    private readonly ToolTip _tips = new();
++    private string? _loadedWorkspace;
++    private bool _loading;
++
++    public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath)
++    {
++        _getWorkspacePath = getWorkspacePath;
++        _getPakPath = getPakPath;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.Controls.Add(_regions, 0, 0);
++        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4 };
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.Controls.Add(new Label { Text = "Map folder", AutoSize = true, Padding = new Padding(0, 5, 8, 0) }, 0, 0);
++        folderRow.Controls.Add(_mapFolder, 1, 0);
++        folderRow.Controls.Add(_browse, 2, 0);
++        folderRow.Controls.Add(_reload, 3, 0);
++        layout.Controls.Add(folderRow, 0, 1);
++        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        var all = new Button { Text = "Select all regions", AutoSize = true };
++        var clear = new Button { Text = "Clear selection", AutoSize = true };
++        actions.Controls.Add(all);
++        actions.Controls.Add(clear);
++        foreach (var text in new[] { "Reset selected to original", "Reset selected regions to original", "Reset all to original", "Stage changes" })
++        {
++            var button = new Button { Text = text, AutoSize = true, Enabled = false };
++            button.AccessibleDescription = "Available after upgrade placement reading and editing are implemented.";
++            _tips.SetToolTip(button, button.AccessibleDescription);
++            actions.Controls.Add(button);
++        }
++        layout.Controls.Add(actions, 0, 2);
++        layout.Controls.Add(_status, 0, 3);
++        var split = new SplitContainer
++        {
++            Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500),
++            SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6
++        };
++        TableHeaderBehavior.Attach(_upgrades);
++        var table = new DataTable();
++        foreach (var name in new[] { "Region", "Map", "Upgrade", "Type", "Compatible trucks", "Placement ID", "Upgrade ID", "Change state" })
++        {
++            table.Columns.Add(name);
++            _upgrades.Columns.Add(new DataGridViewTextBoxColumn
++            {
++                Name = name, HeaderText = name, DataPropertyName = name,
++                Width = name switch { "Upgrade" => 210, "Compatible trucks" => 250, _ => 160 },
++                SortMode = DataGridViewColumnSortMode.Automatic
++            });
++        }
++        _upgrades.DataSource = table;
++        split.Panel1.Controls.Add(_upgrades);
++        split.Panel2.Controls.Add(_details);
++        layout.Controls.Add(split, 0, 4);
++        Controls.Add(layout);
++        _status.Text = "Choose an extracted workspace on Start. Upgrade placement reading and editing are not implemented yet.";
++        _details.Text = "Upgrade placements and original/current comparisons will appear here when upgrade map support is implemented.";
++        all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshSelection(); };
++        clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshSelection(); };
++        _reload.Click += async (_, _) => await LoadAsync(force: true);
++        _browse.Click += async (_, _) =>
++        {
++            using var dialog = new FolderBrowserDialog { Description = "Choose the folder containing level_*.pak archives or extracted map folders." };
++            if (Directory.Exists(_mapFolder.Text)) dialog.SelectedPath = _mapFolder.Text;
++            if (dialog.ShowDialog(this) != DialogResult.OK) return;
++            _mapFolder.Text = dialog.SelectedPath;
++            await LoadAsync(force: true);
++        };
++        AppColors.Changed += PaletteChanged;
++        Disposed += (_, _) => { AppColors.Changed -= PaletteChanged; _tips.Dispose(); };
++        TextAreaStyle.Mark(_details);
++    }
++
++    public Task EnsureLoadedAsync() => LoadAsync(force: false);
++
++    private async Task LoadAsync(bool force)
++    {
++        if (_loading) return;
++        var workspace = _getWorkspacePath().Trim();
++        if (_mapFolder.Text.Length == 0) _mapFolder.Text = RegionTruckCatalogService.FindMapDirectory(_getPakPath());
++        if (!force && workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase)) return;
++        var sameWorkspace = workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase);
++        ClearRegions();
++        if (!sameWorkspace) _selectedRegions.Clear();
++        if (!Directory.Exists(workspace))
++        {
++            _status.Text = "Choose an extracted workspace on Start. Upgrade placement reading and editing are not implemented yet.";
++            return;
++        }
++        _loading = true;
++        _browse.Enabled = _reload.Enabled = false;
++        _mapFolder.ReadOnly = true;
++        _status.Text = "Loading workspace regions…";
++        try
++        {
++            await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++            if (IsDisposed || !workspace.Equals(_getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
++            var regions = WorkspaceDataCache.GetRegionMetadata(workspace);
++            foreach (var pair in regions.OrderBy(pair => RegionTileAssets.GetReleaseOrder(pair.Key))
++                         .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
++            {
++                var code = pair.Key;
++                var tile = new RegionTileButton
++                {
++                    Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
++                    RegionName = pair.Value.Name, ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(),
++                    Summary = "Upgrades not loaded", Thumbnail = RegionTileAssets.GetThumbnail(code), Text = pair.Value.Name,
++                    Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
++                    TextAlign = ContentAlignment.MiddleCenter, UseVisualStyleBackColor = false,
++                    AccessibleName = pair.Value.Name, Tag = code
++                };
++                tile.Click += (_, _) => { if (!_selectedRegions.Add(code)) _selectedRegions.Remove(code); RefreshSelection(); };
++                _tiles.Add(code, tile);
++                _regions.Controls.Add(tile);
++            }
++            _selectedRegions.IntersectWith(_tiles.Keys);
++            _loadedWorkspace = workspace;
++            RefreshSelection();
++        }
++        catch (Exception ex) { if (!IsDisposed) _status.Text = "Could not load upgrade regions: " + ex.Message; }
++        finally
++        {
++            _loading = false;
++            if (!IsDisposed) { _browse.Enabled = _reload.Enabled = true; _mapFolder.ReadOnly = false; }
++        }
++    }
++
++    private void ClearRegions()
++    {
++        foreach (var tile in _tiles.Values) tile.Dispose();
++        _tiles.Clear();
++        _regions.Controls.Clear();
++        _loadedWorkspace = null;
++    }
++
++    private void PaletteChanged(object? sender, EventArgs e) => RefreshSelection();
++
++    private void RefreshSelection()
++    {
++        foreach (var (code, tile) in _tiles)
++        {
++            var selected = _selectedRegions.Contains(code);
++            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : Color.FromArgb(32, 38, 45);
++            tile.ForeColor = tile.BackColor.GetBrightness() < 0.55f ? Color.White : Color.Black;
++            tile.FlatAppearance.BorderSize = selected ? 3 : 1;
++            tile.FlatAppearance.BorderColor = selected ? SystemColors.Highlight : Color.FromArgb(70, 80, 90);
++            tile.AccessibleDescription = selected ? "Selected region. Activate to deselect." : "Activate to select this region.";
++        }
++        if (_loadedWorkspace is not null)
++            _status.Text = $"{_selectedRegions.Count} of {_tiles.Count} workspace regions selected. Upgrade placement reading and editing are not implemented yet.";
++    }
++}

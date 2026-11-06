@@ -1,0 +1,209 @@
+--- src\SnowPakTool.Desktop\TruckClasses.cs
++++ src\SnowPakTool.Desktop\TruckClasses.cs
+@@ -3,11 +3,14 @@
+ /// <summary>Application classifications; game TruckType attributes remain untouched.</summary>
+ internal static class TruckClasses
+ {
++    public const string Logging = "Logging";
+     public const string FarmingTractor = "Farming Tractor";
+     private static readonly HashSet<string> FarmingTractors = new(StringComparer.OrdinalIgnoreCase)
+     {
+         "ankatra_1160", "futom_7290ra", "kirovets_k700", "kirovets_k7m"
+     };
+ 
+-    public static string ForTruck(string code, string gameClass) => FarmingTractors.Contains(code) ? FarmingTractor : gameClass;
++    public static string ForTruck(string code, string gameClass) =>
++        code.Equals("aramatsu_forester", StringComparison.OrdinalIgnoreCase) ? Logging :
++        FarmingTractors.Contains(code) ? FarmingTractor : gameClass;
+ }
+--- src\SnowPakTool.Desktop\AppColors.cs
++++ src\SnowPakTool.Desktop\AppColors.cs
+@@ -51,6 +51,7 @@
+         ["Surface"] = new("Surface", "Surface", "Table and graph backgrounds", Color.White),
+         ["AlternateRow"] = new("AlternateRow", "Alternate row", "Alternating table rows", Color.FromArgb(248, 248, 248)),
+         ["SelectionBlue"] = new("SelectionBlue", "Selected cell", "Selected compatibility cells", Color.FromArgb(205, 226, 247)),
++        ["SearchActive"] = new("SearchActive", "Active search result", "Currently targeted search match", Color.FromArgb(255, 160, 65)),
+         ["EngineMatch"] = new("EngineMatch", "Engine compatibility match", "Truck rows matching the selected engine class", Color.FromArgb(255, 241, 168)),
+         ["GroupRow"] = new("GroupRow", "Group row", "Engine and truck group rows", Color.FromArgb(225, 233, 241)),
+         ["CompatibilitySeparator"] = new("CompatibilitySeparator", "Compatibility separator", "Section separator in compatibility matrices", Color.FromArgb(115, 125, 135)),
+--- src\SnowPakTool.Desktop\CurrentTabSearch.cs
++++ src\SnowPakTool.Desktop\CurrentTabSearch.cs
+@@ -8,6 +8,7 @@
+ internal interface ISearchHighlight
+ {
+     bool SearchMatch { get; set; }
++    bool SearchActive { get; set; }
+ }
+ 
+ internal interface ISearchTextContent
+@@ -24,7 +25,7 @@
+ internal sealed class CurrentTabSearch : IDisposable, IMessageFilter
+ {
+     internal const int MinimumLength = 3;
+-    private sealed record Hit(Action Highlight, Action Restore, Action<bool> Navigate);
++    private sealed record Hit(Action<bool> Highlight, Action Restore, Action<bool> Navigate);
+     private readonly Func<Control?> _getScope;
+     private readonly List<Hit> _hits = [];
+     private readonly HashSet<Control> _watched = [];
+@@ -57,9 +58,9 @@
+         _query = query.Trim();
+         if (_query.Length < MinimumLength || _getScope() is not { IsDisposed: false } scope) return 0;
+         Visit(scope);
+-        _activeHit = Math.Min(previousHit, _hits.Count - 1);
+-        foreach (var hit in _hits) hit.Highlight();
+-        if (_hits.Count > 0) _hits[Math.Max(0, _activeHit)].Navigate(false);
++        _activeHit = _hits.Count == 0 ? -1 : Math.Clamp(previousHit, 0, _hits.Count - 1);
++        HighlightActive();
++        if (_activeHit >= 0) _hits[_activeHit].Navigate(false);
+         return _hits.Count;
+     }
+ 
+@@ -67,6 +68,7 @@
+     {
+         if (Search(query) == 0) return false;
+         _activeHit = 0;
++        HighlightActive();
+         _hits[0].Navigate(true);
+         return true;
+     }
+@@ -74,7 +76,7 @@
+     public void Clear()
+     {
+         _refresh.Stop();
+-        foreach (var hit in _hits) hit.Restore();
++        foreach (var hit in _hits) { hit.Highlight(false); hit.Restore(); }
+         _hits.Clear();
+         _query = "";
+         _activeHit = -1;
+@@ -85,8 +87,14 @@
+         if (_hits.Count == 0 || _getScope() is not { IsDisposed: false, Visible: true }) return false;
+         _activeHit = _activeHit < 0 ? (previous ? _hits.Count - 1 : 0)
+             : (_activeHit + (previous ? -1 : 1) + _hits.Count) % _hits.Count;
++        HighlightActive();
+         _hits[_activeHit].Navigate(true);
+         return true;
++    }
++
++    private void HighlightActive()
++    {
++        for (var index = 0; index < _hits.Count; index++) _hits[index].Highlight(index == _activeHit);
+     }
+ 
+     public bool PreFilterMessage(ref Message message)
+@@ -112,8 +120,9 @@
+             if (ControlStrings(control, includeChildren: true).Any(Matches))
+             {
+                 var previous = highlight.SearchMatch;
+-                _hits.Add(new(() => highlight.SearchMatch = true,
+-                    () => { if (!control.IsDisposed) highlight.SearchMatch = previous; }, focus => Reveal(control, focus)));
++                var previousActive = highlight.SearchActive;
++                _hits.Add(new(active => { if (!control.IsDisposed) { highlight.SearchMatch = true; highlight.SearchActive = active; } },
++                    () => { if (!control.IsDisposed) { highlight.SearchMatch = previous; highlight.SearchActive = previousActive; } }, focus => Reveal(control, focus)));
+             }
+             return;
+         }
+@@ -169,7 +178,7 @@
+         var previousText = control.ForeColor;
+         var themedButton = control is ButtonBase button && button.UseVisualStyleBackColor;
+         var color = AppColors.Get("EngineMatch");
+-        _hits.Add(new(() => { control.BackColor = color; control.ForeColor = SystemColors.ControlText; },
++        _hits.Add(new(active => { if (!control.IsDisposed) { control.BackColor = active ? AppColors.Get("SearchActive") : color; control.ForeColor = SystemColors.ControlText; } },
+             () =>
+             {
+                 if (control.IsDisposed || control.BackColor != color) return;
+@@ -213,17 +222,24 @@
+         var color = AppColors.Get("EngineMatch");
+         var previous = cell.Style.BackColor;
+         var previousText = cell.Style.ForeColor;
++        var previousSelection = cell.Style.SelectionBackColor;
++        var previousSelectionText = cell.Style.SelectionForeColor;
+         var themedHeaders = grid.EnableHeadersVisualStyles;
+-        _hits.Add(new(() =>
+-            {
++        _hits.Add(new(active =>
++            {
++                if (grid.IsDisposed) return;
+                 if (row is null) grid.EnableHeadersVisualStyles = false;
+-                cell.Style.BackColor = color;
++                cell.Style.BackColor = active ? AppColors.Get("SearchActive") : color;
+                 cell.Style.ForeColor = SystemColors.ControlText;
++                cell.Style.SelectionBackColor = cell.Style.BackColor;
++                cell.Style.SelectionForeColor = SystemColors.ControlText;
+             },
+             () =>
+             {
+                 if (grid.IsDisposed) return;
+                 if (cell.Style.BackColor == color) { cell.Style.BackColor = previous; cell.Style.ForeColor = previousText; }
++                cell.Style.SelectionBackColor = previousSelection;
++                cell.Style.SelectionForeColor = previousSelectionText;
+                 if (row is null) grid.EnableHeadersVisualStyles = themedHeaders;
+             }, focus =>
+             {
+--- src\SnowPakTool.Desktop\CustomGroupWipTab.cs
++++ src\SnowPakTool.Desktop\CustomGroupWipTab.cs
+@@ -644,7 +644,7 @@
+                 "highway" => "TruckClassHighway",
+                 _ => null
+             };
+-            var background = tile.SearchMatch ? AppColors.Get("EngineMatch") :
++            var background = tile.SearchActive ? AppColors.Get("SearchActive") : tile.SearchMatch ? AppColors.Get("EngineMatch") :
+                 key is null ? Color.FromArgb(32, 38, 45) : AppColors.Get(key);
+             name.BackColor = classOverlay.BackColor = background;
+             name.ForeColor = classOverlay.ForeColor = background.GetBrightness() < 0.55f ? Color.White : Color.Black;
+@@ -782,6 +782,18 @@
+ internal sealed class SearchableTruckTile : Panel, ISearchHighlight
+ {
+     private bool _searchMatch;
++    private bool _searchActive;
++    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
++    public bool SearchActive
++    {
++        get => _searchActive;
++        set
++        {
++            if (_searchActive == value) return;
++            _searchActive = value;
++            SearchMatchChanged?.Invoke(this, EventArgs.Empty);
++        }
++    }
+     public event EventHandler? SearchMatchChanged;
+     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+     public bool SearchMatch
+--- src\SnowPakTool.Desktop\RegionTileButton.cs
++++ src\SnowPakTool.Desktop\RegionTileButton.cs
+@@ -14,6 +14,8 @@
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal bool SearchMatch { get; set; }
+     bool ISearchHighlight.SearchMatch { get => SearchMatch; set { SearchMatch = value; Invalidate(); } }
++    private bool _searchActive;
++    bool ISearchHighlight.SearchActive { get => _searchActive; set { _searchActive = value; Invalidate(); } }
+     IEnumerable<string?> ISearchTextContent.GetSearchText() => [RegionName, ReleaseLabel, Summary];
+     // Cached by RegionTileAssets and shared by every tile for this region.
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+@@ -27,7 +29,7 @@
+     protected override void OnPaint(PaintEventArgs e)
+     {
+         var graphics = e.Graphics;
+-        var backgroundColor = SearchMatch ? AppColors.Get("EngineMatch") : BackColor;
++        var backgroundColor = _searchActive ? AppColors.Get("SearchActive") : SearchMatch ? AppColors.Get("EngineMatch") : BackColor;
+         var textColor = SearchMatch ? SystemColors.ControlText : ForeColor;
+         graphics.Clear(backgroundColor);
+         var border = Math.Max(1, FlatAppearance.BorderSize);
+--- SMALL_CHANGE_QUEUE.md
++++ SMALL_CHANGE_QUEUE.md
+@@ -1,11 +1,12 @@
+ # Small change queue
+ 
+-Queued requests (2 of 10):
++Queued requests (0 of 10):
++
++
++Completed requests:
+ 
+ - Make the currently targeted search result stand out more clearly from other matches, including when navigating with Tab / Shift+Tab.
+ - Put Aramatsu Forester in a separate app-internal `Logging` class, leaving its game TruckType unchanged.
+-
+-Completed requests:
+ 
+ - Shorten the Engines tab description to no more than one row, ideally two sentences and at most three, explaining the tab's general purpose.
+ - In Game data â†’ Regions-Trucks, show the underlying tire class in parentheses for Custom tires in the Tires column, e.g. `Custom (Offroad)` or `Custom (Mudtires)`.

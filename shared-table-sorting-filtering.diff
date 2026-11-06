@@ -1,0 +1,1307 @@
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index 15b3dc8..280f0bc 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -32,7 +32,6 @@ internal sealed class OwnedContentTab : UserControl
+     private bool _updatingSelectAll;
+     private string? _loadedWorkspace;
+     private ListSortDirection _regionSortDirection = ListSortDirection.Ascending;
+-    private readonly Dictionary<DataGridView, ListSortDirection> _releaseDateSortDirections = new();
+     private string? _truckSortColumn;
+     private ListSortDirection _truckSortDirection = ListSortDirection.Ascending;
+     public event Action? OwnedTrucksChanged;
+@@ -209,7 +208,7 @@ internal sealed class OwnedContentTab : UserControl
+             if (e.Button != MouseButtons.Left) return;
+             var column = _truckGrid.Columns[e.ColumnIndex];
+             var cellBounds = _truckGrid.GetCellDisplayRectangle(e.ColumnIndex, -1, true);
+-            var filterBounds = TruckHeaderCell.FilterBounds(new Rectangle(0, 0, cellBounds.Width, cellBounds.Height), _truckGrid.DeviceDpi / 96f);
++            var filterBounds = TableHeaderCell.FilterBounds(new Rectangle(0, 0, cellBounds.Width, cellBounds.Height), _truckGrid.DeviceDpi / 96f);
+             if (filterBounds.Contains(e.X, e.Y)) { ShowTruckFilter(column); return; }
+             if (_truckSortColumn == column.Name && _truckSortDirection == ListSortDirection.Descending)
+             {
+@@ -219,34 +218,21 @@ internal sealed class OwnedContentTab : UserControl
+                 ? ListSortDirection.Descending : ListSortDirection.Ascending);
+         };
+ 
+-        _regionGrid.Columns["DlcName"]!.SortMode = DataGridViewColumnSortMode.Programmatic;
+-        _regionGrid.ColumnHeaderMouseClick += (_, e) =>
+-        {
+-            if (_regionGrid.Columns[e.ColumnIndex].Name != "DlcName") return;
+-            _regionSortDirection = _regionSortDirection == ListSortDirection.Ascending
+-                ? ListSortDirection.Descending
+-                : ListSortDirection.Ascending;
+-            SortRegionRows();
+-        };
+-        foreach (var grid in new[] { _regionGrid, _truckDlcGrid, _otherDlcGrid })
+-        {
+-            grid.Columns["ReleaseDate"]!.HeaderCell.ToolTipText = "Sortable by the DLC's release date on Steam.";
+-            _releaseDateSortDirections[grid] = ListSortDirection.Ascending;
+-            grid.ColumnHeaderMouseClick += (_, e) =>
++        TableHeaderBehavior.Attach(_regionGrid,
++            () => _regionGrid.Sort(new RegionDlcComparer(ListSortDirection.Ascending)),
++            (column, direction) =>
+             {
+-                if (grid.Columns[e.ColumnIndex].Name != "ReleaseDate") return;
+-                var direction = _releaseDateSortDirections[grid] == ListSortDirection.Ascending
+-                    ? ListSortDirection.Descending
+-                    : ListSortDirection.Ascending;
+-                _releaseDateSortDirections[grid] = direction;
+-                grid.Sort(new ReleaseDateComparer(direction));
+-                grid.Columns["ReleaseDate"]!.HeaderCell.SortGlyphDirection = direction == ListSortDirection.Ascending
+-                    ? SortOrder.Ascending
+-                    : SortOrder.Descending;
+-            };
+-        }
++                if (column.Name == "DlcName") _regionGrid.Sort(new RegionDlcComparer(direction));
++                else if (column.Name == "ReleaseDate") _regionGrid.Sort(new ReleaseDateComparer(direction));
++                else _regionGrid.Sort(column, direction);
++            });
++        foreach (var grid in new[] { _truckDlcGrid, _otherDlcGrid })
++            TableHeaderBehavior.Attach(grid, sort: (column, direction) =>
++            {
++                if (column.Name == "ReleaseDate") grid.Sort(new ReleaseDateComparer(direction));
++                else grid.Sort(column, direction);
++            });
+     }
+-
+     private void AddOwnedSection(string title, DataGridView grid, CheckBox selectAll, int headerRow, float weight)
+     {
+         var bodyRow = headerRow + 1;
+@@ -356,7 +342,7 @@ internal sealed class OwnedContentTab : UserControl
+             var filter = new MultiSelectFilter(column.HeaderText, column.Name);
+             filter.Changed += ApplyTruckFilters;
+             _truckFilters.Add(filter);
+-            column.HeaderCell = new TruckHeaderCell(() => filter.IsFiltered) { Value = column.HeaderText };
++            column.HeaderCell = new TableHeaderCell(() => filter.IsFiltered) { Value = column.HeaderText };
+             var menu = new ContextMenuStrip();
+             menu.Items.Add("Sort ascending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Ascending));
+             menu.Items.Add("Sort descending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Descending));
+@@ -731,66 +717,6 @@ internal sealed class OwnedContentTab : UserControl
+         if (row.Tag is string code) _ownedRegionState.SetOwned(code, isOwned);
+     }
+ 
+-    private sealed class TruckHeaderCell : DataGridViewColumnHeaderCell
+-    {
+-        private Func<bool> _isFiltered;
+-        public TruckHeaderCell() : this(() => false) { }
+-        public TruckHeaderCell(Func<bool> isFiltered) => _isFiltered = isFiltered;
+-        public override object Clone()
+-        {
+-            var clone = (TruckHeaderCell)base.Clone();
+-            clone._isFiltered = _isFiltered;
+-            return clone;
+-        }
+-        internal static Rectangle FilterBounds(Rectangle bounds, float scale) => new(bounds.Right - (int)(24 * scale), bounds.Top, (int)(24 * scale), bounds.Height);
+-
+-        protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
+-            DataGridViewElementStates dataGridViewElementState, object? value, object? formattedValue, string? errorText,
+-            DataGridViewCellStyle cellStyle, DataGridViewAdvancedBorderStyle advancedBorderStyle, DataGridViewPaintParts paintParts)
+-        {
+-            // The themed base header paints its native sort arrow even without ContentForeground,
+-            // overlapping our funnel. Paint only header chrome here, then our text and icons below.
+-            if ((paintParts & (DataGridViewPaintParts.Background | DataGridViewPaintParts.ContentBackground)) != 0)
+-            {
+-                var element = System.Windows.Forms.VisualStyles.VisualStyleElement.Header.Item.Normal;
+-                if (Application.RenderWithVisualStyles && System.Windows.Forms.VisualStyles.VisualStyleRenderer.IsElementDefined(element))
+-                    new System.Windows.Forms.VisualStyles.VisualStyleRenderer(element).DrawBackground(graphics, cellBounds);
+-                else
+-                {
+-                    using var background = new SolidBrush(cellStyle.BackColor);
+-                    graphics.FillRectangle(background, cellBounds);
+-                }
+-            }
+-            if (paintParts.HasFlag(DataGridViewPaintParts.Border))
+-            {
+-                using var border = new Pen(SystemColors.ControlDark);
+-                graphics.DrawLine(border, cellBounds.Right - 1, cellBounds.Top, cellBounds.Right - 1, cellBounds.Bottom - 1);
+-                graphics.DrawLine(border, cellBounds.Left, cellBounds.Bottom - 1, cellBounds.Right - 1, cellBounds.Bottom - 1);
+-            }
+-            if (!paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
+-            var scale = graphics.DpiX / 96f;
+-            var filter = FilterBounds(cellBounds, scale);
+-            var text = new Rectangle(cellBounds.Left + (int)(4 * scale), cellBounds.Top, Math.Max(0, cellBounds.Width - (int)(44 * scale)), cellBounds.Height);
+-            TextRenderer.DrawText(graphics, Convert.ToString(formattedValue), cellStyle.Font, text, cellStyle.ForeColor,
+-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+-            var y = cellBounds.Top + cellBounds.Height / 2f;
+-            var x = filter.Left - 8 * scale;
+-            if (SortGlyphDirection != SortOrder.None)
+-            {
+-                var sign = SortGlyphDirection == SortOrder.Ascending ? 1 : -1;
+-                using var brush = new SolidBrush(cellStyle.ForeColor);
+-                PointF[] arrow = [new(x - 4 * scale, y + sign * 3 * scale), new(x + 4 * scale, y + sign * 3 * scale), new(x, y - sign * 3 * scale)];
+-                graphics.FillPolygon(brush, arrow);
+-            }
+-            x = filter.Left + filter.Width / 2f;
+-            PointF[] funnel = [new(x - 5 * scale, y - 5 * scale), new(x + 5 * scale, y - 5 * scale), new(x + 1.5f * scale, y),
+-                new(x + 1.5f * scale, y + 4 * scale), new(x - 1.5f * scale, y + 6 * scale), new(x - 1.5f * scale, y)];
+-            using var pen = new Pen(_isFiltered() ? SystemColors.Highlight : cellStyle.ForeColor, scale);
+-            if (_isFiltered()) { using var brush = new SolidBrush(SystemColors.Highlight); graphics.FillPolygon(brush, funnel); }
+-            else graphics.DrawPolygon(pen, funnel);
+-        }
+-    }
+-
+     private sealed class MultiSelectFilter : IDisposable
+     {
+         private readonly string _label;
+diff --git a/src/SnowPakTool.Desktop/EngineEditTab.cs b/src/SnowPakTool.Desktop/EngineEditTab.cs
+index b2af2b1..8c75076 100644
+--- a/src/SnowPakTool.Desktop/EngineEditTab.cs
++++ b/src/SnowPakTool.Desktop/EngineEditTab.cs
+@@ -64,8 +64,7 @@ internal sealed class EngineEditTab : UserControl
+     private readonly Button _saveCompatibilityButton = new() { Text = "Save compatibility changes", AutoSize = true, Enabled = false, Margin = new Padding(4) };
+     private readonly CheckBox _selectAllTrucks = new() { Text = "Select all visible", AutoSize = true, ThreeState = true, CheckState = CheckState.Checked, Margin = new Padding(4, 7, 10, 4) };
+     private readonly CheckBox _allowCompatibilityEditing = new() { Text = "Allow editing", AutoSize = true, Checked = false, Margin = new Padding(8, 7, 4, 4) };
+-    private readonly CheckedFilterDropdown _classFilter = new("All classes", 230);
+-    private readonly CheckedFilterDropdown _dlcFilter = new("All DLCs", 260);
++    private readonly TableHeaderBehavior _compatibilityHeaders;
+     private readonly CheckedFilterDropdown _propertyColumnsFilter = new("Show columns", 300);
+     private readonly Button _confirmPropertiesButton = new() { Text = "Confirm and save", AutoSize = true, Enabled = false, Margin = new Padding(4) };
+     private readonly Label _status = new() { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
+@@ -95,10 +94,13 @@ internal sealed class EngineEditTab : UserControl
+         _compatibilityGrid.CellMouseClick += CompatibilityCellMouseClick;
+         _compatibilityGrid.CellPainting += CompatibilityCellPainting;
+         _compatibilityGrid.SelectionChanged += (_, _) => RefreshPropertyTablesForTruckSelection();
+-        _compatibilityGrid.ColumnHeaderMouseClick += CompatibilityHeaderMouseClick;
++        _compatibilityHeaders = TableHeaderBehavior.Attach(_compatibilityGrid,
++            () => SortCompatibility(null, ListSortDirection.Ascending),
++            (column, direction) => SortCompatibility(column, direction), column => column.Index >= 4);
++        _compatibilityHeaders.AddFilter("TruckClass");
++        _compatibilityHeaders.AddFilter("Dlc");
++        _compatibilityHeaders.Changed += () => { SyncSelectAllCheckbox(); RefreshPropertyTablesForTruckSelection(); };
+         _compatibilityGrid.RowPostPaint += DrawTenthRowSeparator;
+-        _classFilter.SelectionChanged += (_, _) => ApplyTruckFilters();
+-        _dlcFilter.SelectionChanged += (_, _) => ApplyTruckFilters();
+         _propertyColumnsFilter.SelectionChanged += (_, _) => ApplyPropertyColumnVisibility();
+         _originalPropertiesGrid.SelectionChanged += (_, _) => PropertyGridSelectionChanged(_originalPropertiesGrid, _updatedPropertiesGrid);
+         _updatedPropertiesGrid.SelectionChanged += (_, _) => PropertyGridSelectionChanged(_updatedPropertiesGrid, _originalPropertiesGrid);
+@@ -176,10 +178,6 @@ internal sealed class EngineEditTab : UserControl
+         var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+         filters.Controls.Add(_selectAllTrucks);
+         filters.Controls.Add(_allowCompatibilityEditing);
+-        filters.Controls.Add(new Label { Text = "Class", AutoSize = true, Margin = new Padding(4, 8, 0, 0) });
+-        filters.Controls.Add(_classFilter);
+-        filters.Controls.Add(new Label { Text = "DLC", AutoSize = true, Margin = new Padding(12, 8, 0, 0) });
+-        filters.Controls.Add(_dlcFilter);
+         compatibilityLayout.Controls.Add(filters, 0, 0);
+         compatibilityLayout.Controls.Add(_compatibilityGrid, 0, 1);
+         var savePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
+@@ -371,7 +369,7 @@ internal sealed class EngineEditTab : UserControl
+         _compatibilityGrid.Columns.Clear();
+         _compatibilityGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "SelectTruck", HeaderText = "", Width = 32, MinimumWidth = 32, Frozen = true, ThreeState = false, SortMode = DataGridViewColumnSortMode.NotSortable });
+         _compatibilityGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Truck", HeaderText = "Truck", ReadOnly = true, Frozen = true, Width = 190, MinimumWidth = 150, SortMode = DataGridViewColumnSortMode.NotSortable });
+-        _compatibilityGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TruckClass", HeaderText = "Truck class", ReadOnly = true, Width = 115, MinimumWidth = 90, SortMode = DataGridViewColumnSortMode.Programmatic });
++        _compatibilityGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TruckClass", HeaderText = "Truck class", ReadOnly = true, Width = 140, MinimumWidth = 110, SortMode = DataGridViewColumnSortMode.Programmatic });
+         _compatibilityGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Dlc", HeaderText = "DLC", ReadOnly = true, Width = 90, MinimumWidth = 75, SortMode = DataGridViewColumnSortMode.Programmatic });
+         foreach (var engineClass in _matrixEngineClasses)
+         {
+@@ -477,28 +475,15 @@ internal sealed class EngineEditTab : UserControl
+         UpdateConfirmButton();
+     }
+ 
+-    private void PopulateTruckFilters()
+-    {
+-        var selectedClasses = _classFilter.SelectedValues;
+-        var selectedDlcs = _dlcFilter.SelectedValues;
+-        var classes = _compatibilityGrid.Rows.Cast<DataGridViewRow>().Select(item => item.Cells["TruckClass"].Value?.ToString() ?? "—").Distinct(StringComparer.CurrentCultureIgnoreCase).OrderBy(value => value, StringComparer.CurrentCultureIgnoreCase);
+-        var dlcs = _compatibilityGrid.Rows.Cast<DataGridViewRow>().Select(item => item.Cells["Dlc"].Value?.ToString() ?? "—").Distinct(StringComparer.CurrentCultureIgnoreCase).OrderBy(value => value, StringComparer.CurrentCultureIgnoreCase);
+-        _classFilter.SetOptions(classes, selectedClasses);
+-        _dlcFilter.SetOptions(dlcs, selectedDlcs);
+-    }
++    private void PopulateTruckFilters() => _compatibilityHeaders.Refresh();
+ 
+     private void ApplyTruckFilters()
+     {
+-        if (_updatingGrid || _compatibilityGrid.Rows.Count == 0) return;
+-        foreach (DataGridViewRow row in _compatibilityGrid.Rows)
+-        {
+-            row.Visible = _classFilter.Matches(row.Cells["TruckClass"].Value?.ToString() ?? "—")
+-                && _dlcFilter.Matches(row.Cells["Dlc"].Value?.ToString() ?? "—");
+-        }
++        if (_updatingGrid) return;
++        _compatibilityHeaders.Refresh();
+         SyncSelectAllCheckbox();
+         RefreshPropertyTablesForTruckSelection();
+     }
+-
+     private void RefreshPropertyTablesForTruckSelection()
+     {
+         if (_updatingGrid || _compatibilityGrid.Columns.Count == 0 || _engineClasses.Count == 0) return;
+@@ -627,47 +612,22 @@ internal sealed class EngineEditTab : UserControl
+         }
+     }
+ 
+-    private void CompatibilityHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
++    private void SortCompatibility(DataGridViewColumn? column, ListSortDirection direction)
+     {
+-        if (e.ColumnIndex < 2) return;
+-        var column = _compatibilityGrid.Columns[e.ColumnIndex];
+-        var sameColumn = _sortedCompatibilityColumnIndex == e.ColumnIndex;
+-        var clearSort = sameColumn && _sortedCompatibilityDirection == ListSortDirection.Descending;
+-        var engineColumn = e.ColumnIndex >= 4;
+-        if (clearSort)
+-        {
+-            _sortedCompatibilityColumnIndex = -1;
+-            _sortedCompatibilityDirection = ListSortDirection.Ascending;
+-        }
+-        else
+-        {
+-            _sortedCompatibilityColumnIndex = e.ColumnIndex;
+-            _sortedCompatibilityDirection = engineColumn
+-                ? ListSortDirection.Descending
+-                : sameColumn && _sortedCompatibilityDirection == ListSortDirection.Ascending
+-                    ? ListSortDirection.Descending
+-                    : ListSortDirection.Ascending;
+-        }
+-
++        _sortedCompatibilityColumnIndex = column?.Index ?? -1;
++        _sortedCompatibilityDirection = direction;
++        var wasUpdating = _updatingGrid;
+         _updatingGrid = true;
+         _compatibilityGrid.SuspendLayout();
+         try
+         {
+-            if (clearSort)
+-                _compatibilityGrid.Sort(new TruckOriginalOrderComparer());
+-            else if (column.Name == "Dlc")
+-                _compatibilityGrid.Sort(new TruckDlcComparer(_sortedCompatibilityDirection));
+-            else
+-                _compatibilityGrid.Sort(column, _sortedCompatibilityDirection);
+-        }
+-        finally
+-        {
+-            _compatibilityGrid.ResumeLayout(performLayout: false);
+-            _updatingGrid = false;
++            if (column is null) _compatibilityGrid.Sort(new TruckOriginalOrderComparer());
++            else if (column.Name == "Dlc") _compatibilityGrid.Sort(new TruckDlcComparer(direction));
++            else _compatibilityGrid.Sort(column, direction);
+         }
++        finally { _compatibilityGrid.ResumeLayout(false); _updatingGrid = wasUpdating; }
+         _compatibilityGrid.Invalidate();
+     }
+-
+     private static string GetTruckDlc(string path, string workspace, IReadOnlyDictionary<string, string> dlcNames)
+     {
+         var relative = WorkspaceOriginals.GetRelativePath(workspace, path);
+@@ -923,12 +883,7 @@ internal sealed class EngineEditTab : UserControl
+ 
+     private void CompatibilityCellPainting(object? sender, DataGridViewCellPaintingEventArgs e)
+     {
+-        if (e.RowIndex < 0 && e.ColumnIndex is 2 or 3)
+-        {
+-            PaintCompatibilitySortHeader(e);
+-            e.Handled = true;
+-            return;
+-        }
++
+         if (e.RowIndex < 0 && e.ColumnIndex >= 4)
+         {
+             e.PaintBackground(e.CellBounds, false);
+@@ -946,8 +901,8 @@ internal sealed class EngineEditTab : UserControl
+             if (hasSortIcon)
+             {
+                 // Filled caret icon, matching the compact Bootstrap Icons sort direction indicators.
+-                var centerX = e.CellBounds.Left + e.CellBounds.Width / 2f;
+-                var centerY = e.CellBounds.Bottom - 8f;
++                var centerX = e.CellBounds.Right - 8f;
++                var centerY = e.CellBounds.Top + e.CellBounds.Height / 2f;
+                 PointF[] points = _sortedCompatibilityDirection == ListSortDirection.Ascending
+                     ? [new PointF(centerX - 5f, centerY + 2.5f), new PointF(centerX + 5f, centerY + 2.5f), new PointF(centerX, centerY - 4f)]
+                     : [new PointF(centerX - 5f, centerY - 2.5f), new PointF(centerX + 5f, centerY - 2.5f), new PointF(centerX, centerY + 4f)];
+@@ -996,42 +951,6 @@ internal sealed class EngineEditTab : UserControl
+         e.Handled = true;
+     }
+ 
+-    private void PaintCompatibilitySortHeader(DataGridViewCellPaintingEventArgs e)
+-    {
+-        e.PaintBackground(e.CellBounds, false);
+-        e.Paint(e.CellBounds, DataGridViewPaintParts.Border);
+-
+-        const int glyphHeight = 15;
+-        var textBounds = new Rectangle(
+-            e.CellBounds.Left + 4,
+-            e.CellBounds.Top,
+-            Math.Max(0, e.CellBounds.Width - 8),
+-            Math.Max(0, e.CellBounds.Height - glyphHeight));
+-        var graphics = e.Graphics!;
+-        var headerFont = e.CellStyle.Font ?? SystemFonts.DefaultFont;
+-        TextRenderer.DrawText(
+-            graphics,
+-            e.FormattedValue?.ToString() ?? string.Empty,
+-            headerFont,
+-            textBounds,
+-            e.CellStyle.ForeColor,
+-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+-
+-        var centerX = e.CellBounds.Left + e.CellBounds.Width / 2f;
+-        var centerY = e.CellBounds.Bottom - 8f;
+-        var hasActiveSort = e.ColumnIndex == _sortedCompatibilityColumnIndex;
+-        if (hasActiveSort)
+-        {
+-            PointF[] points = _sortedCompatibilityDirection == ListSortDirection.Ascending
+-                ? [new PointF(centerX - 5f, centerY + 2.5f), new PointF(centerX + 5f, centerY + 2.5f), new PointF(centerX, centerY - 4f)]
+-                : [new PointF(centerX - 5f, centerY - 2.5f), new PointF(centerX + 5f, centerY - 2.5f), new PointF(centerX, centerY + 4f)];
+-            using var iconBrush = new SolidBrush(e.CellStyle.ForeColor);
+-            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+-            graphics.FillPolygon(iconBrush, points);
+-            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.Default;
+-        }
+-    }
+-
+     private void UpdatedPropertyValueChanged(object? sender, DataGridViewCellEventArgs e)
+     {
+         if (e.RowIndex < 0 || e.ColumnIndex < 0 || _updatedPropertiesGrid.Rows[e.RowIndex].Tag is not EngineTableRow row) return;
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 6814332..3444ca4 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -9,6 +9,7 @@ internal sealed class TruckPropertiesTab : UserControl
+     private readonly Func<Task<RegionTruckCatalog>> _getRegions;
+     private readonly Func<IReadOnlyList<CustomTruck>>? _getEnabledTrucks;
+     private readonly Func<UnlockStarterContext>? _getStarterContext;
++    private readonly TableHeaderBehavior _tableHeaders = null!;
+     private readonly TextBox _unlockLog = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, MaxLength = int.MaxValue, AccessibleName = "Unlock rank generation report" };
+     private readonly CheckBox _showUnlockLog = new() { Text = "Show unlock log", AutoSize = true, Margin = new Padding(8, 7, 4, 0) };
+     private readonly SplitContainer _unlockLogSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1000, 500), SplitterDistance = 320, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6, Panel2Collapsed = true };
+@@ -59,7 +60,7 @@ internal sealed class TruckPropertiesTab : UserControl
+             Text = "Edit individual values or multiply all fuel capacities, then stage and apply from Start. Changed values show the original in parentheses. Amber = edited/staged; green = applied. Blank values stay unchanged." }, 0, 0);
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
+         AddButton(toolbar, "Reload properties", async () => await EnsureLoadedAsync(true));
+-        AddButton(toolbar, "Order by tier", () => { _grid.EndEdit(); _grid.Sort(_grid.Columns["Tier"]!, ListSortDirection.Ascending); });
++        AddButton(toolbar, "Order by tier", () => _tableHeaders.SetSort("Tier", SortOrder.Ascending));
+         AddButton(toolbar, "Revert unstaged edits", () => { RestoreDraft(); ShowRows(); });
+         AddButton(toolbar, "Reset to original values", () =>
+         {
+@@ -140,6 +141,8 @@ internal sealed class TruckPropertiesTab : UserControl
+             item.CheckedChanged += (_, _) => { HideHover(); column.Visible = item.Checked; };
+             _columnsMenu.Items.Add(item);
+         }
++        _tableHeaders = TableHeaderBehavior.Attach(_grid);
++        _tableHeaders.AddFilter("UnlockByExploration", value => Convert.ToString(value, CultureInfo.InvariantCulture) == "1" ? "true" : "false");
+         _grid.CellFormatting += FormatValue;
+         _grid.EditingControlShowing += (_, e) =>
+         {
+@@ -293,6 +296,7 @@ internal sealed class TruckPropertiesTab : UserControl
+             if (sorted is not null) _grid.Sort(sorted, direction);
+         }
+         finally { _updating = false; }
++        _tableHeaders.Refresh();
+         UpdateStatus();
+     }
+ 
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index b205733..9e3125a 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -9,8 +9,6 @@ internal sealed partial class RegionsTrucksTab : UserControl
+     private readonly RegionTruckAvailabilityStore _availabilityStore;
+     private readonly Func<IReadOnlyList<CustomTruck>> _getEnabledTrucks;
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+-    private readonly CheckBox _showObtainable = new() { Text = "Obtainable", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+-    private readonly CheckBox _showMission = new() { Text = "Mission", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+     private readonly Button _resetTruck = new() { Text = "Reset truck to original", AutoSize = true, Enabled = false };
+@@ -72,8 +70,14 @@ internal sealed partial class RegionsTrucksTab : UserControl
+         folderRow.Controls.Add(_reload, 3, 0);
+         layout.Controls.Add(folderRow, 0, 1);
+         var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+-        filters.Controls.Add(_showObtainable);
+-        filters.Controls.Add(_showMission);
++        var tableHeaders = TableHeaderBehavior.Attach(_trucks);
++        tableHeaders.AddFilter("Availability", value =>
++        {
++            var text = Convert.ToString(value) ?? "";
++            return text.StartsWith("Obtainable", StringComparison.Ordinal) ? "Obtainable"
++                : text.StartsWith("Mission", StringComparison.Ordinal) ? "Mission" : "Unverified";
++        }, "Unverified");
++        tableHeaders.Changed += () => { HideTruckHover(); ShowDetails(); };
+         var all = new Button { Text = "Select all regions", AutoSize = true };
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+         filters.Controls.Add(all);
+@@ -124,8 +128,6 @@ internal sealed partial class RegionsTrucksTab : UserControl
+         };
+         all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshTiles(); ApplyFilter(); };
+         clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshTiles(); ApplyFilter(); };
+-        _showObtainable.CheckedChanged += (_, _) => ApplyFilter();
+-        _showMission.CheckedChanged += (_, _) => ApplyFilter();
+         _trucks.CurrentCellChanged += (_, _) => ShowDetails();
+         _trucks.DataBindingComplete += (_, _) => { ConfigureAvailabilityCells(); ShowDetails(); };
+         _trucks.Sorted += (_, _) => ConfigureAvailabilityCells();
+@@ -309,9 +311,6 @@ internal sealed partial class RegionsTrucksTab : UserControl
+         HideTruckHover();
+         if (_catalog is null) return;
+         var rows = _catalog.Entries.Where(entry => _selectedRegions.Contains(entry.RegionCode))
+-            .Where(entry => entry.Availability == "Unverified"
+-                || (entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal) && _showObtainable.Checked)
+-                || (entry.Availability == "Mission/task only" && _showMission.Checked))
+             .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
+         var table = new DataTable();
+         var changes = _loadedWorkspace is not null ? PendingTruckReplacements.Load(_loadedWorkspace)
+diff --git a/src/SnowPakTool.Desktop/TrucksCargoTab.cs b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index 85c0c7a..ea0d2f0 100644
+--- a/src/SnowPakTool.Desktop/TrucksCargoTab.cs
++++ b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -36,6 +36,8 @@ internal sealed class TrucksCargoTab : UserControl
+         _properties.Columns.Add("Value", "Value");
+         _properties.Columns.Add("Source", "Source file");
+         _properties.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
++        TableHeaderBehavior.Attach(_cargo);
++        TableHeaderBehavior.Attach(_properties);
+         _cargo.CurrentCellChanged += (_, _) => ShowProperties();
+         _cargo.DataBindingComplete += (_, _) => ShowProperties();
+         reload.Click += async (_, _) =>
+@@ -118,6 +120,7 @@ internal sealed class TrucksCargoTab : UserControl
+             + "Mass is the sum of explicitly defined addon physics bodies; it can include carrier parts."
+             + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++        TableHeaderBehavior.Refresh(_properties);
+     }
+ 
+     private void RefreshColors(object? sender, EventArgs e)
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+index e895b45..f956f9b 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -63,8 +63,6 @@ internal sealed class TruckReplacementDialog : Form
+     private readonly RegionTruckEntry _current;
+     private readonly Func<IReadOnlyList<CustomTruck>> _getEnabled;
+     private readonly string _workspace;
+-    private readonly ComboBox _class = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+-    private readonly ComboBox _tires = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
+     private readonly CheckBox _differences = new() { Text = "Differences only", AutoSize = true, Margin = new Padding(12, 7, 4, 4) };
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 6) };
+     private readonly DataGridView _list = Grid();
+@@ -86,6 +84,11 @@ internal sealed class TruckReplacementDialog : Form
+         _workspace = workspace; _current = current; _getEnabled = getEnabled;
+         _equipmentCatalog = equipmentCatalog;
+         ConfigureGrid(_comparison);
++        var listHeaders = TableHeaderBehavior.Attach(_list);
++        listHeaders.AddFilter("Class");
++        listHeaders.AddFilter("Default tires");
++        listHeaders.Changed += () => Compare();
++        TableHeaderBehavior.Attach(_comparison);
+         _comparisonScroll = new SmoothComparisonPanel(_comparison) { Dock = DockStyle.Fill };
+         Text = "Replace truck — " + current.Truck;
+         StartPosition = FormStartPosition.CenterParent; Size = new Size(1150, 850); MinimumSize = new Size(800, 600);
+@@ -94,8 +97,6 @@ internal sealed class TruckReplacementDialog : Form
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+-        filters.Controls.Add(new Label { Text = "Class", AutoSize = true, Padding = new Padding(0, 7, 0, 0) }); filters.Controls.Add(_class);
+-        filters.Controls.Add(new Label { Text = "Default tires", AutoSize = true, Padding = new Padding(12, 7, 0, 0) }); filters.Controls.Add(_tires);
+         filters.Controls.Add(_differences);
+         layout.Controls.Add(filters, 0, 0); layout.Controls.Add(_status, 0, 1);
+         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1100, 650), SplitterDistance = 270, Panel1MinSize = 100, Panel2MinSize = 100, SplitterWidth = 6 };
+@@ -108,7 +109,6 @@ internal sealed class TruckReplacementDialog : Form
+         _comparison.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+         _comparison.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+         _comparison.SelectionMode = DataGridViewSelectionMode.CellSelect;
+-        _class.SelectedIndexChanged += (_, _) => ApplyFilter(); _tires.SelectedIndexChanged += (_, _) => ApplyFilter();
+         _differences.CheckedChanged += (_, _) => Compare();
+         _list.CurrentCellChanged += (_, _) => Compare();
+         _apply.Click += async (_, _) => await ApplyReplacementAsync();
+@@ -148,10 +148,7 @@ internal sealed class TruckReplacementDialog : Form
+     {
+         if (IsDisposed) return;
+         _trucks = trucks; _original = original; _equipmentCatalog = catalog;
+-        _updating = true;
+-        _class.Items.Add("All classes"); _class.Items.AddRange(_trucks.Select(item => item.Truck.Class).Distinct().Order().Cast<object>().ToArray());
+-        _tires.Items.Add("All tires"); _tires.Items.AddRange(_trucks.Select(item => item.Equipment.Tires).Distinct().Order().Cast<object>().ToArray());
+-        _class.SelectedIndex = _tires.SelectedIndex = 0; _updating = false; ApplyFilter();
++        _updating = false; ApplyFilter();
+     }
+ 
+     private void ApplyFilter()
+@@ -161,8 +158,7 @@ internal sealed class TruckReplacementDialog : Form
+         var table = new DataTable();
+         foreach (var column in new[] { "Truck", "Class", "Default tires", "Default frame addons", "Truck ID" }) table.Columns.Add(column);
+         table.Columns.Add("Profile", typeof(ReplacementTruck));
+-        foreach (var truck in _trucks.Where(item => (_class.SelectedIndex <= 0 || item.Truck.Class == (string)_class.SelectedItem!)
+-                     && (_tires.SelectedIndex <= 0 || item.Equipment.Tires == (string)_tires.SelectedItem!)))
++        foreach (var truck in _trucks)
+             table.Rows.Add(truck.Truck.Name, truck.Truck.Class, truck.Equipment.Tires, truck.Equipment.FrameAddons, truck.Truck.Code, truck);
+         var sort = (_list.DataSource as DataTable)?.DefaultView.Sort;
+         if (!string.IsNullOrEmpty(sort)) table.DefaultView.Sort = sort;
+@@ -225,7 +221,7 @@ internal sealed class TruckReplacementDialog : Form
+         if (!enabled.Any(truck => truck.Code.Equals(selected.Truck.Code, StringComparison.OrdinalIgnoreCase)))
+         { _status.Text = "This truck is no longer enabled. Close and reopen the replacement window."; return; }
+         _saving = true; _apply.Enabled = false; _apply.Text = "Saving…";
+-        _list.Enabled = _class.Enabled = _tires.Enabled = false;
++        _list.Enabled = false;
+         _status.Text = "Saving the pending replacement…";
+         try
+         {
+@@ -245,7 +241,7 @@ internal sealed class TruckReplacementDialog : Form
+                 await InvokeAsync(() =>
+                 {
+                     _saving = false; _apply.Text = QueuedReplacement is null ? "Apply replacement" : "Draft saved";
+-                    _list.Enabled = _class.Enabled = _tires.Enabled = true;
++                    _list.Enabled = true;
+                     _apply.Enabled = QueuedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
+                         && !choice.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase);
+                 });
+diff --git a/src/SnowPakTool.Desktop/StartChangesPanel.cs b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+index 82d008b..be82cf8 100644
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -121,6 +121,7 @@ internal sealed class StartChangesPanel : UserControl
+         var data = new DataTable(); foreach (var column in new[] { "State", "File / target", "Change", "Before", "After" }) data.Columns.Add(column);
+         data.Columns.Add("Entry", typeof(WorkspaceChange));
+         foreach (var change in changes) data.Rows.Add(change.State, change.Target, change.Property, change.Before, change.After, change);
++        TableHeaderBehavior.Attach(grid);
+         grid.DataSource = data; grid.Columns["Entry"]!.Visible = false; grid.Columns["State"]!.FillWeight = 45;
+         PaintRows(grid);
+     }
+diff --git a/src/SnowPakTool.Desktop/FileConflictReviewDialog.cs b/src/SnowPakTool.Desktop/FileConflictReviewDialog.cs
+index b36c2ff..10f4901 100644
+--- a/src/SnowPakTool.Desktop/FileConflictReviewDialog.cs
++++ b/src/SnowPakTool.Desktop/FileConflictReviewDialog.cs
+@@ -40,7 +40,12 @@ internal sealed class FileConflictReviewDialog : Form
+         _grid.Columns.Add(new DataGridViewButtonColumn { Name = "Pak", HeaderText = "New changed file", Text = "Use PAK", UseColumnTextForButtonValue = true, FillWeight = 22, FlatStyle = FlatStyle.Flat });
+         _grid.Columns.Add(new DataGridViewButtonColumn { Name = "Workspace", HeaderText = "Already in workspace", Text = "Keep workspace", UseColumnTextForButtonValue = true, FillWeight = 28, FlatStyle = FlatStyle.Flat });
+         _grid.Columns.Add(new DataGridViewButtonColumn { Name = "View", HeaderText = "Inspect", Text = "View changes", UseColumnTextForButtonValue = true, FillWeight = 22, FlatStyle = FlatStyle.Flat });
+-        foreach (var item in Items) _grid.Rows.Add(item.RelativePath, "Use PAK", "Keep workspace", "View changes");
++        foreach (var item in Items)
++        {
++            var index = _grid.Rows.Add(item.RelativePath, "Use PAK", "Keep workspace", "View changes");
++            _grid.Rows[index].Tag = item;
++        }
++        TableHeaderBehavior.Attach(_grid);
+         _grid.CellContentClick += GridCellContentClick;
+ 
+         var takeAll = new Button { Text = "Use initial.pak", AutoSize = true };
+@@ -50,7 +55,8 @@ internal sealed class FileConflictReviewDialog : Form
+             {
+                 Items[i].FinalPath = CopyToEdits(Items[i].PakPath);
+                 Items[i].SelectedAction = "Pak";
+-                UpdateRowVisual(i);
++                var row = _grid.Rows.Cast<DataGridViewRow>().Single(row => ReferenceEquals(row.Tag, Items[i]));
++                UpdateRowVisual(row.Index);
+             }
+         };
+         var cancel = new Button { Text = "Cancel unpack", AutoSize = true, DialogResult = DialogResult.Cancel };
+@@ -83,7 +89,7 @@ internal sealed class FileConflictReviewDialog : Form
+     private void GridCellContentClick(object? sender, DataGridViewCellEventArgs e)
+     {
+         if (e.RowIndex < 0 || e.RowIndex >= Items.Count) return;
+-        var item = Items[e.RowIndex];
++        var item = (Item)_grid.Rows[e.RowIndex].Tag!;
+         switch (_grid.Columns[e.ColumnIndex].Name)
+         {
+             case "Pak": item.FinalPath = CopyToEdits(item.PakPath); item.SelectedAction = "Pak"; break;
+@@ -110,7 +116,7 @@ internal sealed class FileConflictReviewDialog : Form
+         foreach (var columnName in new[] { "Pak", "Workspace", "View" })
+         {
+             var cell = _grid.Rows[rowIndex].Cells[columnName];
+-            var selected = Items[rowIndex].SelectedAction == columnName;
++            var selected = ((Item)_grid.Rows[rowIndex].Tag!).SelectedAction == columnName;
+             cell.Style.BackColor = selected ? AppColors.Get("ConflictSelected") : SystemColors.Control;
+             cell.Style.ForeColor = SystemColors.ControlText;
+             cell.Style.SelectionBackColor = selected ? AppColors.Get("ConflictSelectedFocus") : SystemColors.Control;
+diff --git a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+index e77fc59..0401a28 100644
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -233,6 +233,8 @@ internal sealed class ExperienceEditorTab : UserControl
+         });
+     }
+ 
++    private DataGridViewRow[] RankRows => _grid.Rows.Cast<DataGridViewRow>().OrderBy(row => Convert.ToInt32(row.Cells["Step"].Value, CultureInfo.InvariantCulture)).ToArray();
++
+     public void EnsureLoaded()
+     {
+         if (!string.Equals(_loadedWorkspace, _getWorkspacePath(), StringComparison.OrdinalIgnoreCase))
+@@ -298,6 +300,7 @@ internal sealed class ExperienceEditorTab : UserControl
+         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Step", HeaderText = "Rank", ReadOnly = true, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, FillWeight = 23, MinimumWidth = 26 });
+         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "OriginalXP", HeaderText = "Original XP", ReadOnly = true, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, FillWeight = 38.5f, MinimumWidth = 55 });
+         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "UpdatedXP", HeaderText = "Updated XP", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, FillWeight = 38.5f, MinimumWidth = 55 });
++        TableHeaderBehavior.Attach(_grid);
+         _grid.Columns["Step"]!.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+         _grid.Columns["OriginalXP"]!.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+         _grid.Columns["UpdatedXP"]!.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+@@ -707,7 +710,7 @@ internal sealed class ExperienceEditorTab : UserControl
+             var baseline = _stagedRank?.Values ?? _loadedValues;
+             if (baseline.Count != _grid.Rows.Count) return true;
+             for (var i = 0; i < baseline.Count; i++)
+-                if (!int.TryParse(Convert.ToString(_grid.Rows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture), out var value) || value != baseline[i])
++                if (!int.TryParse(Convert.ToString(RankRows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture), out var value) || value != baseline[i])
+                     return true;
+             return false;
+         }
+@@ -791,7 +794,7 @@ internal sealed class ExperienceEditorTab : UserControl
+             if (_stagedRank?.Values.Count == _grid.Rows.Count)
+             {
+                 _isLoading = true;
+-                for (var i = 0; i < _grid.Rows.Count; i++) _grid.Rows[i].Cells["UpdatedXP"].Value = _stagedRank.Values[i];
++                for (var i = 0; i < _grid.Rows.Count; i++) RankRows[i].Cells["UpdatedXP"].Value = _stagedRank.Values[i];
+                 _isLoading = false;
+             }
+             ApplySectionHeights();
+@@ -1541,7 +1544,7 @@ internal sealed class ExperienceEditorTab : UserControl
+     private bool TryReadGridColumnValues(string columnName, out List<int> values)
+     {
+         values = new List<int>(_grid.Rows.Count);
+-        foreach (DataGridViewRow row in _grid.Rows)
++        foreach (DataGridViewRow row in RankRows)
+         {
+             if (!int.TryParse(Convert.ToString(row.Cells[columnName].Value, CultureInfo.InvariantCulture), NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value < 0)
+                 return false;
+@@ -1594,7 +1597,7 @@ internal sealed class ExperienceEditorTab : UserControl
+ 
+         _isLoading = true;
+         for (var i = 0; i < stepCount; i++)
+-            _grid.Rows[i].Cells["UpdatedXP"].Value = allocatedHundreds[i] * 100L;
++            RankRows[i].Cells["UpdatedXP"].Value = allocatedHundreds[i] * 100L;
+         _isLoading = false;
+         _updatedXpTotal.Text = "Updated values are rounded to 100 XP.";
+         UpdateEditorContentLayout();
+diff --git a/README.md b/README.md
+index a24ad00..2cb4010 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,8 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++Sortable/filterable tables share the same header controls across Owned content, Engine compatibility, Truck properties, Map trucks, Cargo and its details, replacement candidates/comparisons, Start change lists, rank XP values, and file-conflict review. Click a heading to cycle ascending -> descending -> off; off restores the original/model order while retaining column filters. Funnels open checkbox filters, filled blue when active; right-click headers for explicit sort/filter/reset commands. Filters combine across columns, support numeric and blank values, and remain applied when the table refreshes. Class/DLC/tire/availability dropdown filters now live in their respective headers. Map availability keeps unverified placements visible and editable. Region tiles, column visibility and comparison-mode controls retain their separate purposes; the XP region list continues to follow Region progression. Sorting/filtering affect the display, so rank values retain their rank identities, row actions retain their record identities, and hidden records remain part of staging/Apply as before.
++
+ On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to cycle ascending, descending, then off. Off restores the original base-game/release order and removes the arrow; active filters stay in effect. The active sort arrow appears at the right of the heading. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
+ 
+ Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 5a0a5f2..d2ea79f 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -247,7 +247,7 @@ internal static class Program
+         Check(search.Find("Season 19")
+             && ((RegionTileButton)tiles["us_19"]).SearchMatch && selected.Count == 2, "Search finds region labels outside the current table without changing region selection");
+         search.Clear();
+-        Field<CheckBox>(tab, "_showObtainable").Checked = false;
++        TableHeaderBehavior.Attach(grid).AddFilter("Availability").SelectValues(new[] { "Mission" });
+         Check(grid.Rows.Count == catalog.Entries.Count(entry => selected.Contains(entry.RegionCode) && entry.Availability == "Mission/task only"), "Mission filter");
+         if (grid.Rows.Count > 0) grid.CurrentCell = grid.Rows[0].Cells[0];
+         Check(!Field<TextBox>(tab, "_details").Text.Contains("AVAILABILITY EVIDENCE")
+@@ -267,7 +267,7 @@ internal static class Program
+         // Unknown fixture placements remain visible when both filters are off and can be resolved in the table.
+         SetField(tab, "_catalog", sample);
+         selected.Clear(); selected.Add("us_01");
+-        Field<CheckBox>(tab, "_showMission").Checked = false;
++        TableHeaderBehavior.Attach(grid).AddFilter("Availability").SelectValues(Array.Empty<string>());
+         Invoke(tab, "ApplyFilter");
+         Invoke(tab, "UpdateTileSummaries");
+         Check(grid.Rows.Count == 2 && grid.Rows.Cast<DataGridViewRow>().All(row => row.Cells["Availability"] is DataGridViewComboBoxCell && !row.Cells["Availability"].ReadOnly), "Unknown rows stay visible with editable availability dropdowns");
+@@ -280,7 +280,7 @@ internal static class Program
+         var resolved = reopenedStore.Apply(target);
+         Check(resolved.Availability == "Mission/task only" && resolved.AvailabilityEditable && resolved.Evidence.Contains("User-selected"), "Selection persists through a new store instance");
+         Check(reopenedStore.Apply(target with { MapCode = "level_us_02_01" }).Availability == "Unverified", "Manual choices are scoped by map and placement ID");
+-        Field<CheckBox>(tab, "_showMission").Checked = true;
++        TableHeaderBehavior.Attach(grid).AddFilter("Availability").SelectValues(new[] { "Mission" });
+         Check(grid.Rows.Count == 3 && grid.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["Availability"] is DataGridViewComboBoxCell && Convert.ToString(row.Cells["Availability"].Value) == "Mission/task only"), "Manual resolutions can be amended later");
+         Console.WriteLine("PASS: map equipment, confirmed exceptions, checkbox filters, overlay search, tile counts, editable unknowns and persistent availability choices.");
+     }
+@@ -600,7 +600,7 @@ internal static class Program
+         Check(list.Rows[0].Cells["Truck"].Value?.ToString() == "Tayga 6436", "Candidate list sorts by column headers");
+         list.CurrentCell = list.Rows[0].Cells[0];
+         // Change selection before the uncached comparison finishes; its result must not replace the new one.
+-        var classes = Field<ComboBox>(dialog, "_class"); classes.SelectedItem = "Scout";
++        TableHeaderBehavior.Attach(list).AddFilter("Class").SelectValues(new[] { "Scout" });
+         Check(list.Rows.Count == 1 && list.Rows[0].Cells["Truck ID"].Value?.ToString() == "chevrolet_ck1500", "Class filter restricts replacement candidates");
+         Check(comparison.Columns[2].HeaderText.Contains("Chevrolet CK1500"), "Comparison follows the filtered selection");
+         var comparisonClock = System.Diagnostics.Stopwatch.StartNew();
+@@ -608,8 +608,8 @@ internal static class Program
+         { Application.DoEvents(); Thread.Sleep(5); }
+         Application.DoEvents();
+         Check(comparison.Columns[2].HeaderText.Contains("Chevrolet CK1500"), "A late background result cannot overwrite the current candidate");
+-        var tires = Field<ComboBox>(dialog, "_tires");
+-        tires.SelectedItem = Field<IReadOnlyList<ReplacementTruck>>(dialog, "_trucks").Single(item => item.Truck.Code == "chevrolet_ck1500").Equipment.Tires;
++        var tires = TableHeaderBehavior.Attach(list).AddFilter("Default tires");
++        tires.SelectValues(new[] { Field<IReadOnlyList<ReplacementTruck>>(dialog, "_trucks").Single(item => item.Truck.Code == "chevrolet_ck1500").Equipment.Tires });
+         Check(list.Rows.Count == 1, "Tire filter combines with class filter");
+         Field<CheckBox>(dialog, "_differences").Checked = true;
+         Check(comparison.Rows.Count > 0 && comparison.Rows.Cast<DataGridViewRow>().All(row => !Equals(row.Cells[1].Value, row.Cells[2].Value)), "Differences-only comparison hides equal properties");
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index a89e81e..0ed7fcc 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -50,4 +50,4 @@
+   <ItemGroup>
+     <EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png" LogicalName="SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)" />
+   </ItemGroup>
+-<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup></Project>
++<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>
+diff --git a/.checks/CargoRegression/CargoRegression.csproj b/.checks/CargoRegression/CargoRegression.csproj
+index 621c533..93bc6d9 100644
+--- a/.checks/CargoRegression/CargoRegression.csproj
++++ b/.checks/CargoRegression/CargoRegression.csproj
+@@ -15,4 +15,4 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs" />
+   </ItemGroup>
+-</Project>
++<ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>
+diff --git a/src/SnowPakTool.Desktop/TableHeaderBehavior.cs b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+new file mode 100644
+index 0000000..f160a87
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+@@ -0,0 +1,302 @@
++using System.Collections;
++using System.ComponentModel;
++using System.Data;
++using System.Globalization;
++using System.Runtime.CompilerServices;
++
++namespace SnowPakTool.Desktop;
++
++// Shared by sortable/filterable tables. Model order and row identities stay independent of display order.
++internal sealed class TableHeaderBehavior
++{
++    private static readonly ConditionalWeakTable<DataGridView, TableHeaderBehavior> Instances = new();
++    private readonly DataGridView _grid;
++    private readonly Action? _restore;
++    private readonly Action<DataGridViewColumn, ListSortDirection>? _sort;
++    private readonly Func<DataGridViewColumn, bool>? _customHeader;
++    private readonly Dictionary<string, HeaderValueFilter> _filters = new(StringComparer.Ordinal);
++    private readonly Dictionary<DataGridViewRow, long> _defaultOrder = new();
++    private readonly HashSet<string> _sortable = [];
++    private long _nextOrder;
++    private bool _busy;
++    private bool _queued;
++    private bool _hadActiveFilters;
++    private string? _sorted;
++    private SortOrder _direction;
++    public event Action? Changed;
++
++    public static TableHeaderBehavior Attach(DataGridView grid, Action? restore = null,
++        Action<DataGridViewColumn, ListSortDirection>? sort = null, Func<DataGridViewColumn, bool>? customHeader = null)
++        => Instances.GetValue(grid, _ => new(grid, restore, sort, customHeader));
++    public static void Refresh(DataGridView grid) { if (Instances.TryGetValue(grid, out var behavior)) behavior.Refresh(); }
++
++    private TableHeaderBehavior(DataGridView grid, Action? restore, Action<DataGridViewColumn, ListSortDirection>? sort,
++        Func<DataGridViewColumn, bool>? customHeader)
++    {
++        _grid = grid; _restore = restore; _sort = sort; _customHeader = customHeader;
++        grid.ColumnHeaderMouseClick += HeaderClick;
++        grid.ColumnAdded += (_, e) => Install(e.Column);
++        grid.DataBindingComplete += (_, _) => Refresh();
++        grid.RowsAdded += (_, _) => QueueRefresh();
++        grid.CellValueChanged += (_, _) => QueueRefresh();
++        grid.RowsRemoved += (_, _) =>
++        {
++            if (grid.Rows.Count == 0) { _defaultOrder.Clear(); _nextOrder = 0; }
++            QueueRefresh();
++        };
++        grid.Disposed += (_, _) => { foreach (var filter in _filters.Values) filter.Dispose(); };
++        foreach (DataGridViewColumn column in grid.Columns) Install(column);
++        RememberOrder();
++    }
++
++    public HeaderValueFilter AddFilter(string columnName, Func<object?, string>? valueGroup = null, params string[] alwaysIncluded)
++    {
++        if (_filters.TryGetValue(columnName, out var existing))
++        {
++            if (valueGroup is null) return existing;
++            existing.Dispose(); _filters.Remove(columnName);
++        }
++        var filter = new HeaderValueFilter(columnName, valueGroup, alwaysIncluded);
++        _filters.Add(columnName, filter);
++        filter.Changed += () => { ApplyFilters(); Changed?.Invoke(); };
++        if (_grid.Columns.Contains(columnName)) Install(_grid.Columns[columnName]!);
++        return filter;
++    }
++
++    private void Install(DataGridViewColumn column)
++    {
++        if (column.SortMode != DataGridViewColumnSortMode.NotSortable &&
++            (column.ValueType is null || column.ValueType == typeof(string) || typeof(IComparable).IsAssignableFrom(column.ValueType)))
++            _sortable.Add(column.Name);
++        if (column.ValueType is not null && column.ValueType != typeof(string) && !typeof(IComparable).IsAssignableFrom(column.ValueType))
++        { _sortable.Remove(column.Name); column.SortMode = DataGridViewColumnSortMode.NotSortable; }
++        var sortable = _sortable.Contains(column.Name);
++        if (sortable && !_filters.ContainsKey(column.Name) && _customHeader?.Invoke(column) != true) AddFilter(column.Name);
++        var filterable = _filters.ContainsKey(column.Name);
++        if (!sortable && !filterable) return;
++        if (sortable) column.SortMode = DataGridViewColumnSortMode.Programmatic;
++        if (_customHeader?.Invoke(column) != true && column.HeaderCell is not TableHeaderCell)
++        {
++            var old = column.HeaderCell;
++            column.HeaderCell = new TableHeaderCell(sortable, filterable, () => _filters.TryGetValue(column.Name, out var filter) && filter.IsFiltered)
++            { Value = old.Value ?? column.HeaderText, Style = old.Style };
++            var menu = new ContextMenuStrip();
++            if (sortable)
++            {
++                menu.Items.Add("Sort ascending", null, (_, _) => SetSort(column.Name, SortOrder.Ascending));
++                menu.Items.Add("Sort descending", null, (_, _) => SetSort(column.Name, SortOrder.Descending));
++                menu.Items.Add("Sort off (default order)", null, (_, _) => SetSort(null, SortOrder.None));
++            }
++            menu.Opening += (_, _) =>
++            {
++                // Filters may be registered after auto-generated columns are installed.
++                foreach (ToolStripItem item in menu.Items.Cast<ToolStripItem>().Where(item => item.Tag as string == "filter").ToArray()) { menu.Items.Remove(item); item.Dispose(); }
++                if (_filters.TryGetValue(column.Name, out var filter))
++                {
++                    menu.Items.Add(new ToolStripMenuItem("Filter " + column.HeaderText + "…", null, (_, _) => ShowFilter(column)) { Tag = "filter" });
++                    menu.Items.Add(new ToolStripMenuItem("Clear filter", null, (_, _) => filter.Clear()) { Tag = "filter" });
++                }
++            };
++            column.HeaderCell.ContextMenuStrip = menu;
++            _grid.Disposed += (_, _) => menu.Dispose();
++        }
++        if (column.HeaderCell is TableHeaderCell header) header.HasFilter = filterable;
++        column.HeaderCell.ToolTipText = column.HeaderText + "\nClick heading: ascending → descending → off."
++            + (filterable ? " Click funnel to filter. " + _filters[column.Name].Description : "") + " Right-click for commands.";
++    }
++
++    private void HeaderClick(object? sender, DataGridViewCellMouseEventArgs e)
++    {
++        if (e.Button != MouseButtons.Left || e.ColumnIndex < 0) return;
++        var column = _grid.Columns[e.ColumnIndex];
++        var bounds = _grid.GetCellDisplayRectangle(e.ColumnIndex, -1, true);
++        if (_filters.ContainsKey(column.Name) && TableHeaderCell.FilterBounds(new(0, 0, bounds.Width, bounds.Height), _grid.DeviceDpi / 96f).Contains(e.X, e.Y))
++        { ShowFilter(column); return; }
++        if (!_sortable.Contains(column.Name)) return;
++        SetSort(column.Name, _sorted != column.Name ? SortOrder.Ascending : _direction switch
++        { SortOrder.Ascending => SortOrder.Descending, SortOrder.Descending => SortOrder.None, _ => SortOrder.Ascending });
++    }
++
++    private void ShowFilter(DataGridViewColumn column)
++    {
++        if (!_grid.EndEdit()) return;
++        RefreshOptions();
++        var bounds = _grid.GetCellDisplayRectangle(column.Index, -1, true);
++        _filters[column.Name].Show(_grid, new Point(Math.Max(0, bounds.Right - 280), bounds.Bottom));
++    }
++
++    public void SetSort(string? columnName, SortOrder direction)
++    {
++        if (!_grid.EndEdit()) return;
++        RememberOrder();
++        var previous = (_sorted, _direction);
++        _sorted = direction == SortOrder.None ? null : columnName;
++        _direction = direction;
++        try { ApplySort(); }
++        catch { (_sorted, _direction) = previous; throw; }
++        Changed?.Invoke();
++    }
++
++    private void ApplySort()
++    {
++        var table = (_grid.DataSource as DataTable) ?? (_grid.DataSource as DataView)?.Table;
++        if (_sorted is not null && _grid.Columns.Contains(_sorted))
++        {
++            var column = _grid.Columns[_sorted]!;
++            var direction = _direction == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
++            if (_sort is not null) _sort(column, direction);
++            else if (table is not null) table.DefaultView.Sort = EscapeColumn(column.DataPropertyName.Length > 0 ? column.DataPropertyName : column.Name) + (direction == ListSortDirection.Ascending ? " ASC" : " DESC");
++            else _grid.Sort(column, direction);
++        }
++        else
++        {
++            _sorted = null; _direction = SortOrder.None;
++            if (_restore is not null) _restore();
++            else if (table is not null) table.DefaultView.Sort = "";
++            else if (_grid.Rows.Count > 0) _grid.Sort(new DefaultOrderComparer(_defaultOrder));
++        }
++        foreach (DataGridViewColumn column in _grid.Columns)
++            column.HeaderCell.SortGlyphDirection = _customHeader?.Invoke(column) != true && column.Name == _sorted ? _direction : SortOrder.None;
++        _grid.Invalidate();
++    }
++
++    private void RememberOrder()
++    {
++        if (_grid.DataSource is not null) return;
++        foreach (DataGridViewRow row in _grid.Rows)
++            if (!row.IsNewRow && !_defaultOrder.ContainsKey(row)) _defaultOrder.Add(row, _nextOrder++);
++    }
++
++    private void QueueRefresh()
++    {
++        if (_busy || _queued || !_grid.IsHandleCreated || _grid.IsDisposed) return;
++        _queued = true;
++        _grid.BeginInvoke((Action)(() => { _queued = false; if (!_grid.IsDisposed) Refresh(); }));
++    }
++
++    public void Refresh()
++    {
++        if (_busy || _grid.IsDisposed) return;
++        _busy = true;
++        try
++        {
++            RememberOrder();
++            RefreshOptions();
++            foreach (DataGridViewColumn column in _grid.Columns) Install(column);
++            ApplyFilters();
++            // Off leaves freshly populated tables in their model order, without an unnecessary sort.
++            if (_sorted is not null) ApplySort();
++        }
++        finally { _busy = false; }
++    }
++
++    private void RefreshOptions()
++    {
++        var table = (_grid.DataSource as DataTable) ?? (_grid.DataSource as DataView)?.Table;
++        foreach (var filter in _filters.Values)
++        {
++            if (!_grid.Columns.Contains(filter.ColumnName)) continue;
++            var column = _grid.Columns[filter.ColumnName]!;
++            filter.SetOptions(table is not null && table.Columns.Contains(column.DataPropertyName)
++                ? table.Rows.Cast<DataRow>().Select(row => row[column.DataPropertyName])
++                : _grid.Rows.Cast<DataGridViewRow>().Where(row => !row.IsNewRow).Select(row => row.Cells[column.Index].Value));
++        }
++    }
++
++    public void ApplyFilters()
++    {
++        if (_filters.Count == 0) return;
++        var table = (_grid.DataSource as DataTable) ?? (_grid.DataSource as DataView)?.Table;
++        if (table is not null)
++        {
++            var clauses = _filters.Values.Where(filter => filter.IsFiltered && table.Columns.Contains(filter.ColumnName)).Select(filter =>
++            {
++                // Match grouped choices to actual raw values (e.g. Obtainable task/discovery variants).
++                var values = table.Rows.Cast<DataRow>().Select(row => row[filter.ColumnName]).Distinct().Where(filter.Includes)
++                    .Select(value => FilterTerm(filter.ColumnName, value)).ToArray();
++                return values.Length == 0 ? "false" : "(" + string.Join(" OR ", values) + ")";
++            });
++            var expression = string.Join(" AND ", clauses.Select(clause => "(" + clause + ")"));
++            if (table.DefaultView.RowFilter != expression) table.DefaultView.RowFilter = expression;
++        }
++        else
++        {
++            var active = _filters.Values.Any(filter => filter.IsFiltered);
++            if (!active && !_hadActiveFilters) return;
++            _hadActiveFilters = active;
++            bool Includes(DataGridViewRow row) => _filters.Values.All(filter => !_grid.Columns.Contains(filter.ColumnName) || filter.Includes(row.Cells[filter.ColumnName].Value));
++            if (_grid.CurrentCell is { OwningRow: { } current } && !Includes(current)) _grid.CurrentCell = null;
++            foreach (DataGridViewRow row in _grid.Rows)
++                if (!row.IsNewRow) row.Visible = Includes(row);
++        }
++        foreach (DataGridViewColumn column in _grid.Columns) Install(column);
++        _grid.Invalidate();
++    }
++
++    private static string EscapeColumn(string name) => "[" + name.Replace("\\", "\\\\").Replace("]", "\\]") + "]";
++    private static string FilterTerm(string name, object value)
++    {
++        var column = EscapeColumn(name);
++        if (value is null or DBNull) return column + " IS NULL";
++        if (value is bool flag) return column + (flag ? " = true" : " = false");
++        if (value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal)
++            return column + " = " + Convert.ToString(value, CultureInfo.InvariantCulture);
++        return "Convert(" + column + ", 'System.String') = '" + Convert.ToString(value, CultureInfo.InvariantCulture)!.Replace("'", "''") + "'";
++    }
++    private sealed class DefaultOrderComparer(Dictionary<DataGridViewRow, long> order) : IComparer
++    {
++        public int Compare(object? x, object? y) => order.GetValueOrDefault((DataGridViewRow)x!).CompareTo(order.GetValueOrDefault((DataGridViewRow)y!));
++    }
++}
++
++internal sealed class HeaderValueFilter : IDisposable
++{
++    private readonly Func<object?, string> _group;
++    private readonly HashSet<string> _always;
++    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
++    private List<string> _values = [];
++    private bool _all = true;
++    private readonly ToolStripDropDown _popup = new() { AutoClose = true };
++    public string ColumnName { get; }
++    public event Action? Changed;
++    public bool IsFiltered => !_all;
++    public string Description => $"{_values.Count(value => _all || _selected.Contains(value) || _always.Contains(value))} of {_values.Count} selected.";
++    public HeaderValueFilter(string columnName, Func<object?, string>? group, IEnumerable<string> alwaysIncluded)
++    { ColumnName = columnName; _group = group ?? (value => Convert.ToString(value, CultureInfo.InvariantCulture) ?? ""); _always = new(alwaysIncluded, StringComparer.OrdinalIgnoreCase); }
++    public void SetOptions(IEnumerable<object?> values) => _values = values.Select(_group).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.CurrentCultureIgnoreCase).ToList();
++    public bool Includes(object? value) => _all || _selected.Contains(_group(value)) || _always.Contains(_group(value));
++    public void Clear() { _all = true; _selected.Clear(); Changed?.Invoke(); }
++    public void SelectValues(IEnumerable<string> values) { _all = false; _selected.Clear(); _selected.UnionWith(values); Changed?.Invoke(); }
++    public void Show(Control owner, Point location)
++    {
++        foreach (ToolStripItem item in _popup.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
++        _popup.Items.Clear();
++        var options = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false, HorizontalScrollbar = true };
++        foreach (var value in _values) options.Items.Add(value.Length == 0 ? "(blank)" : value, _all || _selected.Contains(value) || _always.Contains(value));
++        var commands = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 32, WrapContents = false };
++        var all = new Button { Text = "Select all", AutoSize = true }; var none = new Button { Text = "Select none", AutoSize = true };
++        commands.Controls.Add(all); commands.Controls.Add(none);
++        var content = new Panel { Size = new Size(280, 330), Padding = new Padding(4) }; content.Controls.Add(options); content.Controls.Add(commands);
++        _popup.Items.Add(new ToolStripControlHost(content) { AutoSize = false, Size = content.Size, Margin = Padding.Empty, Padding = Padding.Empty });
++        var updating = false;
++        void SelectAll(bool selected)
++        {
++            updating = true; for (var index = 0; index < options.Items.Count; index++) options.SetItemChecked(index, selected || _always.Contains(_values[index])); updating = false;
++            if (selected) Clear(); else SelectValues([]);
++        }
++        all.Click += (_, _) => SelectAll(true); none.Click += (_, _) => SelectAll(false);
++        options.ItemCheck += (_, e) =>
++        {
++            if (updating) return;
++            var value = _values[e.Index];
++            if (_always.Contains(value)) { e.NewValue = CheckState.Checked; return; }
++            if (_all) { _selected.UnionWith(_values); _all = false; }
++            if (e.NewValue == CheckState.Checked) _selected.Add(value); else _selected.Remove(value);
++            if (_values.All(item => _selected.Contains(item) || _always.Contains(item))) _all = true;
++            Changed?.Invoke();
++        };
++        _popup.AccessibleName = ColumnName + " filter";
++        _popup.Show(owner, location);
++    }
++    public void Dispose() => _popup.Dispose();
++}
+diff --git a/src/SnowPakTool.Desktop/TableHeaderCell.cs b/src/SnowPakTool.Desktop/TableHeaderCell.cs
+new file mode 100644
+index 0000000..1ef6b7a
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TableHeaderCell.cs
+@@ -0,0 +1,66 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed class TableHeaderCell : DataGridViewColumnHeaderCell
++{
++    private Func<bool> _isFiltered;
++    public bool HasFilter { get; set; } = true;
++    public TableHeaderCell() : this(() => false) { }
++    public TableHeaderCell(Func<bool> isFiltered) => _isFiltered = isFiltered;
++    public TableHeaderCell(bool sortable, bool hasFilter, Func<bool> isFiltered) : this(isFiltered) => HasFilter = hasFilter;
++    public override object Clone()
++    {
++        var clone = (TableHeaderCell)base.Clone();
++        clone._isFiltered = _isFiltered;
++        clone.HasFilter = HasFilter;
++        return clone;
++    }
++    internal static Rectangle FilterBounds(Rectangle bounds, float scale) => new(bounds.Right - (int)(24 * scale), bounds.Top, (int)(24 * scale), bounds.Height);
++
++    protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
++        DataGridViewElementStates dataGridViewElementState, object? value, object? formattedValue, string? errorText,
++        DataGridViewCellStyle cellStyle, DataGridViewAdvancedBorderStyle advancedBorderStyle, DataGridViewPaintParts paintParts)
++    {
++        // The themed base header paints its native sort arrow even without ContentForeground,
++        // overlapping our funnel. Paint only header chrome here, then our text and icons below.
++        if ((paintParts & (DataGridViewPaintParts.Background | DataGridViewPaintParts.ContentBackground)) != 0)
++        {
++            var element = System.Windows.Forms.VisualStyles.VisualStyleElement.Header.Item.Normal;
++            if (Application.RenderWithVisualStyles && System.Windows.Forms.VisualStyles.VisualStyleRenderer.IsElementDefined(element))
++                new System.Windows.Forms.VisualStyles.VisualStyleRenderer(element).DrawBackground(graphics, cellBounds);
++            else
++            {
++                using var background = new SolidBrush(cellStyle.BackColor);
++                graphics.FillRectangle(background, cellBounds);
++            }
++        }
++        if (paintParts.HasFlag(DataGridViewPaintParts.Border))
++        {
++            using var border = new Pen(SystemColors.ControlDark);
++            graphics.DrawLine(border, cellBounds.Right - 1, cellBounds.Top, cellBounds.Right - 1, cellBounds.Bottom - 1);
++            graphics.DrawLine(border, cellBounds.Left, cellBounds.Bottom - 1, cellBounds.Right - 1, cellBounds.Bottom - 1);
++        }
++        if (!paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
++        var scale = graphics.DpiX / 96f;
++        var filter = FilterBounds(cellBounds, scale);
++        var text = new Rectangle(cellBounds.Left + (int)(4 * scale), cellBounds.Top, Math.Max(0, cellBounds.Width - (int)((HasFilter ? 44 : 24) * scale)), cellBounds.Height);
++        TextRenderer.DrawText(graphics, Convert.ToString(formattedValue), cellStyle.Font, text, cellStyle.ForeColor,
++            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
++        var y = cellBounds.Top + cellBounds.Height / 2f;
++        var x = HasFilter ? filter.Left - 8 * scale : cellBounds.Right - 12 * scale;
++        if (SortGlyphDirection != SortOrder.None)
++        {
++            var sign = SortGlyphDirection == SortOrder.Ascending ? 1 : -1;
++            using var brush = new SolidBrush(cellStyle.ForeColor);
++            PointF[] arrow = [new(x - 4 * scale, y + sign * 3 * scale), new(x + 4 * scale, y + sign * 3 * scale), new(x, y - sign * 3 * scale)];
++            graphics.FillPolygon(brush, arrow);
++        }
++        if (!HasFilter) return;
++        x = filter.Left + filter.Width / 2f;
++        PointF[] funnel = [new(x - 5 * scale, y - 5 * scale), new(x + 5 * scale, y - 5 * scale), new(x + 1.5f * scale, y),
++            new(x + 1.5f * scale, y + 4 * scale), new(x - 1.5f * scale, y + 6 * scale), new(x - 1.5f * scale, y)];
++        using var pen = new Pen(_isFiltered() ? SystemColors.Highlight : cellStyle.ForeColor, scale);
++        if (_isFiltered()) { using var brush = new SolidBrush(SystemColors.Highlight); graphics.FillPolygon(brush, funnel); }
++        else graphics.DrawPolygon(pen, funnel);
++    }
++}
++
+diff --git a/.checks/SharedTableHeaders/Program.cs b/.checks/SharedTableHeaders/Program.cs
+new file mode 100644
+index 0000000..57e1add
+--- /dev/null
++++ b/.checks/SharedTableHeaders/Program.cs
+@@ -0,0 +1,170 @@
++using System.Data;
++using System.Globalization;
++using System.Reflection;
++using System.Linq.Expressions;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    private static object? Call(object target, string name, params object?[] args) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(target, args);
++    private static object? Static(string type, string name, params object?[] args) => T(type).GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
++    private static object Field(object target, string name) => target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(target)!;
++    private static object Attach(DataGridView grid) => Static("TableHeaderBehavior", "Attach", grid, null, null, null)!;
++    private static object Filter(object headers, string name) => Call(headers, "AddFilter", name, null, Array.Empty<string>())!;
++    private static void Select(object filter, params string[] values) => Call(filter, "SelectValues", (object)values);
++    private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static void Click(DataGridView grid, string column)
++    {
++        var args = new DataGridViewCellMouseEventArgs(grid.Columns[column]!.Index, -1, 4, 10, new MouseEventArgs(MouseButtons.Left, 1, 4, 10, 0));
++        typeof(DataGridView).GetMethod("OnColumnHeaderMouseClick", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(grid, new object[] { args });
++    }
++    [STAThread] static void Main()
++    {
++        Application.EnableVisualStyles();
++        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("sk-SK");
++        using var grid = new DataGridView { AllowUserToAddRows = false, BindingContext = new BindingContext(), Size = new Size(900, 500) };
++        grid.CreateControl();
++        var headers = Attach(grid);
++        var data = new DataTable(); data.Locale = CultureInfo.CurrentCulture;
++        data.Columns.Add("Name"); data.Columns.Add("Class"); data.Columns.Add("Mass", typeof(decimal)); data.Columns.Add("odd]column");
++        data.Rows.Add("Zulu", "Scout", 2.5m, "O'Brien"); data.Rows.Add("Alpha", "Offroad", 10m, "other"); data.Rows.Add("Beta", "Scout", DBNull.Value, "O'Brien");
++        grid.DataSource = data; Call(headers, "Refresh");
++        Click(grid, "Mass"); Check((string)data.DefaultView[0]["Name"] == "Beta" && (decimal)data.DefaultView[1]["Mass"] == 2.5m, "bound numeric sort uses actual numbers with blanks first");
++        Click(grid, "Mass"); Check((decimal)data.DefaultView[0]["Mass"] == 10m, "second bound click sorts descending");
++        Click(grid, "Mass"); Check(data.DefaultView.Sort == "" && (string)data.DefaultView[0]["Name"] == "Zulu", "third bound click restores original source order");
++        var classFilter = Filter(headers, "Class"); Select(classFilter, "Scout");
++        Check(data.DefaultView.Count == 2, "bound column filter narrows the view without removing source records");
++        Select(Filter(headers, "Mass"), "2.5"); Check(data.DefaultView.Count == 1 && (string)data.DefaultView[0]["Name"] == "Zulu", "numeric filtering works with non-English decimal culture and combines with class");
++        Select(Filter(headers, "odd]column"), "O'Brien"); Check(data.DefaultView.Count == 1, "filter expressions escape apostrophes and bracketed column names");
++        Call(Filter(headers, "Mass"), "Clear"); Select(Filter(headers, "Mass"), ""); Check(data.DefaultView.Count == 1 && (string)data.DefaultView[0]["Name"] == "Beta", "blank numeric values can be selected");
++        Call(Filter(headers, "Mass"), "Clear"); Click(grid, "Name"); Click(grid, "Name"); Click(grid, "Name");
++        Check(data.DefaultView.Count == 2 && data.DefaultView.Sort == "", "sort off keeps active filters");
++        foreach (var column in new[] { "Class", "odd]column" }) Call(Filter(headers, column), "Clear");
++        Check(data.Rows.Count == 3 && data.DefaultView.Count == 3, "clearing filters restores every source row");
++        var replacement = data.Clone(); replacement.Rows.Add("Gamma", "Scout", 7m, "O'Brien"); replacement.Rows.Add("Delta", "Offroad", 3m, "other");
++        Select(classFilter, "Scout"); grid.DataSource = replacement; Call(headers, "Refresh");
++        Check(replacement.DefaultView.Count == 1 && (string)replacement.DefaultView[0]["Name"] == "Gamma", "column filters survive table rebinding");
++        using var unbound = new DataGridView { AllowUserToAddRows = false, Size = new Size(700, 400) };
++        unbound.Columns.Add("Name", "Name"); unbound.Columns.Add(new DataGridViewTextBoxColumn { Name = "Value", ValueType = typeof(decimal) });
++        var unboundHeaders = Attach(unbound); unbound.CreateControl();
++        var first = unbound.Rows[unbound.Rows.Add("Zulu", 2m)]; first.Tag = "first record";
++        var second = unbound.Rows[unbound.Rows.Add("Alpha", 10m)]; second.Tag = "second record";
++        Call(unboundHeaders, "Refresh"); Click(unbound, "Value"); Click(unbound, "Value");
++        Check(ReferenceEquals(unbound.Rows[0], second), "unbound numeric sorting moves the same row objects");
++        first.Cells["Value"].Value = 30m;
++        Click(unbound, "Value"); Check(ReferenceEquals(unbound.Rows[0], first) && (decimal)first.Cells["Value"].Value! == 30m && (string)first.Tag == "first record", "off restores initial row order while retaining edits and identity");
++        unbound.CurrentCell = first.Cells["Value"]; first.Cells["Value"].Value = 31m; Application.DoEvents();
++        Check(ReferenceEquals(unbound.CurrentCell, first.Cells["Value"]), "refreshing unrestricted filters preserves the active edit cell");
++        RankAndConflictChecks();
++        MapPopupAndEngineChecks();
++        Application.DoEvents();
++        using var bitmap = new Bitmap(grid.Width, grid.Height); grid.DrawToBitmap(bitmap, new Rectangle(Point.Empty, grid.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, "shared-headers.png"));
++        Console.WriteLine("All shared header checks passed.");
++    }
++
++    private static void RankAndConflictChecks()
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
++        var workspace = Path.Combine(root, "workspace");
++        var original = Path.Combine(workspace, "initial.pak", "original_files", "[ps]", "rank_settings.sso");
++        Directory.CreateDirectory(Path.GetDirectoryName(original)!); File.WriteAllText(original, "rankExp = [700, 1000,]\nkeep = 1\n");
++        var store = Activator.CreateInstance(T("RankXpStageStore"), Path.Combine(root, "preferences"))!;
++        var progression = Activator.CreateInstance(T("RegionProgressionStore"), Path.Combine(root, "order.json"))!;
++        using var editor = (Control)Activator.CreateInstance(T("ExperienceEditorTab"), BindingFlags.Instance | BindingFlags.NonPublic, null,
++            new object[] { new Func<string>(() => workspace), Activator.CreateInstance(T("OwnedRegionState"))!, store, progression }, null)!;
++        editor.CreateControl(); Call(editor, "EnsureLoaded");
++        var ranks = (DataGridView)Field(editor, "_grid");
++        ranks.Rows[0].Cells["UpdatedXP"].Value = 300; ranks.Rows[1].Cells["UpdatedXP"].Value = 100;
++        Call(Attach(ranks), "SetSort", "UpdatedXP", SortOrder.Ascending);
++        Check(Convert.ToInt32(ranks.Rows[0].Cells["Step"].Value) == 3, "rank editor can sort the display by XP");
++        Call(editor, "SaveSettings");
++        var staged = Call(store, "Load", workspace)!;
++        Check(((List<int>)staged.GetType().GetProperty("Values")!.GetValue(staged)!).SequenceEqual(new[] { 300, 100 }), "staging sorted XP rows retains their original rank numbers");
++        Select(Filter(Attach(ranks), "Step"), "3"); Call(editor, "SaveSettings");
++        staged = Call(store, "Load", workspace)!;
++        Check(((List<int>)staged.GetType().GetProperty("Values")!.GetValue(staged)!).SequenceEqual(new[] { 300, 100 }) && File.ReadAllText(original).Contains("700, 1000"), "filtering ranks neither drops hidden ranks from staging nor writes game data");
++        var itemType = T("FileConflictReviewDialog").GetNestedType("Item", BindingFlags.Public | BindingFlags.NonPublic)!;
++        var items = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType))!;
++        foreach (var name in new[] { "z.xml", "a.xml" })
++        {
++            var oldFile = Path.Combine(root, "old-" + name); var newFile = Path.Combine(root, "new-" + name);
++            File.WriteAllText(oldFile, "old " + name); File.WriteAllText(newFile, "new " + name);
++            items.Add(Activator.CreateInstance(itemType, name, oldFile, newFile)!);
++        }
++        var edits = Path.Combine(root, "edits"); Directory.CreateDirectory(edits);
++        using var dialog = (Form)Activator.CreateInstance(T("FileConflictReviewDialog"), items, edits)!;
++        var conflicts = (DataGridView)Field(dialog, "_grid"); dialog.CreateControl();
++        Call(Attach(conflicts), "SetSort", "Path", SortOrder.Ascending);
++        Call(dialog, "GridCellContentClick", conflicts, new DataGridViewCellEventArgs(conflicts.Columns["Pak"]!.Index, 0));
++        Check(itemType.GetProperty("SelectedAction")!.GetValue(items[0]) is null && (string)itemType.GetProperty("SelectedAction")!.GetValue(items[1])! == "Pak", "sorted conflict actions target the displayed file, not its old row index");
++    }
++
++    private static object Record(Type type, Dictionary<string, object?> values)
++    {
++        var ctor = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).OrderByDescending(ctor => ctor.GetParameters().Length).First();
++        return ctor.Invoke(ctor.GetParameters().Select(parameter => values.TryGetValue(parameter.Name!, out var value) ? value
++            : parameter.HasDefaultValue ? parameter.DefaultValue : parameter.ParameterType == typeof(string) ? "fixture"
++            : parameter.ParameterType.IsValueType ? Activator.CreateInstance(parameter.ParameterType) : null).ToArray());
++    }
++
++    private static void MapPopupAndEngineChecks()
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "ui-fixture-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
++        object Entry(string code, string availability) => Record(T("RegionTruckEntry"), new(StringComparer.OrdinalIgnoreCase)
++        { ["RegionCode"] = "us_01", ["MapCode"] = "level_us_01_01", ["TruckCode"] = code, ["Truck"] = code,
++            ["Availability"] = availability, ["AvailabilityEditable"] = availability == "Unverified", ["MapDataHash"] = "" });
++        var entries = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(T("RegionTruckEntry")))!;
++        entries.Add(Entry("found", "Obtainable — discovery/start")); entries.Add(Entry("mission", "Mission/task only")); entries.Add(Entry("unknown", "Unverified"));
++        var catalog = Activator.CreateInstance(T("RegionTruckCatalog"), entries, Array.Empty<string>(), 1, null)!;
++        var availability = Activator.CreateInstance(T("RegionTruckAvailabilityStore"), Path.Combine(root, "availability.json"))!;
++        using var maps = (Control)Activator.CreateInstance(T("RegionsTrucksTab"), new Func<string>(() => root), new Func<string>(() => ""), availability, null)!;
++        maps.Size = new Size(1400, 900); maps.CreateControl();
++        maps.GetType().GetField("_catalog", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(maps, catalog);
++        ((HashSet<string>)Field(maps, "_selectedRegions")).Add("us_01");
++        var grid = (DataGridView)Field(maps, "_trucks"); grid.BindingContext = new BindingContext(); Call(maps, "ApplyFilter");
++        Check(grid.Rows.Count == 3, "Map trucks binds all selected-region placements");
++        Select(Filter(Attach(grid), "Availability"), "Mission");
++        Check(grid.Rows.Count == 2 && grid.Rows.Cast<DataGridViewRow>().Any(row => (string)row.Cells["Truck"].Value! == "unknown"), "Availability funnel groups mission/discovery labels and retains unverified placements");
++        Select(Filter(Attach(grid), "Availability")); Check(grid.Rows.Count == 1 && grid.Rows[0].Cells["Availability"] is DataGridViewComboBoxCell, "unverified placements stay editable with all other availability groups hidden");
++        Call(Attach(grid), "SetSort", "Truck", SortOrder.Descending); Call(Attach(grid), "SetSort", null, SortOrder.None);
++        Check(grid.Rows.Count == 1, "Map trucks sorting off retains its availability filter");
++        var availableType = typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck"));
++        var available = Expression.Lambda(typeof(Func<>).MakeGenericType(availableType), Expression.Constant(Array.CreateInstance(T("CustomTruck"), 0), availableType)).Compile();
++        using var popup = (Form)Activator.CreateInstance(T("TruckReplacementDialog"), root, entries[0], available, null)!;
++        var replacements = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(T("ReplacementTruck")))!;
++        foreach (var (name, truckClass, tires) in new[] { ("scout_highway", "Scout", "Highway"), ("scout_mud", "Scout", "Mudtires"), ("offroad_mud", "Offroad", "Mudtires") })
++        {
++            var truck = Record(T("CustomTruck"), new(StringComparer.OrdinalIgnoreCase) { ["Code"] = name, ["Name"] = name, ["Class"] = truckClass });
++            var equipment = Record(T("TruckEquipmentSummary"), new(StringComparer.OrdinalIgnoreCase) { ["Tires"] = tires });
++            replacements.Add(Activator.CreateInstance(T("ReplacementTruck"), truck, equipment, new Dictionary<string, string>(), null)!);
++        }
++        popup.GetType().GetField("_trucks", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(popup, replacements);
++        popup.CreateControl(); var candidates = (DataGridView)Field(popup, "_list"); candidates.BindingContext = new BindingContext(); Call(popup, "ApplyFilter");
++        Select(Filter(Attach(candidates), "Class"), "Scout"); Check(candidates.Rows.Count == 2, "replacement class funnel filters candidates");
++        Select(Filter(Attach(candidates), "Default tires"), "Mudtires");
++        Check(candidates.Rows.Count == 1 && (string)candidates.Rows[0].Cells["Truck ID"].Value! == "scout_mud", "replacement tire funnel combines with class while retaining candidate identity");
++        using var owned = (Control)Activator.CreateInstance(T("OwnedContentTab"), new Func<string>(() => root), Activator.CreateInstance(T("OwnedRegionState"))!)!;
++        using var engine = (Control)Activator.CreateInstance(T("EngineEditTab"), new Func<string>(() => root), owned)!;
++        engine.Size = new Size(1400, 900); engine.CreateControl();
++        var matrixTypes = (System.Collections.IList)Field(engine, "_matrixEngineClasses");
++        var engineClassType = T("EngineEditTab").GetNestedType("EngineClass", BindingFlags.NonPublic)!;
++        matrixTypes.Add(Record(engineClassType, new(StringComparer.OrdinalIgnoreCase) { ["Code"] = "e_fixture", ["DisplayName"] = "Fixture engine" }));
++        Call(engine, "ConfigureCompatibilityColumns");
++        var matrix = (DataGridView)Field(engine, "_compatibilityGrid");
++        var truckRowType = T("EngineEditTab").GetNestedType("TruckRow", BindingFlags.NonPublic)!;
++        foreach (var (name, truckClass, hasEngine) in new[] { ("first", "Scout", false), ("second", "Offroad", true) })
++        {
++            var index = matrix.Rows.Add(true, name, truckClass, "Base game", hasEngine);
++            var row = Activator.CreateInstance(truckRowType, "fixture.xml", name, true,
++                new HashSet<string>(hasEngine ? new[] { "e_fixture" } : Array.Empty<string>()), new HashSet<string>(), "fixture")!;
++            truckRowType.GetProperty("OriginalOrder")!.SetValue(row, index); matrix.Rows[index].Tag = row;
++        }
++        var matrixHeaders = Field(engine, "_compatibilityHeaders"); Call(matrixHeaders, "Refresh");
++        Click(matrix, "e_fixture"); Check((string)matrix.Rows[0].Cells["Truck"].Value! == "first", "engine boolean columns start ascending");
++        Click(matrix, "e_fixture"); Check((string)matrix.Rows[0].Cells["Truck"].Value! == "second", "engine boolean columns cycle descending");
++        Click(matrix, "e_fixture"); Check((string)matrix.Rows[0].Cells["Truck"].Value! == "first", "engine sorting off restores original truck order");
++        Select(Filter(matrixHeaders, "TruckClass"), "Scout"); Check(matrix.Rows.Cast<DataGridViewRow>().Count(row => row.Visible) == 1, "engine class filter uses the header and preserves compatibility records");
++        using var snapshot = new Bitmap(engine.Width, engine.Height); engine.PerformLayout(); engine.DrawToBitmap(snapshot, new Rectangle(Point.Empty, engine.Size)); snapshot.Save(Path.Combine(AppContext.BaseDirectory, "engine-headers.png"));
++    }
++}
+diff --git a/.checks/SharedTableHeaders/SharedTableHeaders.csproj b/.checks/SharedTableHeaders/SharedTableHeaders.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/SharedTableHeaders/SharedTableHeaders.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

@@ -1,0 +1,114 @@
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -12,7 +12,10 @@
+     private AddonCatalog? _catalog;
+     private string? _loadedWorkspace;
+     private bool _loading;
++    private bool _showInternal = true;
++    private bool _binding;
+     private readonly Button _reload = new() { Text = "Reload addons", AutoSize = true };
++    private readonly Button _switchAddons = new() { Text = "Show external addons", AutoSize = true, Enabled = false };
+ 
+     public AddonsTab(Func<string> getWorkspacePath)
+     {
+@@ -26,6 +29,7 @@
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+         toolbar.Controls.Add(new Label { Text = "Addons", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         toolbar.Controls.Add(_reload);
++        toolbar.Controls.Add(_switchAddons);
+         layout.Controls.Add(toolbar, 0, 0);
+         layout.Controls.Add(_status, 0, 1);
+         layout.Controls.Add(_addons, 0, 2);
+@@ -41,6 +45,12 @@
+         _addons.CurrentCellChanged += (_, _) => ShowProperties();
+         _addons.DataBindingComplete += (_, _) => ShowProperties();
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
++        _switchAddons.Click += (_, _) =>
++        {
++            _showInternal = !_showInternal;
++            _switchAddons.Text = _showInternal ? "Show external addons" : "Show internal addons";
++            ApplyFilter();
++        };
+         AppColors.Changed += RefreshColors;
+         Disposed += (_, _) => AppColors.Changed -= RefreshColors;
+         RefreshColors(this, EventArgs.Empty);
+@@ -56,6 +66,7 @@
+         var workspace = _getWorkspacePath().Trim();
+         if (!force && string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) return;
+         _catalog = null;
++        _switchAddons.Enabled = false;
+         _loadedWorkspace = null;
+         _addons.DataSource = null;
+         _properties.Rows.Clear();
+@@ -86,6 +97,7 @@
+             if (!IsDisposed)
+             {
+                 _reload.Enabled = true;
++                _switchAddons.Enabled = _catalog is not null;
+                 if (!string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) await LoadAsync(force: false);
+             }
+         }
+@@ -94,7 +106,7 @@
+     private void ApplyFilter()
+     {
+         if (_catalog is null) return;
+-        var visible = _catalog.Entries;
++        var visible = _catalog.Entries.Where(entry => IsInternal(entry) == _showInternal).ToArray();
+         var table = new DataTable();
+         foreach (var column in new[] { "Addon / upgrade", "Type", "Category", "ID", "ID scope", "Socket / family", "Content", "Exploration unlock", "Referenced maps", "Source file" }) table.Columns.Add(column);
+         foreach (var column in new[] { "Price", "Unlock rank", "Map reward entries" }) table.Columns.Add(column, typeof(decimal));
+@@ -103,14 +115,19 @@
+             table.Rows.Add(entry.Name, entry.Type, entry.Category, entry.Id, entry.Type == "Tire" ? "Local tire name" : entry.Type == "Unresolved map upgrade" ? "Unresolved reward ID" : "Global upgrade ID", entry.Family, entry.Content, entry.Exploration,
+                 string.Join(", ", entry.MapReferences.Select(item => item.Map).Distinct(StringComparer.OrdinalIgnoreCase)), entry.Source,
+                 (object?)entry.Price ?? DBNull.Value, (object?)entry.UnlockRank ?? DBNull.Value, (decimal)entry.MapReferences.Count, entry);
+-        _addons.DataSource = table;
+-        _addons.Columns["Entry"]!.Visible = false;
+-        foreach (DataGridViewColumn column in _addons.Columns)
++        _binding = true;
++        try
+         {
+-            column.Width = column.Name switch { "Addon / upgrade" => 210, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
+-            if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
++            _addons.DataSource = table;
++            _addons.Columns["Entry"]!.Visible = false;
++            foreach (DataGridViewColumn column in _addons.Columns)
++            {
++                column.Width = column.Name switch { "Addon / upgrade" => 210, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
++                if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
++            }
+         }
+-        _status.Text = $"{visible.Count} addon/component definitions · {_catalog.MapReferences.Count} level-setting reward entries. "
++        finally { _binding = false; }
++        _status.Text = $"{(_showInternal ? "Internal" : "External")} addons · {visible.Length} definitions · {_catalog.MapReferences.Count} level-setting reward entries. "
+             + "Read-only catalog. Header funnels filter columns; map references do not verify physical zones.";
+         if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} warnings (see details).";
+         ShowProperties();
+@@ -118,6 +135,7 @@
+ 
+     private void ShowProperties()
+     {
++        if (_binding) return;
+         _properties.Rows.Clear();
+         _description.Clear();
+         if (_addons.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not AddonCatalogEntry entry) return;
+@@ -129,6 +147,9 @@
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
+         TableHeaderBehavior.Refresh(_properties);
+     }
++
++    private static bool IsInternal(AddonCatalogEntry entry) => entry.Type != "Addon"
++        || entry.Category is "awd" or "diff_lock" or "snorkel";
+ 
+     private void RefreshColors(object? sender, EventArgs e)
+     {
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer → Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+-**Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Large catalogs use indexed accessibility row names and navigation so horizontal scrollbar drags do not repeatedly scan the full table; accessible values, selection, sorting and filtering are retained. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
++**Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. The tab starts with internal addons (engines, gearboxes, suspension, tires, winches, AWD, differential locks and snorkels); a toolbar button switches to external attachments/cosmetics and back. Unresolved map-upgrade rows remain in the internal view for inspection. The chosen view is retained while switching tabs or reloading during the session. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Large catalogs use indexed accessibility row names and navigation so horizontal scrollbar drags do not repeatedly scan the full table; accessible values, selection, sorting and filtering are retained. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+ **Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions queue original pickup restoration, including after Apply. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Stage changes** in either upgrade tab snapshots all pickup changes together with exploration flags. Upgrades found on any resulting map are exploration-locked; upgrades absent from all maps are unlocked. Unrandomized maps retain their current pickups and count toward these flags. Tire sizes sharing a definition share one flag: any discoverable size locks that variant. The full current pickup inventory is scanned; unreadable settings or unresolved pickup definitions block staging rather than guessing absence. Source catalog warnings remain visible.
+ 

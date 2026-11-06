@@ -1,0 +1,133 @@
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 204cf62..7ca3574 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -36,6 +36,8 @@ The truck table's **Tires** and **Addons** columns show each placement's map equ
+ 
+ In this application, **visual addons** specifically means addon definitions stored in a folder whose name ends in `_tuning`. This user-defined grouping applies even to functional parts (such as diff locks or snorkels) placed in those folders. Each installed addon retains its source path, original game `Category`, map/default origin, and `IsVisual` flag in the catalog; the addon tooltip shows the grouping and category. Future requests to hide visual addons should use this folder-based flag rather than guessing from part names or gameplay effects.
+ 
++The table excludes visual (`_tuning`) parts from both addon columns. The remaining equipment with `Category="frame_addons"` appears in **Frame addons**; the other remaining parts appear in **Addons**. Each column has a tooltip containing only that group's installed parts, including source IDs and default/map origins. The full installed-equipment metadata is retained for search and future filters. Empty groups display **None**.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index a54610b..d590dea 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -222,10 +222,10 @@ internal sealed class RegionsTrucksTab : UserControl
+                 || (entry.Availability == "Mission/task only" && _showMission.Checked))
+             .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
+         var table = new DataTable();
+-        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
++        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Frame addons", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
+         table.Columns.Add("Entry", typeof(RegionTruckEntry));
+         foreach (var entry in rows) table.Rows.Add(entry.Region, entry.Map, entry.Truck, entry.Class,
+-            entry.Tires, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
++            entry.Tires, entry.FrameAddons, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
+         _updatingTable = true;
+         try
+         {
+@@ -234,7 +234,7 @@ internal sealed class RegionsTrucksTab : UserControl
+             foreach (DataGridViewColumn column in _trucks.Columns)
+             {
+                 column.ReadOnly = column.Name != "Availability";
+-                column.Width = column.Name switch { "Truck" => 210, "Tires" => 95, "Addons" => 330, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
++                column.Width = column.Name switch { "Truck" => 210, "Tires" => 95, "Frame addons" => 220, "Addons" => 250, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
+             }
+             ConfigureAvailabilityCells();
+         }
+@@ -357,7 +357,8 @@ internal sealed class RegionsTrucksTab : UserControl
+         && row.DataBoundItem is DataRowView view && view["Entry"] is RegionTruckEntry entry
+         && string.Join(" ", row.Cells.Cast<DataGridViewCell>().Where(cell => cell.OwningColumn?.Visible == true)
+                 .Select(cell => Convert.ToString(cell.FormattedValue)).Append(entry.MapCode).Append(entry.TireDetails)
+-                .Append(entry.AddonDetails).Append(entry.Evidence).Append(entry.Source)
++                .Append(entry.AddonDetails).Append(entry.FrameAddonDetails).Append(entry.Evidence).Append(entry.Source)
++                .Append(string.Join(" ", (entry.InstalledAddons ?? []).Select(item => $"{item.Id} {item.Name} {item.Category} {item.SourcePath} {item.Group}")))
+                 .Append($"{entry.X:0.##}, {entry.Y:0.##}, {entry.Z:0.##}"))
+             .Contains(query, StringComparison.CurrentCultureIgnoreCase);
+ 
+@@ -376,6 +377,7 @@ internal sealed class RegionsTrucksTab : UserControl
+         // Resolve from the bound entry so tooltips remain correct after sorting.
+         if (_trucks.Columns[e.ColumnIndex].Name == "Tires") e.ToolTipText = entry.TireDetails;
+         if (_trucks.Columns[e.ColumnIndex].Name == "Addons") e.ToolTipText = entry.AddonDetails;
++        if (_trucks.Columns[e.ColumnIndex].Name == "Frame addons") e.ToolTipText = entry.FrameAddonDetails;
+     }
+ 
+     private void PaletteChanged(object? sender, EventArgs e)
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index e436a45..8398f89 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -9,7 +9,7 @@ internal sealed record RegionTruckEntry(string RegionCode, string Region, string
+     string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
+     float X, float Y, float Z, string Evidence, string Source,
+     string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
+-    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null);
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "");
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment);
+ 
+@@ -99,7 +99,8 @@ internal static class RegionTruckCatalogService
+                     entries.Add(new(regionCode, region, map, mapName, placement.TruckCode, metadata.Name,
+                         metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
+                         placement.Id, placement.X, placement.Y, placement.Z, evidence, source,
+-                        equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons));
++                        equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons,
++                        FrameAddons: equipment.FrameAddons, FrameAddonDetails: equipment.FrameAddonDetails));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index ce800f8..89f7b28 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -12,10 +12,11 @@ internal sealed record InstalledAddonInfo(string Id, string Name, string Categor
+ {
+     // User-defined UI grouping: "visual addons" means *_tuning folders,
+     // including functional parts that the game stores in those folders.
+-    public string Group => IsVisual ? "Visual addons (_tuning)" : "Other addons";
++    public bool IsFrameAddon => Category.Equals("frame_addons", StringComparison.OrdinalIgnoreCase);
++    public string Group => IsVisual ? "Visual addons (_tuning)" : IsFrameAddon ? "Frame addons" : "Other addons";
+ }
+ internal sealed record TruckEquipmentSummary(string Tires, string TireDetails, string Addons, string AddonDetails,
+-    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null);
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "");
+ 
+ /// <summary>Resolves per-placement equipment against the active workspace's vehicle defaults and wheel definitions.</summary>
+ internal sealed class TruckEquipmentCatalog
+@@ -92,16 +93,27 @@ internal sealed class TruckEquipmentCatalog
+                 .FirstOrDefault(value => value is not null) ?? "";
+             return new InstalledAddonInfo(item.Id, item.Name, gameCategory, source, visual, mapAddons.Contains(item.Id) ? "map" : "vehicle default");
+         }).ToArray();
+-        var duplicateNames = addonLabels.GroupBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
++        // Hide the user-defined visual group first, including tuning-folder
++        // parts with functional categories. Separate the remaining frame gear.
++        var visible = addonInfo.Where(item => !item.IsVisual).ToArray();
++        var frame = visible.Where(item => item.IsFrameAddon).ToArray();
++        var other = visible.Where(item => !item.IsFrameAddon).ToArray();
++        return new(category, tireDetails, FormatNames(other), FormatDetails(other), addonInfo,
++            FormatNames(frame), FormatDetails(frame));
++    }
++
++    private static string FormatNames(IReadOnlyList<InstalledAddonInfo> items)
++    {
++        if (items.Count == 0) return "None";
++        var duplicateNames = items.GroupBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+             .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
+-        string Label((string Id, string Name) item) => duplicateNames.Contains(item.Name) ? $"{item.Name} ({item.Id})" : item.Name;
+-        return new(category, tireDetails,
+-            installed.Count == 0 ? "None" : string.Join(", ", addonLabels.Select(Label)),
+-            installed.Count == 0 ? "No addons installed in the map record or vehicle defaults."
+-                : string.Join("\r\n", addonInfo.Select(item => $"{item.Name} — {item.Id} [{item.Origin}; {item.Group}; category: {item.Category}]\r\n  {item.SourcePath}")),
+-            addonInfo);
++        return string.Join(", ", items.Select(item => duplicateNames.Contains(item.Name) ? $"{item.Name} ({item.Id})" : item.Name));
+     }
+ 
++    private static string FormatDetails(IReadOnlyList<InstalledAddonInfo> items) => items.Count == 0
++        ? "No installed addons in this group after excluding visual (_tuning) parts."
++        : string.Join("\r\n", items.Select(item => $"{item.Name} — {item.Id} [{item.Origin}; {item.Group}; category: {item.Category}]\r\n  {item.SourcePath}"));
++
+     private static string DefaultWheel(IEnumerable<Definition> chain, string attribute) => chain
+         .Select(definition => (string?)definition.Xml.Element("TruckData")?.Element("Wheels")?.Attribute(attribute))
+         .FirstOrDefault(value => value is not null) ?? "";

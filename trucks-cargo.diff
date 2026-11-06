@@ -1,0 +1,326 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index c0cfce2..4060838 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
+     private readonly CustomGroupWipTab _customGroupWipTab;
+     private readonly CustomGroupWipTab _tierListTab;
+     private readonly TruckEditTab _truckEditTab;
++    private readonly TrucksCargoTab _trucksCargoTab;
+     private readonly SettingsTab _settingsTab;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+@@ -42,6 +43,7 @@ internal sealed class MainForm : Form
+         _tierListTab = new CustomGroupWipTab(_ownedContentTab.GetAvailableCustomGroupingTrucks, tierList: true);
+         _ownedContentTab.OwnedTrucksChanged += _tierListTab.RefreshOwnedTrucks;
+         _truckEditTab = new TruckEditTab(() => _workspacePath.Text.Trim(), _ownedContentTab);
++        _trucksCargoTab = new TrucksCargoTab(() => _workspacePath.Text.Trim());
+         _settingsTab = new SettingsTab();
+         BuildLayout();
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+@@ -102,6 +104,7 @@ internal sealed class MainForm : Form
+         var customGroupingPage = new TabPage("Custom grouping");
+         var tierListPage = new TabPage("Tier List");
+         var truckEditPage = new TabPage("Truck edit");
++        var trucksCargoPage = new TabPage("Trucks-Cargo");
+         var settingsPage = new TabPage("Settings");
+         root.Dock = DockStyle.Fill;
+         _experienceTab.Dock = DockStyle.Fill;
+@@ -116,6 +119,8 @@ internal sealed class MainForm : Form
+         ownedContentPage.Controls.Add(_ownedContentTab);
+         customGroupingPage.Controls.Add(_customGroupWipTab);
+         truckEditPage.Controls.Add(_truckEditTab);
++        _trucksCargoTab.Dock = DockStyle.Fill;
++        trucksCargoPage.Controls.Add(_trucksCargoTab);
+         settingsPage.Controls.Add(_settingsTab);
+         tabs.TabPages.Add(unpackPage);
+         tabs.TabPages.Add(ownedContentPage);
+@@ -123,6 +128,7 @@ internal sealed class MainForm : Form
+         tabs.TabPages.Add(tierListPage);
+         tabs.TabPages.Add(experiencePage);
+         tabs.TabPages.Add(truckEditPage);
++        tabs.TabPages.Add(trucksCargoPage);
+         tabs.TabPages.Add(settingsPage);
+         tabs.SelectedIndexChanged += async (_, _) =>
+         {
+@@ -142,6 +148,7 @@ internal sealed class MainForm : Form
+             if (tabs.SelectedTab != selectedPage) return;
+ 
+             if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
++            if (selectedPage == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
+             if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
+             if (selectedPage == customGroupingPage)
+             {
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index c6d80bb..0dc2e46 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -22,4 +22,6 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
++The **Trucks-Cargo** tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
++
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/CargoCatalogService.cs b/src/SnowPakTool.Desktop/CargoCatalogService.cs
+new file mode 100644
+index 0000000..dc90f2b
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/CargoCatalogService.cs
+@@ -0,0 +1,102 @@
++using System.Globalization;
++using System.Xml;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record CargoProperty(string Source, string Property, string Value);
++internal sealed record CargoEntry(string Name, string Type, string Variant, string Content,
++    decimal? Slots, decimal? MassKg, decimal? LoadValue, string Description,
++    string TypeFile, string AddonFile, IReadOnlyList<CargoProperty> Properties);
++internal sealed record CargoCatalog(IReadOnlyList<CargoEntry> Entries, IReadOnlyList<string> Warnings);
++
++internal static class CargoCatalogService
++{
++    public static CargoCatalog Load(string workspace, IReadOnlyDictionary<string, string> names)
++    {
++        var warnings = new List<string>();
++        var types = new Dictionary<string, (string Path, XElement Xml)>(StringComparer.OrdinalIgnoreCase);
++        var addons = new List<(string Path, XElement Xml, XElement Slot)>();
++        foreach (var path in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml"))
++        {
++            var relative = WorkspaceOriginals.GetRelativePath(workspace, path).Replace('\\', '/');
++            var isType = relative.Contains("/classes/cargo_types/", StringComparison.OrdinalIgnoreCase);
++            var isAddon = relative.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)
++                && Path.GetFileName(path).StartsWith("cargo_", StringComparison.OrdinalIgnoreCase);
++            if (!isType && !isAddon) continue;
++            try
++            {
++                // Game XML may contain several top-level elements (templates and the definition).
++                using var reader = XmlReader.Create(new StringReader(WorkspaceDataCache.ReadAllText(path)),
++                    new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment, DtdProcessing = DtdProcessing.Prohibit });
++                while (!reader.EOF)
++                {
++                    if (reader.NodeType != XmlNodeType.Element) { reader.Read(); continue; }
++                    var element = (XElement)XNode.ReadFrom(reader);
++                    if (isType && element.Name.LocalName == "CargoType")
++                        types[Path.GetFileNameWithoutExtension(path)] = (relative, element);
++                    if (isAddon && element.Name.LocalName == "TruckAddon")
++                        foreach (var slot in element.Descendants("InstallSlot").Where(slot => slot.Attribute("CargoType") is not null))
++                            addons.Add((relative, element, slot));
++                }
++            }
++            catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
++            {
++                warnings.Add($"{relative}: {ex.Message}");
++            }
++        }
++
++        var entries = new List<CargoEntry>();
++        foreach (var type in types.Keys.Concat(addons.Select(addon => (string)addon.Slot.Attribute("CargoType")!))
++                     .Distinct(StringComparer.OrdinalIgnoreCase))
++        {
++            types.TryGetValue(type, out var definition);
++            var ui = definition.Xml?.Element("UiDesc");
++            var nameKey = (string?)ui?.Attribute("UiName");
++            var descKey = (string?)ui?.Attribute("UiDesc");
++            var name = Resolve(nameKey, type, names);
++            var description = Resolve(descKey, "", names);
++            var matching = addons.Where(addon => string.Equals((string?)addon.Slot.Attribute("CargoType"), type, StringComparison.OrdinalIgnoreCase)).ToArray();
++            if (matching.Length == 0) AddEntry(null, null, null);
++            else foreach (var addon in matching) AddEntry(addon.Path, addon.Xml, addon.Slot);
++
++            void AddEntry(string? addonPath, XElement? addonXml, XElement? slot)
++            {
++                var properties = new List<CargoProperty>();
++                if (definition.Xml is not null) CollectProperties(definition.Path, definition.Xml, "", properties);
++                if (addonXml is not null) CollectProperties(addonPath!, addonXml, "", properties);
++                var massAttributes = addonXml?.Element("PhysicsModel")?.Descendants("Body")
++                    .Select(body => (string?)body.Attribute("Mass")).ToArray() ?? [];
++                var masses = massAttributes.Select(Number).ToArray();
++                // Only report an explicit body sum; missing/template masses are unknown, not zero.
++                decimal? mass = masses.Length > 0 && masses.All(value => value.HasValue)
++                    ? masses.Sum(value => value!.Value) : null;
++                var contentPath = definition.Path ?? addonPath ?? "";
++                var parts = contentPath.Split('/');
++                var dlc = Array.FindIndex(parts, part => part.Equals("_dlc", StringComparison.OrdinalIgnoreCase));
++                entries.Add(new CargoEntry(name, type, addonPath is null ? "—" : Path.GetFileNameWithoutExtension(addonPath),
++                    dlc >= 0 && dlc + 1 < parts.Length ? parts[dlc + 1] : "Base game",
++                    Number((string?)slot?.Attribute("CargoLength")), mass, Number((string?)slot?.Attribute("CargoValue")),
++                    description, definition.Path ?? "", addonPath ?? "", properties));
++            }
++        }
++        return new CargoCatalog(entries.OrderBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase)
++            .ThenBy(entry => entry.Type).ThenBy(entry => entry.Variant).ToArray(), warnings);
++    }
++
++    private static string Resolve(string? key, string fallback, IReadOnlyDictionary<string, string> names) =>
++        key is null ? fallback : names.TryGetValue(key, out var value) ? value : key;
++
++    private static decimal? Number(string? value) =>
++        decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
++
++    private static void CollectProperties(string source, XElement element, string parent, List<CargoProperty> result)
++    {
++        var siblings = element.Parent?.Elements(element.Name).ToArray();
++        var suffix = siblings is { Length: > 1 } ? $"[{Array.IndexOf(siblings, element) + 1}]" : "";
++        var path = parent + element.Name.LocalName + suffix;
++        foreach (var attribute in element.Attributes())
++            result.Add(new CargoProperty(source, path + "/@" + attribute.Name, attribute.Value));
++        foreach (var child in element.Elements()) CollectProperties(source, child, path + "/", result);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/TrucksCargoTab.cs b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+new file mode 100644
+index 0000000..afcf426
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -0,0 +1,148 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class TrucksCargoTab : UserControl
++{
++    private readonly Func<string> _getWorkspacePath;
++    private readonly TextBox _search = new() { Width = 260, PlaceholderText = "Search cargo, type, variant or DLC…" };
++    private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
++    private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
++    private readonly DataGridView _cargo = CreateGrid();
++    private readonly DataGridView _properties = CreateGrid();
++    private CargoCatalog? _catalog;
++    private string? _loadedWorkspace;
++    private bool _loading;
++
++    public TrucksCargoTab(Func<string> getWorkspacePath)
++    {
++        _getWorkspacePath = getWorkspacePath;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
++        var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
++        toolbar.Controls.Add(new Label { Text = "Trucks-Cargo", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
++        toolbar.Controls.Add(_search);
++        var reload = new Button { Text = "Reload cargo", AutoSize = true };
++        toolbar.Controls.Add(reload);
++        layout.Controls.Add(toolbar, 0, 0);
++        layout.Controls.Add(_status, 0, 1);
++        layout.Controls.Add(_cargo, 0, 2);
++        layout.Controls.Add(_description, 0, 3);
++        layout.Controls.Add(_properties, 0, 4);
++        Controls.Add(layout);
++        _properties.Columns.Add("Property", "Selected cargo property");
++        _properties.Columns.Add("Value", "Value");
++        _properties.Columns.Add("Source", "Source file");
++        _properties.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
++        _search.TextChanged += (_, _) => ApplyFilter();
++        _cargo.CurrentCellChanged += (_, _) => ShowProperties();
++        _cargo.DataBindingComplete += (_, _) => ShowProperties();
++        reload.Click += async (_, _) =>
++        {
++            if (_loading) return;
++            _loading = true;
++            reload.Enabled = false;
++            try
++            {
++                await WorkspaceDataCache.PreloadAsync(_getWorkspacePath(), forceReload: true);
++                _loadedWorkspace = null;
++                LoadCargo();
++            }
++            catch (Exception ex) { _status.Text = $"Could not reload cargo: {ex.Message}"; }
++            finally { _loading = false; reload.Enabled = true; }
++        };
++        AppColors.Changed += RefreshColors;
++        Disposed += (_, _) => AppColors.Changed -= RefreshColors;
++        RefreshColors(this, EventArgs.Empty);
++    }
++
++    public void EnsureLoaded()
++    {
++        if (!string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) LoadCargo();
++    }
++
++    private void LoadCargo()
++    {
++        var workspace = _getWorkspacePath().Trim();
++        _catalog = null;
++        _loadedWorkspace = null;
++        _cargo.DataSource = null;
++        _properties.Rows.Clear();
++        _description.Clear();
++        if (workspace.Length == 0 || !Directory.Exists(workspace))
++        {
++            _status.Text = "Choose an extracted workspace on the Unpack / Pack tab to list cargo.";
++            return;
++        }
++        try
++        {
++            _catalog = CargoCatalogService.Load(workspace, WorkspaceDataCache.GetLocalizedNames(workspace));
++            _loadedWorkspace = workspace;
++            ApplyFilter();
++        }
++        catch (Exception ex) { _status.Text = $"Could not load cargo: {ex.Message}"; }
++    }
++
++    private void ApplyFilter()
++    {
++        if (_catalog is null) return;
++        var query = _search.Text.Trim();
++        var visible = _catalog.Entries.Where(entry => string.Join(" ", entry.Name, entry.Type, entry.Variant,
++            entry.Content, entry.Description, entry.TypeFile, entry.AddonFile).Contains(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
++        var table = new DataTable();
++        foreach (var column in new[] { "Cargo", "Cargo type", "Variant", "Content" }) table.Columns.Add(column);
++        foreach (var column in new[] { "Cargo length (slots)", "Body mass sum (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
++        table.Columns.Add("Entry", typeof(CargoEntry));
++        foreach (var entry in visible)
++            table.Rows.Add(entry.Name, entry.Type, entry.Variant, entry.Content,
++                (object?)entry.Slots ?? DBNull.Value, (object?)entry.MassKg ?? DBNull.Value, (object?)entry.LoadValue ?? DBNull.Value, entry);
++        _cargo.DataSource = table;
++        _cargo.Columns["Entry"]!.Visible = false;
++        foreach (DataGridViewColumn column in _cargo.Columns)
++        {
++            column.Width = column.Index switch { 0 => 200, 1 => 190, 2 => 290, 3 => 90, _ => 125 };
++            if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
++        }
++        _cargo.Columns["Cargo value"]!.DefaultCellStyle.Format = "0.###";
++        _status.Text = $"{visible.Length} / {_catalog.Entries.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
++            + "Blank = not defined. Log cargo length uses carrier slots.";
++        if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} file(s) could not be read (see details).";
++        ShowProperties();
++    }
++
++    private void ShowProperties()
++    {
++        _properties.Rows.Clear();
++        _description.Clear();
++        if (_cargo.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not CargoEntry entry) return;
++        _description.Text = entry.Description + Environment.NewLine
++            + "Mass is the sum of explicitly defined addon physics bodies; it can include carrier parts."
++            + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
++        foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++    }
++
++    private void RefreshColors(object? sender, EventArgs e)
++    {
++        foreach (var grid in new[] { _cargo, _properties })
++        {
++            grid.BackgroundColor = grid.DefaultCellStyle.BackColor = AppColors.Get("Surface");
++            grid.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow");
++            grid.DefaultCellStyle.SelectionBackColor = AppColors.Get("SelectionBlue");
++            grid.DefaultCellStyle.SelectionForeColor = SystemColors.ControlText;
++        }
++    }
++
++    private static DataGridView CreateGrid() => new()
++    {
++        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
++        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
++        RowTemplate = { Height = 26 }
++    };
++}

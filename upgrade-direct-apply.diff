@@ -1,0 +1,172 @@
+diff --git "a/.checks\\UpgradeDirectApplyBaseline\\README.md" b/README.md
+index 99227f7..5acb16f 100644
+--- "a/.checks\\UpgradeDirectApplyBaseline\\README.md"
++++ b/README.md
+@@ -106,3 +106,5 @@ snowtruckconfig truck CraneSocket add top-central "initial-pak\[media]\classes\t
+ del "%client%\initial.pak"
+ snowpaktool pak pack --mixed-cache-block "initial-pak" "%client%\initial.pak"
+ ```
++
++**Randomizer > Map upgrades > Apply staged upgrades** applies only the saved upgrade snapshot: pickup replacements in level settings plus their exploration flags. It leaves other staged PAK edits and later unstaged upgrade drafts intact. This writes the workspace overlay; pack a new initial.pak from Start and install it for the game to use the changes. Input archives and installed files remain untouched.
+diff --git "a/.checks\\UpgradeDirectApplyBaseline\\MainForm.cs" b/src/SnowPakTool.Desktop/MainForm.cs
+index 7c1bb52..41cadca 100644
+--- "a/.checks\\UpgradeDirectApplyBaseline\\MainForm.cs"
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -74,6 +74,7 @@ internal sealed class MainForm : Form
+             && _upgradeTrialCatalog is not null && _upgradeTrialCatalog.Workspace.Equals(_workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+             && UpgradeChanges.HasDraft(_upgradeTrialCatalog));
+         _mapUpgradesTab.ConfigureStaging(StageUpgradeChangesAsync);
++        _mapUpgradesTab.ConfigureApplying(ApplyUpgradeChangesAsync);
+         _truckRandomizationTab.ConfigureMapStaging(_regionsTrucksTab.StageChangesAsync, () =>
+             Directory.Exists(_workspacePath.Text.Trim()) && PendingTruckReplacements.HasUnstagedChanges(_workspacePath.Text.Trim()));
+         _regionsTrucksTab.ChangesStaged += async () =>
+@@ -504,6 +505,17 @@ internal sealed class MainForm : Form
+         await _mapUpgradesTab.RefreshDraftAsync();
+     }
+ 
++    private async Task ApplyUpgradeChangesAsync()
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) throw new InvalidOperationException("Choose an extracted workspace on Start first.");
++        await Task.Run(() => UpgradeChanges.Apply(workspace));
++        _upgradeTrialCatalog = null;
++        _upgradeTrialStamp = null;
++        _upgradeRandomizationTab.RefreshStagingState();
++        if (_startChanges is not null) await _startChanges.RefreshAsync();
++    }
++
+     private async Task StageUpgradeChangesAsync()
+     {
+         var catalog = await GetUpgradeTrialCatalogAsync(true);
+diff --git "a/.checks\\UpgradeDirectApplyBaseline\\MapUpgradesTab.cs" b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+index abfe941..9e2927b 100644
+--- "a/.checks\\UpgradeDirectApplyBaseline\\MapUpgradesTab.cs"
++++ b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+@@ -29,7 +29,9 @@ internal sealed partial class MapUpgradesTab : UserControl
+     private string? _selectionWorkspace;
+     private bool _loading;
+     private Func<Task>? _stageChanges;
++    private Func<Task>? _applyChanges;
+     private readonly Button _stage = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
++    private readonly Button _apply = new() { Text = "Apply staged upgrades", AutoSize = true, Enabled = false };
+     private IReadOnlyDictionary<string, string> _truckNames = new Dictionary<string, string>();
+ 
+     public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath,
+@@ -49,9 +51,10 @@ internal sealed partial class MapUpgradesTab : UserControl
+         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+         var all = new Button { Text = "Select all regions", AutoSize = true };
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+-        _tips.SetToolTip(_stage, "Stage all upgrade drafts and exploration flags; apply from Start → PAK.");
++        _tips.SetToolTip(_stage, "Stage all upgrade drafts and exploration flags, then use Apply staged upgrades.");
++        _tips.SetToolTip(_apply, "Apply the staged pickup replacements and exploration flags to the workspace. Then pack and install the updated initial.pak.");
+         _tips.SetToolTip(_resetSelected, "Reset every pickup matching selected regions and current column filters, regardless of highlighted row.");
+-        actions.Controls.AddRange([all, clear, _resetSelected, _resetRegions, _resetAll, _stage]); layout.Controls.Add(actions, 0, 2);
++        actions.Controls.AddRange([all, clear, _resetSelected, _resetRegions, _resetAll, _stage, _apply]); layout.Controls.Add(actions, 0, 2);
+         layout.Controls.Add(_status, 0, 3);
+         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500), SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6 };
+         var headers = TableHeaderBehavior.Attach(_upgrades); headers.Changed += () => { UpdateButtons(); ShowDetails(); };
+@@ -60,17 +63,31 @@ internal sealed partial class MapUpgradesTab : UserControl
+                 Width = name == "Compatible trucks" ? 420 : name == "Upgrade" ? 280 : name is "Placement ID" or "Upgrade ID" ? 260 : 145,
+                 SortMode = DataGridViewColumnSortMode.Automatic });
+         split.Panel1.Controls.Add(_upgrades); split.Panel2.Controls.Add(_details); layout.Controls.Add(split, 0, 4); Controls.Add(layout);
+-        _status.Text = "Review upgrade pickups, stage changes, then Apply pending PAK edits from Start.";
++        _status.Text = "Review upgrade pickups, Stage changes, then Apply staged upgrades.";
+         _stage.Click += async (_, _) =>
+         {
+             if (_stageChanges is null || _loading) return;
+             _loading = true; UpdateButtons();
+             string message;
+-            try { await _stageChanges(); message = "Upgrades and exploration flags staged. Apply pending PAK edits from Start."; }
++            try { await _stageChanges(); message = "Upgrades and exploration flags staged. Use Apply staged upgrades to write them to the workspace."; }
+             catch (Exception ex) { message = "Could not stage upgrades: " + ex.Message; }
+             finally { _loading = false; await LoadAsync(false); UpdateButtons(); }
+             _status.Text = message;
+         };
++        _apply.Click += async (_, _) =>
++        {
++            if (_applyChanges is null || _loading) return;
++            _loading = true; UpdateButtons();
++            string message;
++            try
++            {
++                await _applyChanges();
++                message = "Staged pickup replacements and exploration flags applied to the workspace. Pack to a new PAK from Start and install it for the game to use these upgrades.";
++            }
++            catch (Exception ex) { message = "Could not apply upgrades: " + ex.Message; }
++            finally { _loading = false; await LoadAsync(false); UpdateButtons(); }
++            _status.Text = message;
++        };
+         all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RenderRows(); };
+         clear.Click += (_, _) => { _selectedRegions.Clear(); RenderRows(); };
+         _reload.Click += async (_, _) => await LoadAsync(true);
+@@ -86,6 +103,7 @@ internal sealed partial class MapUpgradesTab : UserControl
+ 
+     public Task EnsureLoadedAsync() => LoadAsync(false);
+     public void ConfigureStaging(Func<Task> stage) { _stageChanges = stage; UpdateButtons(); }
++    public void ConfigureApplying(Func<Task> apply) { _applyChanges = apply; UpdateButtons(); }
+     public Task RefreshDraftAsync() => LoadAsync(false);
+ 
+     private async Task LoadAsync(bool force)
+@@ -162,7 +180,7 @@ internal sealed partial class MapUpgradesTab : UserControl
+                 else if (state == "In files") row.DefaultCellStyle.BackColor = AppColors.Get("DAF8E0");
+             }
+         _status.Text = $"{table.Rows.Count} pickups in {_selectedRegions.Count} selected regions ({_catalog.Input.Slots.Count} in owned regions)"
+-            + (_draft is null ? "" : $" · seed {_draft.Seed}") + ". Stage here, then Apply pending PAK edits from Start.";
++            + (_draft is null ? "" : $" · seed {_draft.Seed}") + ". Stage here, then Apply staged upgrades. Pack and install the updated PAK to use them in game.";
+         if (_draft is not null && _draft.Assignments.Count > 0 && _draft.InputStamp != _catalog.Stamp) _status.Text += " Inputs changed; randomize again before staging.";
+         UpdateButtons(); ShowDetails();
+     }
+@@ -181,6 +199,7 @@ internal sealed partial class MapUpgradesTab : UserControl
+     }
+     private void UpdateButtons()
+     {
++        _apply.Enabled = !_loading && _applyChanges is not null && _catalog is not null && UpgradeChanges.Pending(_catalog.Workspace).Count > 0;
+         _stage.Enabled = !_loading && _stageChanges is not null && _catalog is not null && _draft is not null;
+         var keys = _draft?.Assignments.Select(a => UpgradeTrialService.Key(a.Slot)).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+         if (_catalog is not null) keys.UnionWith(_catalog.AllSlots.Where(s => UpgradeChanges.CurrentId(_catalog.Workspace, s) != s.OriginalUpgradeId).Select(UpgradeTrialService.Key));
+diff --git "a/.checks\\UpgradeDirectApplyBaseline\\Program.cs" b/.checks/UpgradeApply/Program.cs
+index e0188f5..16a7b34 100644
+--- "a/.checks\\UpgradeDirectApplyBaseline\\Program.cs"
++++ b/.checks/UpgradeApply/Program.cs
+@@ -38,6 +38,7 @@ static class Program
+         Slot=JsonSerializer.Deserialize<object>(Slot("zone")),UpgradeId=id,Kind=0,Relation=0,Path=1,Fallback=false,Reused=false}},Report=(object?)null});
+     [STAThread] static void Main(string[] args)
+     {
++        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+         if (args.Contains("--real-readonly"))
+         {
+             using var form=(Form)Activator.CreateInstance(T("MainForm"))!;
+@@ -89,6 +90,8 @@ static class Program
+         using(var tab=(Control)Activator.CreateInstance(T("MapUpgradesTab"),new object[]{new Func<string>(()=>workspace),new Func<string>(()=>""),loader})!)
+         {
+             tab.Dock=DockStyle.Fill;host.Controls.Add(tab);host.CreateControl();tab.CreateControl();
++            _ = host.Handle;
++            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+             Call(tab,"ConfigureStaging",new Func<Task>(()=>{S("UpgradeChanges","Stage",catalog);return Task.CompletedTask;}));
+             Pump((Task)Call(tab,"EnsureLoadedAsync")!);
+             var grid=(DataGridView)Field(tab,"_upgrades");
+@@ -99,6 +102,24 @@ static class Program
+             ((Button)Field(tab,"_stage")).PerformClick();
+             var until=DateTime.UtcNow.AddSeconds(15);while(!((Label)Field(tab,"_status")).Text.Contains("test conflict")&&DateTime.UtcNow<until){Application.DoEvents();Thread.Sleep(5);}
+             Check(((Label)Field(tab,"_status")).Text.Contains("test conflict"),"staging errors remain visible after reloading rows");
++            Call(tab,"ConfigureApplying",new Func<Task>(()=>{S("UpgradeChanges","Apply",workspace);return Task.CompletedTask;}));
++            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
++            Pump((Task)Call(tab,"EnsureLoadedAsync")!);
++            Check(((Button)Field(tab,"_apply")).Enabled,"direct Apply enabled for persisted staged upgrade snapshot: " + ((Label)Field(tab,"_status")).Text);
++            // Applying must use the saved snapshot even if the live draft subsequently changes.
++            S("UpgradeTrialStore","Save",workspace,Draft("old"));
++            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
++            ((Button)Field(tab,"_apply")).PerformClick();
++            var appliedUntil=DateTime.UtcNow.AddSeconds(30);
++            while(!((Label)Field(tab,"_status")).Text.Contains("Pack to a new PAK")&&DateTime.UtcNow<appliedUntil){Application.DoEvents();Thread.Sleep(5);}
++            Check(((Label)Field(tab,"_status")).Text.Contains("Pack to a new PAK"),"direct Apply explains remaining packing/install step");
++            Check(S("UpgradeChanges","CurrentId",workspace,JsonSerializer.Deserialize(Slot("zone"),T("UpgradeDistributionSlot"))!)!.ToString()=="new","direct Apply writes staged pickup and ignores later draft");
++            Check(!((Button)Field(tab,"_apply")).Enabled,"direct Apply disabled after staged snapshot is consumed");
++            S("UpgradeTrialStore","Save",workspace,Draft("new"));
++            Write(updated,"[ps]/level_us_01_01.sso",sso);
++            Write(updated,"[media]/classes/engines/test.xml",xml);
++            Write(updated,"[media]/classes/wheels/wheel.xml",File.ReadAllText(Path.Combine(original,"[media]/classes/wheels/wheel.xml")));
++            S("UpgradeChanges","Stage",catalog);
+             using var bitmap=new Bitmap(host.Width,host.Height);host.DrawToBitmap(bitmap,new Rectangle(Point.Empty,host.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"upgrade-staging.png"));
+         }
+         using(var main=(Form)Activator.CreateInstance(T("MainForm"))!)

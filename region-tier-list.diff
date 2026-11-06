@@ -1,0 +1,245 @@
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -12,6 +12,7 @@
+     private readonly Func<IReadOnlyList<CustomTruck>> _getAvailableTrucks;
+     private readonly List<GroupState> _states;
+     private readonly bool _tierList;
++    private readonly bool _regionList;
+     private readonly List<GroupView> _groupViews = [];
+     private string? _lastTruckSignature;
+     private readonly HashSet<string> _availableTruckCodes = new(StringComparer.OrdinalIgnoreCase);
+@@ -20,10 +21,12 @@
+ private FlowLayoutPanel? _groupList;
+     private readonly Label _status = new() { AutoSize = true, Text = "Load a workspace to list trucks." };
+ 
+-    public CustomGroupWipTab(Func<IReadOnlyList<CustomTruck>> getAvailableTrucks, bool tierList = false)
+-    {
+-        _tierList = tierList;
+-        _states = tierList ? TierListStore.Load() : CustomGroupStore.Load();
++    public CustomGroupWipTab(Func<IReadOnlyList<CustomTruck>> getAvailableTrucks, bool tierList = false, bool regionList = false)
++    {
++        _regionList = regionList;
++        _tierList = tierList || regionList;
++        _states = regionList ? RegionTierListStore.Load() : tierList ? TierListStore.Load() : CustomGroupStore.Load();
++        if (regionList) _status.Text = "Load a workspace to list regions.";
+         _getAvailableTrucks = getAvailableTrucks;
+         BuildLayout();
+         var wheelFilter = new DirectionalWheelFilter(this);
+@@ -45,7 +48,7 @@
+ 
+         var intro = new Label
+         {
+-            Text = _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
++            Text = _regionList ? "Drag regions into tiers or back to Unsorted." : _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
+             AutoSize = true,
+             Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+             Padding = new Padding(4, 4, 4, 10)
+@@ -75,7 +78,7 @@
+         groupList.SizeChanged += (_, _) => ResizeGroupPanes(groupList);
+         _groupList = groupList;
+ 
+-        var allTrucksPanel = CreateTilePanel("Unsorted", "Drag trucks into groups or back here to remove them from a group.");
++        var allTrucksPanel = CreateTilePanel("Unsorted", _regionList ? "Drag regions into tiers or back here." : "Drag trucks into groups or back here to remove them from a group.");
+         _unsortedTiles = allTrucksPanel.Tiles;
+         _unsortedTiles.SizeChanged += (_, _) => UpdateUnsortedPaneWidth();
+         allTrucksPanel.Tiles.AllowDrop = true;
+@@ -233,17 +236,18 @@
+         }
+         foreach (var truck in trucks
+                      .Where(truck => !groupedCodes.Contains(truck.Code))
+-                     .OrderBy(truck => truck.Name, StringComparer.CurrentCultureIgnoreCase))
++                     .OrderBy(truck => _regionList ? RegionTileAssets.GetReleaseOrder(truck.Code) : 0)
++                     .ThenBy(truck => truck.Name, StringComparer.CurrentCultureIgnoreCase))
+         {
+             AddTileTo(_unsortedTiles, truck);
+         }
+         UpdateUnsortedPaneWidth();
+-        _status.Text = $"Loaded {trucks.Count} available trucks. Changes save automatically.";
++        _status.Text = $"Loaded {trucks.Count} available {(_regionList ? "regions" : "trucks")}. Changes save automatically.";
+     }
+ 
+     private void AddTileTo(TileFlowPanel panel, CustomTruck truck)
+     {
+-        var tile = CreateTile(truck);
++        var tile = CreateTile(truck, _regionList);
+         AttachTileDragHandlers(tile, tile, _groupList);
+         AttachTileDropTargets(tile, _groupList);
+         panel.Controls.Add(tile);
+@@ -338,7 +342,8 @@
+     {
+         try
+         {
+-            if (_tierList) TierListStore.Save(_states);
++            if (_regionList) RegionTierListStore.Save(_states);
++            else if (_tierList) TierListStore.Save(_states);
+             else CustomGroupStore.Save(_states);
+             _status.Text = _tierList ? "Tiers saved." : "Custom groups saved.";
+ 
+@@ -566,7 +571,7 @@
+         UpdateUnsortedPaneWidth();
+     }
+ 
+-    private static Panel CreateTile(CustomTruck truck)
++    private static Panel CreateTile(CustomTruck truck, bool region = false)
+     {
+         var tile = new SearchableTruckTile
+         {
+@@ -580,16 +585,24 @@
+         var image = new PictureBox
+         {
+             Dock = DockStyle.Fill,
+-            Image = TruckThumbnailProvider.PlaceholderImage,
++            Image = region ? RegionTileAssets.GetThumbnail(truck.Code) : TruckThumbnailProvider.PlaceholderImage,
+             SizeMode = PictureBoxSizeMode.Zoom,
+             BackColor = Color.FromArgb(30, 35, 40)
+         };
+-        _ = LoadTileImageAsync(image, truck);
++        if (!region) _ = LoadTileImageAsync(image, truck);
++        else if (image.Image is null)
++        {
++            image.Controls.Add(new Label
++            {
++                Text = truck.Code.ToUpperInvariant(), Dock = DockStyle.Fill,
++                TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.White
++            });
++        }
+         var name = new Label
+         {
+             Text = truck.Name,
+             Dock = DockStyle.Top,
+-            Height = 30,
++            Height = region ? 44 : 30,
+             BackColor = Color.FromArgb(32, 38, 45),
+             ForeColor = Color.White,
+             Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8.5f, FontStyle.Bold),
+@@ -613,7 +626,7 @@
+         classOverlay.BringToFront();
+         void ApplyClassColor()
+         {
+-            var key = truck.Class.Replace("-", "").Replace(" ", "").Replace("_", "").ToLowerInvariant() switch
++            var key = region ? null : truck.Class.Replace("-", "").Replace(" ", "").Replace("_", "").ToLowerInvariant() switch
+             {
+                 "heavy" => "TruckClassHeavy",
+                 "heavyduty" => "TruckClassHeavyDuty",
+--- MainForm.cs
++++ MainForm.cs
+@@ -12,6 +12,8 @@
+     private readonly OwnedContentTab _ownedContentTab;
+     private readonly CustomGroupWipTab _customGroupWipTab;
+     private readonly CustomGroupWipTab _tierListTab;
++    private readonly CustomGroupWipTab _regionTierListTab;
++    private IReadOnlyList<CustomTruck> _tierRegions = Array.Empty<CustomTruck>();
+     private readonly TruckEditTab _truckEditTab;
+     private readonly TrucksCargoTab _trucksCargoTab;
+     private readonly RegionsTrucksTab _regionsTrucksTab;
+@@ -50,6 +52,7 @@
+         _ownedContentTab.OwnedTrucksChanged += _customGroupWipTab.RefreshOwnedTrucks;
+         _tierListTab = new CustomGroupWipTab(_ownedContentTab.GetAvailableCustomGroupingTrucks, tierList: true);
+         _ownedContentTab.OwnedTrucksChanged += _tierListTab.RefreshOwnedTrucks;
++        _regionTierListTab = new CustomGroupWipTab(() => _tierRegions, regionList: true);
+         _truckEditTab = new TruckEditTab(() => _workspacePath.Text.Trim(), _ownedContentTab);
+         _trucksCargoTab = new TrucksCargoTab(() => _workspacePath.Text.Trim());
+         _regionsTrucksTab = new RegionsTrucksTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim(), getEnabledTrucks: () =>
+@@ -122,6 +125,7 @@
+         var ownedContentPage = new TabPage("Owned content");
+         var customGroupingPage = new TabPage("Custom grouping");
+         var tierListPage = new TabPage("Tier List");
++        var regionTierListPage = new TabPage("Region Tier List");
+         var truckEditPage = new TabPage("Truck edit");
+         var gameDataPage = new TabPage("Game data");
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+@@ -135,6 +139,8 @@
+         _customGroupWipTab.Dock = DockStyle.Fill;
+         _tierListTab.Dock = DockStyle.Fill;
+         tierListPage.Controls.Add(_tierListTab);
++        _regionTierListTab.Dock = DockStyle.Fill;
++        regionTierListPage.Controls.Add(_regionTierListTab);
+         _truckEditTab.Dock = DockStyle.Fill;
+         _settingsTab.Dock = DockStyle.Fill;
+         unpackPage.Controls.Add(root);
+@@ -161,6 +167,7 @@
+         tabs.TabPages.Add(ownedContentPage);
+         tabs.TabPages.Add(customGroupingPage);
+         tabs.TabPages.Add(tierListPage);
++        tabs.TabPages.Add(regionTierListPage);
+         tabs.TabPages.Add(experiencePage);
+         tabs.TabPages.Add(truckEditPage);
+         tabs.TabPages.Add(gameDataPage);
+@@ -199,6 +206,15 @@
+             {
+                 _ownedContentTab.EnsureLoaded();
+                 _tierListTab.RefreshOwnedTrucks();
++            }
++            if (selectedPage == regionTierListPage)
++            {
++                _tierRegions = WorkspaceDataCache.GetRegionMetadata(_workspacePath.Text.Trim())
++                    .OrderBy(entry => RegionTileAssets.GetReleaseOrder(entry.Key))
++                    .ThenBy(entry => entry.Value.Name, StringComparer.CurrentCultureIgnoreCase)
++                    .Select(entry => new CustomTruck(entry.Key, entry.Value.Name, RegionTileAssets.GetReleaseLabel(entry.Key)))
++                    .ToList();
++                _regionTierListTab.RefreshOwnedTrucks();
+             }
+             if (selectedPage == truckEditPage)
+             {
+--- /dev/null
++++ RegionTierListStore.cs
+@@ -0,0 +1,48 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>Region rankings are independent of truck tiers and custom truck groups.</summary>
++internal static class RegionTierListStore
++{
++    private static readonly string StateFile = Path.Combine(
++        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++        "SnowPakTool.Desktop", "region-tiers.json");
++    private static readonly string[] Names = ["S", "A", "B", "C", "D"];
++
++    private sealed class RegionTierState
++    {
++        public string Name { get; set; } = string.Empty;
++        public List<string> RegionCodes { get; set; } = [];
++    }
++
++    public static List<GroupState> Load()
++    {
++        List<RegionTierState>? saved = null;
++        try
++        {
++            if (File.Exists(StateFile))
++                saved = JsonSerializer.Deserialize<List<RegionTierState>>(File.ReadAllText(StateFile));
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { }
++        // The shared tile board uses TruckCodes internally for both kinds of tile.
++        return Names.Select(name => new GroupState
++        {
++            Name = name,
++            TruckCodes = saved?.FirstOrDefault(tier => tier.Name == name)?.RegionCodes ?? []
++        }).ToList();
++    }
++
++    public static void Save(IReadOnlyList<GroupState> tiers)
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
++        var temporaryFile = StateFile + ".tmp";
++        var saved = Names.Select(name => new RegionTierState
++        {
++            Name = name,
++            RegionCodes = tiers.FirstOrDefault(tier => tier.Name == name)?.TruckCodes ?? []
++        });
++        File.WriteAllText(temporaryFile, JsonSerializer.Serialize(saved, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporaryFile, StateFile, overwrite: true);
++    }
++}
+--- README.md
++++ README.md
+@@ -19,6 +19,8 @@
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
++
++The **Region Tier List** tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+ 

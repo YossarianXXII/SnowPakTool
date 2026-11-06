@@ -1,0 +1,33 @@
+--- src/SnowPakTool.Desktop/RegionTierListStore.cs
++++ src/SnowPakTool.Desktop/RegionTierListStore.cs
+@@ -8,7 +8,7 @@
+     private static readonly string StateFile = Path.Combine(
+         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+         "SnowPakTool.Desktop", "region-tiers.json");
+-    private static readonly string[] Names = ["S", "A", "B", "C"];
++    private static readonly string[] Names = ["S", "A", "B", "C", "D"];
+ 
+     private sealed class RegionTierState
+     {
+--- src/SnowPakTool.Desktop/CustomGroupWipTab.cs
++++ src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+@@ -50,7 +50,7 @@
+ 
+         var intro = new Label
+         {
+-            Text = _regionList ? "Rank regions by difficulty from S (hardest) to C (easiest). Drag regions into tiers or back to Unsorted." : _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
++            Text = _regionList ? "Rank regions by difficulty from S (hardest) to D (easiest). Drag regions into tiers or back to Unsorted." : _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
+             AutoSize = true,
+             Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+             Padding = new Padding(4, 4, 4, 10)
+--- README.md
++++ README.md
+@@ -20,7 +20,7 @@
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, and C tiers, from hardest to easiest. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
++The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+ 

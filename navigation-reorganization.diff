@@ -1,0 +1,611 @@
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -20,7 +20,6 @@
+     private readonly RegionsTrucksTab _regionsTrucksTab;
+     private readonly TruckPropertiesTab _truckPropertiesTab;
+     private readonly TruckRandomizationTab _truckRandomizationTab;
+-    private readonly SettingsTab _settingsTab;
+     private StartChangesPanel? _startChanges;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+@@ -66,7 +65,6 @@
+         });
+         _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync);
+         _truckPropertiesTab = new TruckPropertiesTab(() => _workspacePath.Text.Trim(), _regionsTrucksTab.GetRandomizationCatalogAsync);
+-        _settingsTab = new SettingsTab();
+         BuildLayout();
+         _workspacePath.TextChanged += (_, _) => _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+@@ -125,77 +123,51 @@
+         root.Controls.Add(startSplit, 0, 3);
+         root.Controls.Add(_loadingBar, 0, 4);
+ 
+-        var tabs = new TabControl { Dock = DockStyle.Fill };
+-        var unpackPage = new TabPage("Start");
+-        var experiencePage = new TabPage("Experience / Ranks");
+-        var ownedContentPage = new TabPage("Owned content");
+-        var customGroupingPage = new TabPage("Custom grouping");
+-        var tierListsPage = new TabPage("Tier lists");
+-        var tierListTabs = new TabControl { Dock = DockStyle.Fill };
+-        var tierListPage = new TabPage("Truck");
+-        var regionTierListPage = new TabPage("Region Difficulty");
+-        var truckEditPage = new TabPage("Truck edit");
+-        var gameDataPage = new TabPage("Game data");
+-        var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+-        var trucksCargoPage = new TabPage("Trucks-Cargo");
+-        var regionsTrucksPage = new TabPage("Regions-Trucks");
+-        var truckPropertiesPage = new TabPage("Truck properties");
+-        var randomizerPage = new TabPage("Randomizer");
+-        var randomizerTabs = new TabControl { Dock = DockStyle.Fill };
+-        var regionProgressionPage = new TabPage("Region progression");
+-        var truckRandomizationPage = new TabPage("Truck-Randomization");
+-        var settingsPage = new TabPage("Settings");
+-        root.Dock = DockStyle.Fill;
+-        _experienceTab.Dock = DockStyle.Fill;
+-        _ownedContentTab.Dock = DockStyle.Fill;
+-        _customGroupWipTab.Dock = DockStyle.Fill;
+-        _tierListTab.Dock = DockStyle.Fill;
+-        tierListPage.Controls.Add(_tierListTab);
+-        _regionTierListTab.Dock = DockStyle.Fill;
+-        regionTierListPage.Controls.Add(_regionTierListTab);
+-        tierListTabs.TabPages.Add(tierListPage);
+-        tierListTabs.TabPages.Add(regionTierListPage);
+-        tierListsPage.Controls.Add(tierListTabs);
+-        _truckEditTab.Dock = DockStyle.Fill;
+-        _settingsTab.Dock = DockStyle.Fill;
+-        unpackPage.Controls.Add(root);
+-        experiencePage.Controls.Add(_experienceTab);
+-        ownedContentPage.Controls.Add(_ownedContentTab);
+-        customGroupingPage.Controls.Add(_customGroupWipTab);
+-        truckEditPage.Controls.Add(_truckEditTab);
+-        _trucksCargoTab.Dock = DockStyle.Fill;
+-        trucksCargoPage.Controls.Add(_trucksCargoTab);
+-        gameDataTabs.TabPages.Add(trucksCargoPage);
+-        _regionsTrucksTab.Dock = DockStyle.Fill;
+-        regionsTrucksPage.Controls.Add(_regionsTrucksTab);
+-        gameDataTabs.TabPages.Add(regionsTrucksPage);
+-        _truckPropertiesTab.Dock = DockStyle.Fill;
+-        truckPropertiesPage.Controls.Add(_truckPropertiesTab);
+-        gameDataTabs.TabPages.Add(truckPropertiesPage);
+-        _truckRandomizationTab.Dock = DockStyle.Fill;
+-        truckRandomizationPage.Controls.Add(_truckRandomizationTab);
+-        _regionProgressionTab.Dock = DockStyle.Fill;
+-        regionProgressionPage.Controls.Add(_regionProgressionTab);
+-        randomizerTabs.TabPages.Add(regionProgressionPage);
+-        randomizerTabs.TabPages.Add(truckRandomizationPage);
+-        randomizerPage.Controls.Add(randomizerTabs);
+-        gameDataTabs.SelectedIndexChanged += async (_, _) =>
+-        {
+-            if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+-            else if (gameDataTabs.SelectedTab == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
+-            else if (gameDataTabs.SelectedTab == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
+-        };
+-        gameDataPage.Controls.Add(gameDataTabs);
+-        settingsPage.Controls.Add(_settingsTab);
+-        tabs.TabPages.Add(unpackPage);
+-        tabs.TabPages.Add(ownedContentPage);
+-        tabs.TabPages.Add(customGroupingPage);
+-        tabs.TabPages.Add(tierListsPage);
+-        tabs.TabPages.Add(experiencePage);
+-        tabs.TabPages.Add(truckEditPage);
+-        tabs.TabPages.Add(gameDataPage);
+-        tabs.TabPages.Add(randomizerPage);
+-        tabs.TabPages.Add(settingsPage);
++        var tabs = new NavigationTabControl { Name = "MainNavigation" };
++        TabPage Page(string text, string name, Control content)
++        {
++            var page = new TabPage(text) { Name = name };
++            content.Dock = DockStyle.Fill;
++            page.Controls.Add(content);
++            return page;
++        }
++        var unpackPage = Page("Start", "Start", root);
++        var planningTabs = new NavigationTabControl { Name = "PlanningNavigation" };
++        var ownedContentPage = Page("Owned content", "OwnedContent", _ownedContentTab);
++        var tierListPage = Page("Truck tiers", "TruckTiers", _tierListTab);
++        var regionTierListPage = Page("Region difficulty", "RegionDifficulty", _regionTierListTab);
++        var customGroupingPage = Page("Truck groups", "TruckGroups", _customGroupWipTab);
++        planningTabs.TabPages.AddRange([ownedContentPage, tierListPage, regionTierListPage, customGroupingPage]);
++        var planningPage = Page("Planning", "Planning", planningTabs);
++        var randomizerTabs = new NavigationTabControl { Name = "RandomizerNavigation" };
++        var regionProgressionPage = Page("Region progression", "RegionProgression", _regionProgressionTab);
++        var truckRandomizationPage = Page("Truck randomization", "TruckRandomization", _truckRandomizationTab);
++        randomizerTabs.TabPages.AddRange([regionProgressionPage, truckRandomizationPage]);
++        var randomizerPage = Page("Randomizer", "Randomizer", randomizerTabs);
++        var editorTabs = new NavigationTabControl { Name = "EditorsNavigation" };
++        var truckPropertiesPage = Page("Truck properties", "TruckProperties", _truckPropertiesTab);
++        var experiencePage = Page("Experience / Ranks", "ExperienceRanks", _experienceTab);
++        var truckEditorPages = _truckEditTab.TakeEditorPages();
++        editorTabs.TabPages.Add(truckPropertiesPage);
++        foreach (var name in new[] { "Engines", "Winches", "Addons" })
++            editorTabs.TabPages.Add(truckEditorPages.Single(page => page.Name == name));
++        editorTabs.TabPages.Add(experiencePage);
++        var editorsPage = Page("Editors", "Editors", editorTabs);
++        var gameDataTabs = new NavigationTabControl { Name = "GameDataNavigation" };
++        var regionsTrucksPage = Page("Map trucks", "MapTrucks", _regionsTrucksTab);
++        var trucksCargoPage = Page("Cargo", "Cargo", _trucksCargoTab);
++        gameDataTabs.TabPages.AddRange([regionsTrucksPage, trucksCargoPage]);
++        var gameDataPage = Page("Game data", "GameData", gameDataTabs);
++        tabs.TabPages.AddRange([unpackPage, planningPage, randomizerPage, editorsPage, gameDataPage]);
++
++        void ShowPendingCount(int count) => unpackPage.Text = count > 0 ? $"Start ({count})" : "Start";
++        void RefreshPendingCount()
++        {
++            var workspace = _workspacePath.Text.Trim();
++            try { ShowPendingCount(Directory.Exists(workspace) ? PendingPakChanges(workspace).Count + PendingTruckReplacements.Load(workspace).Count : 0); }
++            catch { /* Preserve the last known count; Start reports detailed read errors. */ }
++        }
++        _startChanges.PendingCountChanged += ShowPendingCount;
+         void LoadTierRegions(string workspace)
+         {
+             var regionNames = WorkspaceDataCache.GetLocalizedNames(workspace);
+@@ -206,95 +178,99 @@
+                     RegionTileAssets.GetMapNames(entry.Key, regionNames)))
+                 .ToList();
+         }
+-        async Task RefreshRegionProgressionAsync()
+-        {
+-            if (tabs.SelectedTab != randomizerPage || randomizerTabs.SelectedTab != regionProgressionPage) return;
++        async Task RefreshSelectedPageAsync()
++        {
++            var selectedMain = tabs.SelectedTab;
++            var selectedGroup = selectedMain?.Controls.OfType<TabControl>().FirstOrDefault();
++            var selectedPage = selectedGroup?.SelectedTab ?? selectedMain;
+             var workspace = _workspacePath.Text.Trim();
++            if (selectedPage is null || !Directory.Exists(workspace))
++            {
++                ShowPendingCount(0);
++                if (selectedPage == unpackPage) await _startChanges.RefreshAsync();
++                return;
++            }
+             try
+             {
+-                await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+-                if (tabs.SelectedTab != randomizerPage || randomizerTabs.SelectedTab != regionProgressionPage ||
+-                    !string.Equals(workspace, _workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+-                LoadTierRegions(workspace);
+-                _regionProgressionTab.RefreshRegions();
+-            }
+-            catch (Exception ex) { AppendLog($"Region progression loading failed: {ex.Message}"); }
+-        }
+-        randomizerTabs.SelectedIndexChanged += async (_, _) => await RefreshRegionProgressionAsync();
+-        async Task RefreshSelectedTierListAsync()
+-        {
+-            if (tabs.SelectedTab != tierListsPage) return;
+-            var selectedTier = tierListTabs.SelectedTab;
+-            var workspace = _workspacePath.Text.Trim();
+-            try
+-            {
+-                await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+-                if (tabs.SelectedTab != tierListsPage || tierListTabs.SelectedTab != selectedTier ||
+-                    !string.Equals(workspace, _workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+-                if (selectedTier == tierListPage)
++                if (selectedMain == planningPage || selectedPage == regionProgressionPage)
++                    await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++                else await WorkspaceDataCache.PreloadAsync(workspace);
++                // A slow load must not initialize a page or workspace the user has already left.
++                if (IsDisposed || tabs.SelectedTab != selectedMain || (selectedGroup is not null && selectedGroup.SelectedTab != selectedPage)
++                    || !workspace.Equals(_workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
++                if (selectedPage == unpackPage) await _startChanges.RefreshAsync();
++                else if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
++                else if (selectedPage == tierListPage || selectedPage == customGroupingPage)
+                 {
+                     _ownedContentTab.EnsureLoaded();
+-                    _tierListTab.RefreshOwnedTrucks();
++                    if (selectedPage == tierListPage) _tierListTab.RefreshOwnedTrucks();
++                    else _customGroupWipTab.RefreshOwnedTrucks();
+                 }
+-                else if (selectedTier == regionTierListPage)
++                else if (selectedPage == regionTierListPage || selectedPage == regionProgressionPage)
+                 {
+                     LoadTierRegions(workspace);
+-                    _regionTierListTab.RefreshOwnedTrucks();
++                    if (selectedPage == regionTierListPage) _regionTierListTab.RefreshOwnedTrucks();
++                    else _regionProgressionTab.RefreshRegions();
+                 }
+-            }
+-            catch (Exception ex) { AppendLog($"Tier list loading failed: {ex.Message}"); }
+-        }
+-        tierListTabs.SelectedIndexChanged += async (_, _) => await RefreshSelectedTierListAsync();
+-        tabs.SelectedIndexChanged += async (_, _) =>
+-        {
+-            var selectedPage = tabs.SelectedTab;
+-            if (selectedPage is null) return;
+-            try
+-            {
+-                if (selectedPage == ownedContentPage || selectedPage == customGroupingPage || selectedPage == tierListsPage)
+-                    await WorkspaceDataCache.PreloadOwnedAsync(_workspacePath.Text.Trim());
+-                else
+-                    await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim());
+-            }
+-            catch (Exception ex)
+-            {
+-                AppendLog($"Workspace preload failed: {ex.Message}");
+-            }
+-            if (tabs.SelectedTab != selectedPage) return;
+-            if (selectedPage == unpackPage && _startChanges is not null) await _startChanges.RefreshAsync();
+-
+-            if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+-            if (selectedPage == gameDataPage)
+-            {
+-                if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+-                else if (gameDataTabs.SelectedTab == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
+-                else if (gameDataTabs.SelectedTab == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
+-            }
+-            if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
+-            if (selectedPage == customGroupingPage)
+-            {
+-                _ownedContentTab.EnsureLoaded();
+-                _customGroupWipTab.RefreshOwnedTrucks();
+-            }
+-            if (selectedPage == tierListsPage) await RefreshSelectedTierListAsync();
+-            if (selectedPage == randomizerPage) await RefreshRegionProgressionAsync();
+-            if (selectedPage == truckEditPage)
+-            {
+-                _ownedContentTab.EnsureLoaded();
+-                _truckEditTab.EnsureLoaded();
+-            }
+-        };
+-        Shown += async (_, _) =>
+-        {
+-            try { await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim()); }
+-            catch (Exception ex) { AppendLog($"Workspace preload failed: {ex.Message}"); }
+-            if (_startChanges is not null) await _startChanges.RefreshAsync();
+-        };
+-        Controls.Add(tabs);
++                else if (selectedPage == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
++                else if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
++                else if (selectedMain == editorsPage)
++                {
++                    _ownedContentTab.EnsureLoaded();
++                    _truckEditTab.EnsureEditorLoaded(selectedPage);
++                }
++                else if (selectedPage == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
++                else if (selectedPage == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
++                RefreshPendingCount();
++            }
++            catch (Exception ex) { if (!IsDisposed) AppendLog($"Page loading failed: {ex.Message}"); }
++        }
++        // Each group retains its selected child when leaving and returning to the group.
++        tabs.SelectedIndexChanged += async (_, _) => await RefreshSelectedPageAsync();
++        foreach (var group in new[] { planningTabs, randomizerTabs, editorTabs, gameDataTabs })
++            group.SelectedIndexChanged += async (_, _) => { if (group.Parent == tabs.SelectedTab) await RefreshSelectedPageAsync(); };
++        _workspacePath.TextChanged += async (_, _) => await RefreshSelectedPageAsync();
++        Shown += async (_, _) => await RefreshSelectedPageAsync();
++
++        var navigationHost = new Panel { Dock = DockStyle.Fill };
++        navigationHost.Controls.Add(tabs);
++        var settings = new Button { Name = "SettingsButton", Text = "\uE713", AccessibleName = "Settings", TabStop = true,
++            Font = new Font("Segoe MDL2 Assets", 12f), FlatStyle = FlatStyle.Flat, Anchor = AnchorStyles.Top | AnchorStyles.Right };
++        settings.FlatAppearance.BorderSize = 0;
++        var settingsTip = new ToolTip(); settingsTip.SetToolTip(settings, "Settings");
++        void PositionSettings()
++        {
++            var size = Math.Max(28, tabs.ItemSize.Height);
++            settings.Size = new Size(size, size);
++            settings.Location = new Point(navigationHost.ClientSize.Width - size - 4, 0);
++        }
++        navigationHost.Controls.Add(settings); settings.BringToFront();
++        navigationHost.SizeChanged += (_, _) => PositionSettings();
++        navigationHost.DpiChangedAfterParent += (_, _) => PositionSettings();
++        PositionSettings(); settings.Click += (_, _) => ShowSettings();
++        Controls.Add(navigationHost);
+         var search = new CurrentTabSearch(() => tabs.SelectedTab);
+         search.Attach(this);
+-        Disposed += (_, _) => search.Dispose();
++        Disposed += (_, _) => { search.Dispose(); settingsTip.Dispose(); settings.Font.Dispose(); _truckEditTab.Dispose(); };
+         _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
++    }
++
++    private Form CreateSettingsWindow()
++    {
++        var window = new Form { Text = "Settings", StartPosition = FormStartPosition.CenterParent,
++            Size = new Size(850, 700), MinimumSize = new Size(720, 420), ShowInTaskbar = false };
++        var settings = new SettingsTab { Dock = DockStyle.Fill };
++        window.Controls.Add(settings);
++        var search = new CurrentTabSearch(() => settings);
++        search.Attach(window);
++        window.Disposed += (_, _) => search.Dispose();
++        return window;
++    }
++
++    private void ShowSettings()
++    {
++        using var window = CreateSettingsWindow();
++        window.ShowDialog(this);
+     }
+ 
+     private void BrowsePak()
+--- a/README.md
++++ b/README.md
+@@ -14,19 +14,21 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Regions-Trucks. That tab has Reset truck to original and Reset selected regions to original buttons, which clear assignments and queue restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
++Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
++
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Map trucks. That tab has Reset truck to original and Reset selected regions to original buttons, which clear assignments and queue restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-**Game data → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells or use the −/+ glyphs to adjust all explicitly defined values (10 L fuel, 1 rank, 1,000 price), bounded to the displayed ranges. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
++**Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells or use the −/+ glyphs to adjust all explicitly defined values (10 L fuel, 1 rank, 1,000 price), bounded to the displayed ranges. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+-The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
++The **Planning** tab contains **Truck tiers** and **Region difficulty**, alongside ownership and truck groups. **Region difficulty** ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+-ANK MK38 Civilian (`ank_mk38_ht`) is included in the base truck catalog even though its XML is stored under `_dlc/dlc_6` without a truck entitlement entry. It appears in Tier lists → Truck → Unsorted until ranked, and shares that assignment with Truck properties. Its tier is independent of the regular ANK MK38.
++ANK MK38 Civilian (`ank_mk38_ht`) is included in the base truck catalog even though its XML is stored under `_dlc/dlc_6` without a truck entitlement entry. It appears in Planning → Truck tiers → Unsorted until ranked, and shares that assignment with Truck properties. Its tier is independent of the regular ANK MK38.
+ 
+-Tire randomization has its own saved **Easy / Normal / Hard** selector in Randomizer → Truck-Randomization → Obtainable, independent of Region progression difficulty. Every new placement rolls independently. The first region in the finalized order requests 99% Highway and 1% All-terrain in every mode, even if it is ranked S or is the only region. Later tire weights blend progression position (80%) with region difficulty (up to 20%, introduced gradually), interpolating from Highway toward better categories. Easy grants better tires sooner; Hard keeps weaker tires in the mix. In the final S-tier region, Highway / All-terrain / Offroad / Mudtires odds are 0/5/25/70% on Easy, 3/12/40/45% on Normal, and 10/25/35/30% on Hard. Truck compatibility can change the actual category to the nearest supported one; the smallest supported size and first variant are still used. Detailed logs show the position, region tier, tire difficulty, requested odds and any fallback without naming replacement trucks. Existing saved/pending assignments stay fixed; use Regions-Trucks reset before rerandomizing them under different settings. Changing tire difficulty does not change the finalized region order or apply map files. The former unedited default tire-rule note is updated when loaded; custom notes and empty lists are preserved.
++Tire randomization has its own saved **Easy / Normal / Hard** selector in Randomizer → Truck randomization → Obtainable, independent of Region progression difficulty. Every new placement rolls independently. The first region in the finalized order requests 99% Highway and 1% All-terrain in every mode, even if it is ranked S or is the only region. Later tire weights blend progression position (80%) with region difficulty (up to 20%, introduced gradually), interpolating from Highway toward better categories. Easy grants better tires sooner; Hard keeps weaker tires in the mix. In the final S-tier region, Highway / All-terrain / Offroad / Mudtires odds are 0/5/25/70% on Easy, 3/12/40/45% on Normal, and 10/25/35/30% on Hard. Truck compatibility can change the actual category to the nearest supported one; the smallest supported size and first variant are still used. Detailed logs show the position, region tier, tire difficulty, requested odds and any fallback without naming replacement trucks. Existing saved/pending assignments stay fixed; use Map trucks reset before rerandomizing them under different settings. Changing tire difficulty does not change the finalized region order or apply map files. The former unedited default tire-rule note is updated when loaded; custom notes and empty lists are preserved.
+ 
+ Run it from the repository root with:
+ 
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -140,7 +140,7 @@
+     {
+         while (_loading && !IsDisposed) await Task.Delay(50);
+         await LoadAsync(force: false);
+-        return _catalog ?? throw new InvalidOperationException("No map data is loaded. Choose a workspace and map folder in Game data → Regions-Trucks.");
++        return _catalog ?? throw new InvalidOperationException("No map data is loaded. Choose a workspace and map folder in Game data → Map trucks.");
+     }
+ 
+     private async Task ResetOriginalAsync(IReadOnlyList<RegionTruckEntry> entries)
+--- a/src/SnowPakTool.Desktop/SettingsTab.cs
++++ b/src/SnowPakTool.Desktop/SettingsTab.cs
+@@ -13,14 +13,13 @@
+ 
+     public SettingsTab()
+     {
+-        var tabs = new TabControl { Dock = DockStyle.Fill };
+-        var colorsPage = new TabPage("Colors");
+-        colorsPage.Controls.Add(_colors);
+-        tabs.TabPages.Add(colorsPage);
+-        Controls.Add(tabs);
++        Controls.Add(_colors);
+         BuildColorRows();
+-        AppColors.Changed += (_, _) => BuildColorRows();
++        AppColors.Changed += ColorsChanged;
++        Disposed += (_, _) => AppColors.Changed -= ColorsChanged;
+     }
++
++    private void ColorsChanged(object? sender, EventArgs e) => BuildColorRows();
+ 
+     private void BuildColorRows()
+     {
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -20,6 +20,8 @@
+     private readonly List<Label> _legend = [];
+     private int _request;
+     private string _displayedWorkspace = "";
++
++    public event Action<int>? PendingCountChanged;
+ 
+     public StartChangesPanel(Func<string> workspace, Control pakActions, Func<string, IReadOnlyList<WorkspaceChange>> pendingPak,
+         Action savePak, Func<Task> applyMaps, Func<Task> reloadRegions)
+@@ -79,7 +81,7 @@
+         var request = ++_request; var workspace = _workspace().Trim();
+         if (_displayedWorkspace != workspace) { Bind(_pak, []); Bind(_maps, []); _displayedWorkspace = workspace; }
+         _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
+-        if (!Directory.Exists(workspace)) { Bind(_pak, []); Bind(_maps, []); _status.Text = "Choose a workspace."; return; }
++        if (!Directory.Exists(workspace)) { Bind(_pak, []); Bind(_maps, []); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
+         _status.Text = "Comparing files…"; _refresh.Enabled = false;
+         try
+         {
+@@ -93,6 +95,7 @@
+                 _savePakButton.Enabled = pending.Count > 0;
+                 _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
+                 _repairMaps.Enabled = result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
++                PendingCountChanged?.Invoke(pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending));
+                 _status.Text = $"{result.Pak.Count + result.Maps.Count(change => change.State == WorkspaceChange.InFiles)} in files · {pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending)} pending";
+             });
+         }
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -15,6 +15,7 @@
+     private readonly Func<string> _getWorkspacePath;
+     private readonly OwnedContentTab _ownedContent;
+     private readonly EngineEditTab _engineEditTab;
++    private bool _pagesHostedExternally;
+     private readonly TabControl _subTabs = new() { Dock = DockStyle.Fill };
+     private readonly DataGridView _winchGrid = new()
+     {
+@@ -111,9 +112,9 @@
+ 
+     private void BuildLayout()
+     {
+-        var winchesPage = new TabPage("Winches");
+-        var enginesPage = new TabPage("Engines");
+-        var addonsPage = new TabPage("Addons");
++        var winchesPage = new TabPage("Winches") { Name = "Winches" };
++        var enginesPage = new TabPage("Engines") { Name = "Engines" };
++        var addonsPage = new TabPage("Addons") { Name = "Addons" };
+         var winchContent = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
+         winchContent.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         winchContent.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+@@ -197,10 +198,26 @@
+         _subTabs.TabPages.Add(addonsPage);
+         _subTabs.SelectedIndexChanged += (_, _) =>
+         {
++            if (_pagesHostedExternally) return;
+             if (_subTabs.SelectedTab == winchesPage) EnsureLoaded();
+             if (_subTabs.SelectedTab == enginesPage) _engineEditTab.EnsureLoaded();
+         };
+         Controls.Add(_subTabs);
++    }
++
++    // Keep one editor controller for staged changes while hosting its pages directly under Editors.
++    internal TabPage[] TakeEditorPages()
++    {
++        _pagesHostedExternally = true;
++        var pages = _subTabs.TabPages.Cast<TabPage>().ToArray();
++        _subTabs.TabPages.Clear();
++        return pages;
++    }
++
++    internal void EnsureEditorLoaded(TabPage page)
++    {
++        if (page.Name == "Winches") EnsureLoaded();
++        else if (page.Name == "Engines") _engineEditTab.EnsureLoaded();
+     }
+ 
+     private Control CreatePlaceholder(string text)
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -84,7 +84,7 @@
+             column.SortMode = DataGridViewColumnSortMode.Automatic;
+             if (!column.ReadOnly) { column.ValueType = typeof(decimal); column.DefaultCellStyle.Format = "N0"; }
+         }
+-        _grid.Columns["Regions"]!.DefaultCellStyle.NullValue = "Unknown — load maps in Regions-Trucks";
++        _grid.Columns["Regions"]!.DefaultCellStyle.NullValue = "Unknown — load maps in Map trucks";
+         _grid.CellValidating += ValidateCell;
+         _grid.CellValueChanged += ValueChanged;
+         _grid.DataError += (_, e) => { e.ThrowException = false; _status.Text = "Enter a whole number within the property's allowed range."; };
+@@ -161,7 +161,7 @@
+                     if (row.Tag is TruckPropertyRow data)
+                     {
+                         row.Cells["Regions"].Value = regions.TryGetValue(data.Truck.Code, out var locations) ? locations
+-                            : catalog.MapsRead > 0 ? "No verified obtainable placement in scanned maps" : "Unknown — load maps in Regions-Trucks";
++                            : catalog.MapsRead > 0 ? "No verified obtainable placement in scanned maps" : "Unknown — load maps in Map trucks";
+                         row.Cells["Regions"].ToolTipText = Convert.ToString(row.Cells["Regions"].Value);
+                     }
+                 _regionStatus = $"Regions use current placements, including randomized/pending replacements ({catalog.MapsRead} maps; {catalog.Warnings.Count} warnings).";
+@@ -170,7 +170,7 @@
+             {
+                 foreach (DataGridViewRow row in _grid.Rows)
+                 {
+-                    row.Cells["Regions"].Value = "Unknown — load maps in Regions-Trucks";
++                    row.Cells["Regions"].Value = "Unknown — load maps in Map trucks";
+                     row.Cells["Regions"].ToolTipText = ex.Message;
+                 }
+                 _regionStatus = "Obtainable regions unavailable: " + ex.Message;
+@@ -212,7 +212,7 @@
+                 var tier = tiers.FirstOrDefault(tier => tier.TruckCodes.Contains(data.Truck.Code, StringComparer.OrdinalIgnoreCase))?.Name ?? "Unsorted";
+                 var index = _grid.Rows.Add(data.Truck.Name, data.Truck.Class, tier,
+                     data.Draft.GetValueOrDefault("FuelCapacity"), data.Draft.GetValueOrDefault("UnlockByRank"), data.Draft.GetValueOrDefault("Price"),
+-                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Regions-Trucks", data.Country, data.DiffLock);
++                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Map trucks", data.Country, data.DiffLock);
+                 var row = _grid.Rows[index]; row.Tag = data;
+                 row.Cells["Truck"].ToolTipText = data.Truck.Code + "\n" + data.RelativeFile;
+                 if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.ColorFor(tier);
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -172,7 +172,7 @@
+             actions.Controls.Add(_showDetails);
+             actions.Controls.Add(new Label
+             {
+-                Text = "Each truck rolls tires using progression + region tier. First region: 99% Highway, where compatible. Results/reset: Game data → Regions-Trucks. Apply maps from Start.", AutoSize = true,
++                Text = "Each truck rolls tires using progression + region tier. First region: 99% Highway, where compatible. Results/reset: Game data → Map trucks. Apply maps from Start.", AutoSize = true,
+                 Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(400, 0)
+             });
+             layout.Controls.Add(actions, 0, 2);
+@@ -247,7 +247,7 @@
+             rules.Clear();
+             rules.AddRange(previous);
+             _status.Text = "Could not save rules: " + ex.Message;
+-            MessageBox.Show(this, _status.Text, "Truck-Randomization", MessageBoxButtons.OK, MessageBoxIcon.Error);
++            MessageBox.Show(this, _status.Text, "Truck randomization", MessageBoxButtons.OK, MessageBoxIcon.Error);
+             return;
+         }
+         refresh();
+--- a/src/SnowPakTool.Desktop/TrucksCargoTab.cs
++++ b/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -23,7 +23,7 @@
+         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
+         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+-        toolbar.Controls.Add(new Label { Text = "Trucks-Cargo", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
++        toolbar.Controls.Add(new Label { Text = "Cargo", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         var reload = new Button { Text = "Reload cargo", AutoSize = true };
+         toolbar.Controls.Add(reload);
+         layout.Controls.Add(toolbar, 0, 0);
+--- a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+@@ -116,7 +116,7 @@
+                             $"{map}|{first.Id}|{first.X:R}|{first.Y:R}|{first.Z:R}|{originalRows.IndexOf(first)}")))
+                     {
+                         if (first.TruckCode != second.TruckCode || !PendingTruckReplacements.EquipmentEqual(first.Equipment, second.Equipment))
+-                            rows.Add(new(WorkspaceChange.InFiles, map, "Obtainable randomization", "Original placement", "Saved — details in Regions-Trucks"));
++                            rows.Add(new(WorkspaceChange.InFiles, map, "Obtainable randomization", "Original placement", "Saved — details in Map trucks"));
+                         continue;
+                     }
+                     var label = first?.Id is { Length: > 0 } id ? id : $"Placement at {first?.X ?? second!.X:0.#}; {first?.Z ?? second!.Z:0.#}";
+@@ -132,7 +132,7 @@
+         foreach (var change in pendingChanges)
+             rows.Add(change.Randomized || change.ResetOriginal
+                 ? new(WorkspaceChange.Pending, change.Original.MapCode, change.ResetOriginal ? "Reset to original" : "Obtainable randomization",
+-                    "Current placement", change.ResetOriginal ? "Original truck and equipment" : "Queued — details in Regions-Trucks", change.Key)
++                    "Current placement", change.ResetOriginal ? "Original truck and equipment" : "Queued — details in Map trucks", change.Key)
+                 : new(WorkspaceChange.Pending, change.Original.MapCode,
+                 (change.Original.PlacementId.Length > 0 ? change.Original.PlacementId : $"Placement at {change.Original.X:0.#}; {change.Original.Z:0.#}") + " / Truck",
+                 change.Original.Truck, change.Target.Name, change.Key));
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/NavigationTabControl.cs
+@@ -0,0 +1,61 @@
++namespace SnowPakTool.Desktop;
++
++/// <summary>Native keyboard/tab behavior with a clearly highlighted active destination.</summary>
++internal sealed class NavigationTabControl : TabControl
++{
++    private Font? _activeFont;
++
++    public NavigationTabControl()
++    {
++        Dock = DockStyle.Fill;
++        DrawMode = TabDrawMode.OwnerDrawFixed;
++        Padding = new Point(18, 5);
++        ItemSize = new Size(0, 32);
++        Multiline = false;
++        HotTrack = false;
++    }
++
++    protected override void OnSelectedIndexChanged(EventArgs e)
++    {
++        base.OnSelectedIndexChanged(e);
++        Invalidate();
++    }
++
++    protected override void OnFontChanged(EventArgs e)
++    {
++        _activeFont?.Dispose();
++        _activeFont = null;
++        base.OnFontChanged(e);
++    }
++
++    protected override void OnDrawItem(DrawItemEventArgs e)
++    {
++        if (e.Index < 0 || e.Index >= TabPages.Count) return;
++        var selected = e.Index == SelectedIndex;
++        var bounds = GetTabRect(e.Index);
++        var background = selected ? SystemColors.Highlight : SystemColors.Control;
++        var foreground = selected ? SystemColors.HighlightText : SystemColors.ControlText;
++        using var brush = new SolidBrush(background);
++        e.Graphics.FillRectangle(brush, bounds);
++        using var border = new Pen(selected ? SystemColors.Highlight : SystemColors.ControlDark);
++        e.Graphics.DrawRectangle(border, bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1);
++        if (selected)
++        {
++            var stripe = new Rectangle(bounds.X + 1, bounds.Bottom - Math.Max(3, DeviceDpi / 32), bounds.Width - 2, Math.Max(3, DeviceDpi / 32));
++            using var stripeBrush = new SolidBrush(SystemColors.HighlightText);
++            e.Graphics.FillRectangle(stripeBrush, stripe);
++        }
++        var textBounds = Rectangle.Inflate(bounds, -8, -3);
++        TextRenderer.DrawText(e.Graphics, TabPages[e.Index].Text,
++            selected ? _activeFont ??= new Font(Font, FontStyle.Bold) : Font,
++            textBounds, foreground, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
++        if (selected && Focused && ShowFocusCues)
++            ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(bounds, -4, -5), foreground, background);
++    }
++
++    protected override void Dispose(bool disposing)
++    {
++        if (disposing) _activeFont?.Dispose();
++        base.Dispose(disposing);
++    }
++}

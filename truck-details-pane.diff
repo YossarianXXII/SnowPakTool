@@ -1,0 +1,330 @@
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index 8398f89..f037678 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -9,9 +9,10 @@ internal sealed record RegionTruckEntry(string RegionCode, string Region, string
+     string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
+     float X, float Y, float Z, string Evidence, string Source,
+     string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
+-    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "");
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
++    IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1);
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
+-internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment);
++internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment, IReadOnlyList<float>? Transform = null);
+ 
+ internal static class RegionTruckCatalogService
+ {
+@@ -100,7 +101,8 @@ internal static class RegionTruckCatalogService
+                         metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
+                         placement.Id, placement.X, placement.Y, placement.Z, evidence, source,
+                         equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons,
+-                        FrameAddons: equipment.FrameAddons, FrameAddonDetails: equipment.FrameAddonDetails));
++                        FrameAddons: equipment.FrameAddons, FrameAddonDetails: equipment.FrameAddonDetails,
++                        InternalEquipment: equipment.InternalEquipment, Transform: placement.Transform, BinaryOffset: placement.Offset));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+@@ -116,7 +118,8 @@ internal static class RegionTruckCatalogService
+         {
+             if (!TryString(data, offset, out var model, out var next) || !truckCodes.Contains(model)) continue;
+             if (!TryString(data, next, out var id, out var transform) || !IsTransform(data, transform)) continue;
+-            result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56), ReadEquipment(data, transform)));
++            result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56), ReadEquipment(data, transform),
++                Enumerable.Range(0, 16).Select(index => ReadFloat(data, transform + index * 4)).ToArray()));
+             offset = transform + 63;
+         }
+         return result;
+@@ -140,7 +143,9 @@ internal static class RegionTruckCatalogService
+         var fields = new string[7];
+         for (var i = 0; i < fields.Length; i++)
+             if (!TryString(data, position, out fields[i], out position)) return MapTruckEquipment.Unknown;
+-        return new(true, addons, fields[4], fields[6], fields[5]);
++        var scale = position + sizeof(float) <= data.Length ? ReadFloat(data, position) : (float?)null;
++        return new(true, addons, fields[4], fields[6], fields[5], fields[0], fields[1], fields[2], fields[3],
++            scale is >= 0 and <= 10 ? scale : null);
+     }
+ 
+     private static bool IsTransform(byte[] data, int offset)
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index 89f7b28..5a95eaf 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -4,7 +4,8 @@ using System.Xml.Linq;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed record MapTruckEquipment(bool Parsed, IReadOnlyList<string> Addons, string WheelType, string Tire, string Rim)
++internal sealed record MapTruckEquipment(bool Parsed, IReadOnlyList<string> Addons, string WheelType, string Tire, string Rim,
++    string Engine = "", string Gearbox = "", string Winch = "", string Suspension = "", float? WheelScale = null)
+ {
+     public static readonly MapTruckEquipment Unknown = new(false, [], "", "", "");
+ }
+@@ -16,7 +17,9 @@ internal sealed record InstalledAddonInfo(string Id, string Name, string Categor
+     public string Group => IsVisual ? "Visual addons (_tuning)" : IsFrameAddon ? "Frame addons" : "Other addons";
+ }
+ internal sealed record TruckEquipmentSummary(string Tires, string TireDetails, string Addons, string AddonDetails,
+-    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "");
++    IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
++    IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null);
++internal sealed record InternalEquipmentInfo(string Slot, string Id, string Name, string Origin, string SourcePath, string DefinitionDetails);
+ 
+ /// <summary>Resolves per-placement equipment against the active workspace's vehicle defaults and wheel definitions.</summary>
+ internal sealed class TruckEquipmentCatalog
+@@ -29,6 +32,8 @@ internal sealed class TruckEquipmentCatalog
+     private readonly Dictionary<string, string> _files;
+     private readonly Dictionary<string, Definition?> _definitions = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Dictionary<string, HashSet<string>> _tireUsers = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, List<(Definition Definition, XElement Variant)>> _components = new(StringComparer.OrdinalIgnoreCase);
++    private bool _componentsIndexed;
+ 
+     public TruckEquipmentCatalog(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
+     {
+@@ -36,8 +41,7 @@ internal sealed class TruckEquipmentCatalog
+         _workspace = workspace;
+         _warnings = warnings;
+         _files = WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
+-            .Where(path => path.Replace('\\', '/').Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)
+-                || path.Replace('\\', '/').Contains("/classes/wheels/", StringComparison.OrdinalIgnoreCase))
++            .Where(path => Regex.IsMatch(path.Replace('\\', '/'), @"/classes/(trucks|wheels|engines|gearboxes|winches|suspensions)/", RegexOptions.IgnoreCase))
+             .GroupBy(path => Path.GetFileNameWithoutExtension(path)!, StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+         foreach (var (truck, path) in _files.Where(pair => string.Equals(Path.GetFileName(Path.GetDirectoryName(pair.Value)), "trucks", StringComparison.OrdinalIgnoreCase)).ToArray())
+@@ -69,6 +73,7 @@ internal sealed class TruckEquipmentCatalog
+         var inferredCategory = tire is null ? Category(tireId.Replace("allterain", "allterrain", StringComparison.OrdinalIgnoreCase)) : null;
+         var category = custom ? "Custom" : tire?.Category ?? inferredCategory ?? "Unknown";
+         var tireDetails = $"{tire?.Name ?? tireId}\r\nWheel family: {wheelType}\r\nTire ID: {tireId}\r\nRim: {rim}"
++            + $"\r\nWheel scale: {(equipment.WheelScale is > 0 ? equipment.WheelScale.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " [map override]" : "vehicle default")}"
+             + $"\r\nWheel family: {(equipment.WheelType.Length > 0 ? "map override" : "vehicle default")}; tire: {(equipment.Tire.Length > 0 ? "map override" : "vehicle default")}."
+             + (custom ? $"\r\nCustom: this tire definition is exclusive to this truck in the current workspace. Underlying category: {tire!.Category}." : "")
+             + (tire is null ? "\r\nThe stored tire ID has no matching definition in this wheel family. "
+@@ -98,8 +103,90 @@ internal sealed class TruckEquipmentCatalog
+         var visible = addonInfo.Where(item => !item.IsVisual).ToArray();
+         var frame = visible.Where(item => item.IsFrameAddon).ToArray();
+         var other = visible.Where(item => !item.IsFrameAddon).ToArray();
++        var internalEquipment = new List<InternalEquipmentInfo>
++        {
++            ResolveComponent(chain, "Engine", "EngineSocket", equipment.Engine),
++            ResolveComponent(chain, "Gearbox", "GearboxSocket", equipment.Gearbox),
++            ResolveComponent(chain, "Winch", "WinchUpgradeSocket", equipment.Winch),
++            ResolveComponent(chain, "SuspensionSet", "SuspensionSocket", equipment.Suspension)
++        };
++        var drivetrain = chain.Select(definition => (Definition: definition, Data: definition.Xml.Element("TruckData")))
++            .FirstOrDefault(item => item.Data?.Attribute("DiffLockType") is not null);
++        if (drivetrain.Data?.Attribute("DiffLockType") is { } mode)
++            internalEquipment.Add(new("Drivetrain base mode", mode.Value, mode.Value, "vehicle definition",
++                WorkspaceOriginals.GetRelativePath(_workspace, drivetrain.Definition.Path), "DiffLockType=" + mode.Value));
++        if (chain.FirstOrDefault() is { } vehicleDefinition)
++        {
++            var properties = chain.SelectMany(definition => new[] { "TruckData", "GameData" }
++                    .SelectMany(section => (definition.Xml.Element(section)?.Attributes() ?? [])
++                        .Where(attribute => attribute.Name.LocalName != "TruckType")
++                        .Select(attribute => (Key: section + "." + attribute.Name.LocalName, attribute.Value))))
++                .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase).Select(group => group.First());
++            internalEquipment.Add(new("Vehicle definition", truck, AddonName(truck), "vehicle definition",
++                WorkspaceOriginals.GetRelativePath(_workspace, vehicleDefinition.Path),
++                "Definition properties, not current save-state values (templates may add further values):\r\n"
++                    + string.Join("\r\n", properties.Select(item => item.Key + "=" + item.Value))));
++        }
++        foreach (var addon in addonInfo.Where(item => item.Category is "awd" or "diff_lock" or "snorkel"))
++        {
++            var data = FileChain(addon.Id).Select(item => item.Xml.Element("TruckData")).FirstOrDefault(element => element is not null);
++            var settings = data is null ? "No explicit TruckData settings in this addon definition."
++                : string.Join("\r\n", data.Attributes().Select(attribute => attribute.Name.LocalName + "=" + attribute.Value));
++            internalEquipment.Add(new(addon.Category switch { "awd" => "AWD / transfer box", "diff_lock" => "Differential lock", _ => "Snorkel" },
++                addon.Id, addon.Name, addon.Origin, addon.SourcePath, settings));
++        }
+         return new(category, tireDetails, FormatNames(other), FormatDetails(other), addonInfo,
+-            FormatNames(frame), FormatDetails(frame));
++            FormatNames(frame), FormatDetails(frame), internalEquipment);
++    }
++
++    private InternalEquipmentInfo ResolveComponent(IReadOnlyList<Definition> truck, string kind, string socket, string mapId)
++    {
++        var sockets = truck.Select(definition => definition.Xml.Element("TruckData")?.Element(socket)).Where(element => element is not null).ToArray();
++        var id = mapId.Length > 0 ? mapId : sockets.Select(element => (string?)element!.Attribute("Default")).FirstOrDefault(value => value is not null) ?? "";
++        var origin = mapId.Length > 0 ? "map override" : "vehicle default";
++        var label = kind == "SuspensionSet" ? "Suspension" : kind;
++        if (id.Length == 0) return new(label, "", "Not specified", origin, "", "No component ID was specified in the map or vehicle defaults.");
++        IndexComponents();
++        var types = sockets.SelectMany(element => Split((string?)element!.Attribute("Type"))).ToArray();
++        (Definition Definition, XElement Variant)? found = null;
++        foreach (var type in types)
++        {
++            foreach (var definition in FileChain(type))
++            {
++                var variant = definition.Xml.Elements(kind).FirstOrDefault(element => string.Equals((string?)element.Attribute("Name"), id, StringComparison.OrdinalIgnoreCase));
++                if (variant is not null) { found = (definition, variant); break; }
++            }
++            if (found.HasValue) break;
++        }
++        if (found is null && _components.TryGetValue(kind + "|" + id, out var candidates)) found = candidates[0];
++        if (found is not { } result) return new(label, id, id, origin, "", "The selected component ID has no matching definition in the active workspace.");
++        var key = (string?)result.Variant.Element("GameData")?.Element("UiDesc")?.Attribute("UiName") ?? "";
++        var name = _names.GetValueOrDefault(key, id);
++        var settings = result.Variant.DescendantsAndSelf().SelectMany(element => element.Attributes()
++            .Where(attribute => attribute.Name.LocalName is not ("Name" or "UiName" or "UiDesc") && !attribute.Name.LocalName.StartsWith("UiIcon", StringComparison.Ordinal))
++            .Select(attribute => element.Name.LocalName
++                + (element.Parent?.Elements(element.Name).Skip(1).Any() == true ? $"[{element.ElementsBeforeSelf(element.Name).Count() + 1}]" : "")
++                + "." + attribute.Name.LocalName + "=" + attribute.Value));
++        return new(label, id, name, origin, WorkspaceOriginals.GetRelativePath(_workspace, result.Definition.Path),
++            "Explicit definition settings (template defaults may add further values):\r\n" + string.Join("\r\n", settings));
++    }
++
++    private void IndexComponents()
++    {
++        if (_componentsIndexed) return;
++        _componentsIndexed = true;
++        foreach (var path in _files.Values.Where(path => Regex.IsMatch(path.Replace('\\', '/'), @"/classes/(engines|gearboxes|winches|suspensions)/", RegexOptions.IgnoreCase)))
++        {
++            var definition = Read(path);
++            if (definition is null) continue;
++            foreach (var variant in definition.Xml.Elements().Where(element => element.Name.LocalName is "Engine" or "Gearbox" or "Winch" or "SuspensionSet"))
++            {
++                if ((string?)variant.Attribute("Name") is not { Length: > 0 } id) continue;
++                var key = variant.Name.LocalName + "|" + id;
++                if (!_components.TryGetValue(key, out var items)) _components[key] = items = [];
++                items.Add((definition, variant));
++            }
++        }
+     }
+ 
+     private static string FormatNames(IReadOnlyList<InstalledAddonInfo> items)
+@@ -200,7 +287,8 @@ internal sealed class TruckEquipmentCatalog
+             text = Regex.Replace(text, @"<\?xml[\s\S]*?\?>", "");
+             text = Regex.Replace(text, @"<(/?)([A-Za-z_][\w.-]*):", "<$1$2_");
+             var root = XElement.Parse("<Root>" + text + "</Root>");
+-            var element = root.Elements().FirstOrDefault(element => element.Name.LocalName is "Truck" or "TruckAddon" or "TruckWheels");
++            var element = root.Elements().FirstOrDefault(element => element.Name.LocalName is "Truck" or "TruckAddon" or "TruckWheels"
++                or "EngineVariants" or "GearboxVariants" or "WinchVariants" or "SuspensionSetVariants");
+             var definition = element is null ? null : new Definition(path, element, (string?)root.Element("_parent")?.Attribute("File") ?? "");
+             _definitions[path] = definition;
+             return definition;
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 538c502..09fd5d1 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -18,7 +18,7 @@ internal sealed class RegionsTrucksTab : UserControl
+         AutoScroll = true, Padding = new Padding(2), Margin = Padding.Empty
+     };
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 5, 4, 5) };
+-    private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
++    private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false };
+     private readonly DataGridView _trucks = new()
+     {
+         Dock = DockStyle.Fill, ReadOnly = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+@@ -43,14 +43,13 @@ internal sealed class RegionsTrucksTab : UserControl
+         _getWorkspacePath = getWorkspacePath;
+         _getPakPath = getPakPath;
+         _availabilityStore = availabilityStore ?? new RegionTruckAvailabilityStore();
+-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+         layout.Controls.Add(_regions, 0, 0);
+         var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4 };
+         folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+@@ -71,8 +70,14 @@ internal sealed class RegionsTrucksTab : UserControl
+         filters.Controls.Add(clear);
+         layout.Controls.Add(filters, 0, 2);
+         layout.Controls.Add(_status, 0, 3);
+-        layout.Controls.Add(_trucks, 0, 4);
+-        layout.Controls.Add(_details, 0, 5);
++        var detailsSplit = new SplitContainer
++        {
++            Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500),
++            SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6
++        };
++        detailsSplit.Panel1.Controls.Add(_trucks);
++        detailsSplit.Panel2.Controls.Add(_details);
++        layout.Controls.Add(detailsSplit, 0, 4);
+         Controls.Add(layout);
+         _status.Text = "Open this tab with an extracted workspace to scan installed maps. Click region tiles to select multiple regions.";
+         _browse.Click += async (_, _) =>
+@@ -323,7 +328,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     {
+         _details.Clear();
+         if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
+-            _details.Text = $"{entry.Evidence}\r\nMap: {entry.MapCode} · Position: ({entry.X:0.##}, {entry.Y:0.##}, {entry.Z:0.##})\r\nSource: {entry.Source}";
++            _details.Text = TruckDetailsFormatter.Format(entry);
+         if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+ 
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 053a273..33c5254 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -40,6 +40,8 @@ In this application, **visual addons** specifically means addon definitions stor
+ 
+ The table excludes visual (`_tuning`) parts from both addon columns. The remaining equipment with `Category="frame_addons"` appears in **Frame addons**; the other remaining parts appear in **Addons**. Each column has a tooltip containing only that group's installed parts, including source IDs and default/map origins. The full installed-equipment metadata is retained for search and future filters. Empty groups display **None**.
+ 
++The bottom details pane is resizable using the horizontal divider above it. It shows all hidden visual (`_tuning`) addons and their categories/source IDs, plus installed engine, gearbox, winch, suspension, AWD/transfer-box and differential-lock equipment. Map overrides take precedence over vehicle socket defaults. Component names resolve through the workspace definitions, including parent variant files; unresolved IDs are displayed explicitly. Each item includes its origin, source XML and explicit definition settings. Vehicle definition properties (such as fuel capacity), specific tires/rims/wheel scale, detailed frame/other addon information, placement coordinates, the full orientation/position matrix, binary record offset and availability evidence are also listed. Definition settings are identified separately from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs b/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
+new file mode 100644
+index 0000000..376a8f4
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
+@@ -0,0 +1,54 @@
++using System.Globalization;
++using System.Text;
++
++namespace SnowPakTool.Desktop;
++
++internal static class TruckDetailsFormatter
++{
++    public static string Format(RegionTruckEntry entry)
++    {
++        var text = new StringBuilder();
++        text.AppendLine(entry.Truck + " — " + entry.Map);
++        text.AppendLine();
++        text.AppendLine("PLACEMENT");
++        text.AppendLine("Model ID: " + entry.TruckCode);
++        text.AppendLine("Placement ID: " + (entry.PlacementId.Length == 0 ? "None (unnamed map placement)" : entry.PlacementId));
++        text.AppendLine("Map ID: " + entry.MapCode);
++        text.AppendLine("Position (X; Y; Z): " + string.Join("; ", new[] { entry.X, entry.Y, entry.Z }
++            .Select(value => value.ToString("0.###", CultureInfo.InvariantCulture))));
++        if (entry.BinaryOffset >= 0) text.AppendLine($"Map record offset: 0x{entry.BinaryOffset:X} (offset may change after editing)");
++        text.AppendLine("Source: " + entry.Source);
++        if (entry.Transform is { Count: 16 } matrix)
++        {
++            text.AppendLine("World transform (orientation and position, 4 × 4):");
++            for (var row = 0; row < 4; row++)
++                text.AppendLine("  " + string.Join("  ", matrix.Skip(row * 4).Take(4).Select(value => value.ToString("0.######", CultureInfo.InvariantCulture))));
++        }
++        Section("AVAILABILITY EVIDENCE", entry.Evidence);
++        text.AppendLine(); text.AppendLine("INTERNAL EQUIPMENT / DRIVETRAIN");
++        if (entry.InternalEquipment is not { Count: > 0 }) text.AppendLine("Internal equipment could not be resolved from this placement.");
++        else foreach (var item in entry.InternalEquipment)
++        {
++            text.AppendLine($"{item.Slot}: {item.Name}" + (item.Id.Length > 0 ? $" ({item.Id})" : "") + $" [{item.Origin}]");
++            if (item.SourcePath.Length > 0) text.AppendLine("  Source: " + item.SourcePath);
++            if (item.DefinitionDetails.Length > 0) text.AppendLine("  " + item.DefinitionDetails.Replace("\r\n", "\r\n  "));
++            text.AppendLine();
++        }
++        text.AppendLine("VISUAL ADDONS (_tuning folders)");
++        var visual = (entry.InstalledAddons ?? []).Where(addon => addon.IsVisual).ToArray();
++        if (entry.InstalledAddons is null) text.AppendLine("Installed addon data could not be read.");
++        else if (visual.Length == 0) text.AppendLine("None.");
++        else foreach (var addon in visual)
++        {
++            text.AppendLine($"• {addon.Name} ({addon.Id}) [{addon.Origin}; category: {addon.Category}]");
++            text.AppendLine("  Source: " + addon.SourcePath);
++        }
++        Section("TIRE / WHEEL DETAILS", entry.TireDetails);
++        Section("FRAME ADDON DETAILS", entry.FrameAddonDetails);
++        Section("OTHER ADDON DETAILS", entry.AddonDetails);
++        return text.ToString().TrimEnd();
++
++        void Section(string title, string body)
++        { text.AppendLine(); text.AppendLine(title); text.AppendLine(body.Length == 0 ? "Not available." : body); }
++    }
++}

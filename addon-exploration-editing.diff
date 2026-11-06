@@ -1,0 +1,520 @@
+diff --git "a/.checks\\AddonExplorationBaseline\\README.md" b/README.md
+index 29d9c3e..25ef92f 100644
+--- "a/.checks\\AddonExplorationBaseline\\README.md"
++++ b/README.md
+@@ -29,7 +29,7 @@ The **Fuel multiplier** slider uses Truck properties' shared calculations: 0.5×
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer â†’ Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+-**Editors â†’ Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. The tab starts with internal addons (engines, gearboxes, suspension, tires, winches, AWD, differential locks and snorkels); a toolbar button switches to external attachments/cosmetics and back. Unresolved map-upgrade rows remain in the internal view for inspection. The chosen view is retained while switching tabs or reloading during the session. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Large catalogs use indexed accessibility row names and navigation so horizontal scrollbar drags do not repeatedly scan the full table; accessible values, selection, sorting and filtering are retained. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone â†’ level-settings â†’ part-definition relationship and replacement limits.
++**Editors â†’ Addons** provides an addon/upgrade catalog with exploration-lock editing using Cargo's main table, description and source-properties layout. Reload runs in the background. The tab starts with internal addons (engines, gearboxes, suspension, tires, winches, AWD, differential locks and snorkels); a toolbar button switches to external attachments/cosmetics and back. Unresolved map-upgrade rows remain in the internal view for inspection. The chosen view is retained while switching tabs or reloading during the session. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Large catalogs use indexed accessibility row names and navigation so horizontal scrollbar drags do not repeatedly scan the full table; accessible values, selection, sorting and filtering are retained. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. Other metadata remains read-only. Exploration flags can be edited/reset and staged; only Start Apply writes the workspace overlay. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone â†’ level-settings â†’ part-definition relationship and replacement limits.
+ 
+ **Randomizer â†’ Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer â†’ Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions queue original pickup restoration, including after Apply. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Stage changes** in either upgrade tab snapshots all pickup changes together with exploration flags. Upgrades found on any resulting map are exploration-locked; upgrades absent from all maps are unlocked. Unrandomized maps retain their current pickups and count toward these flags. Tire sizes sharing a definition share one flag: any discoverable size locks that variant. The full current pickup inventory is scanned; unreadable settings or unresolved pickup definitions block staging rather than guessing absence. Source catalog warnings remain visible.
+ 
+@@ -119,3 +119,5 @@ snowpaktool pak pack --mixed-cache-block "initial-pak" "%client%\initial.pak"
+ **Randomizer > Map upgrades > Apply staged upgrades** applies only the saved upgrade snapshot: pickup replacements in level settings plus their exploration flags. It leaves other staged PAK edits and later unstaged upgrade drafts intact. This writes the workspace overlay; pack a new initial.pak from Start and install it for the game to use the changes. Input archives and installed files remain untouched.
+ 
+ Truck properties: Reset to original values previews a restoration against the values currently in files. Stage changes persists that restoration for Start > Apply pending changes. Reset and Stage explicitly report when the files already contain those values and there is nothing to apply; an empty staged list clears any previous staged truck-property edits.
++
++In Editors > Addons, Exploration unlock shows the preview and preserved original as true (false), with green for applied changes and amber for preview/staged edits. Select a definition and use Set selected or Reset selected to original, then Stage exploration changes and Start > Apply pending changes. Reset all exploration flags and staging cover both internal/external views and hidden filtered rows. Revert actions restore or clear the saved snapshot. Inherited / unspecified removes the local attribute; it does not force false and parent/template rules still apply. Only uniquely resolved source + element + variant targets are editable. Apply checks every target before writing and retains the staged snapshot on conflicts, preserving unrelated XML and original files. Later upgrade randomization can recalculate exploration flags. Reload refreshes the source comparison; packing and installation remain manual.
+diff --git "a/.checks\\AddonExplorationBaseline\\AddonsTab.cs" b/src/SnowPakTool.Desktop/AddonsTab.cs
+index df18090..ab734ae 100644
+--- "a/.checks\\AddonExplorationBaseline\\AddonsTab.cs"
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -3,7 +3,7 @@ using System.Globalization;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed class AddonsTab : UserControl
++internal sealed partial class AddonsTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+     private readonly bool _frameAddonsOnly;
+@@ -20,6 +20,7 @@ internal sealed class AddonsTab : UserControl
+     private bool _loading;
+     private bool _showInternal = true;
+     private bool _binding;
++    private long _loadedContentVersion;
+     private readonly Button _reload = new() { Text = "Reload addons", AutoSize = true };
+     private readonly Button _switchAddons = new() { Text = "Show external addons", AutoSize = true, Enabled = false };
+ 
+@@ -40,6 +41,7 @@ internal sealed class AddonsTab : UserControl
+         toolbar.Controls.Add(new Label { Text = _frameAddonsOnly ? "Frame addons" : "Addons", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         toolbar.Controls.Add(_reload);
+         if (!_frameAddonsOnly) toolbar.Controls.Add(_switchAddons);
++        if (!_frameAddonsOnly) InitializeExplorationTools(layout);
+         if (_frameAddonsOnly)
+         {
+             _fuelTools.Controls.Add(new Label { Text = "Fuel multiplier", AutoSize = true, Margin = new Padding(4, 8, 0, 4) });
+@@ -83,6 +85,7 @@ internal sealed class AddonsTab : UserControl
+         TableHeaderBehavior.Attach(_properties);
+         _addons.CurrentCellChanged += (_, _) => ShowProperties();
+         _addons.DataBindingComplete += (_, _) => ShowProperties();
++        if (!_frameAddonsOnly) _addons.CellFormatting += FormatExploration;
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
+         _switchAddons.Click += (_, _) =>
+         {
+@@ -104,10 +107,13 @@ internal sealed class AddonsTab : UserControl
+     {
+         if (_loading || IsDisposed) return;
+         var workspace = _getWorkspacePath().Trim();
+-        if (!force && string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) return;
++        if (!force && string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)
++            && (_loadedContentVersion == WorkspaceDataCache.ContentVersion
++                || _explorationRows.Values.Any(r => r.Draft != r.Current) || _fuelRows.Values.Any(r => r.Draft != r.Current))) return;
+         _catalog = null;
+         _fuelTools.Enabled = false;
+         _fuelRows.Clear();
++        _explorationRows.Clear();
+         _switchAddons.Enabled = false;
+         _loadedWorkspace = null;
+         _addons.DataSource = null;
+@@ -128,11 +134,15 @@ internal sealed class AddonsTab : UserControl
+             else await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+             var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+             var catalog = await Task.Run(() => AddonCatalogService.Load(workspace, names));
++            var exploration = !_frameAddonsOnly ? await Task.Run(() => AddonExplorationStore.ReadRows(workspace, catalog)) : new Dictionary<string, AddonExplorationRow>();
+             var fuelRows = _frameAddonsOnly ? await Task.Run(() => LoadFuelRows(workspace, catalog)) : new Dictionary<string, FrameAddonFuelRow>();
+             if (IsDisposed || !string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
+             _catalog = catalog;
+             _loadedWorkspace = workspace;
++            _loadedContentVersion = WorkspaceDataCache.ContentVersion;
+             _fuelRows = fuelRows;
++            _explorationRows = exploration;
++            if (!_frameAddonsOnly) RestoreExploration();
+             if (_frameAddonsOnly) RestoreStagedFuel();
+             ApplyFilter();
+             _fuelTools.Enabled = _frameAddonsOnly;
+@@ -162,13 +172,14 @@ internal sealed class AddonsTab : UserControl
+             return;
+         }
+         var table = new DataTable();
+-        foreach (var column in new[] { "Addon / upgrade", "Type", "Category", "ID", "ID scope", "Socket / family", "Content", "Exploration unlock", "Referenced maps", "Source file" }) table.Columns.Add(column);
++        foreach (var column in new[] { "Addon / upgrade", "Type", "Category", "ID", "ID scope", "Socket / family", "Content", "Exploration unlock", "Referenced maps", "Source file", "Change state" }) table.Columns.Add(column);
+         foreach (var column in new[] { "Price", "Unlock rank", "Map reward entries" }) table.Columns.Add(column, typeof(decimal));
+         table.Columns.Add("Entry", typeof(AddonCatalogEntry));
+         foreach (var entry in visible)
+-            table.Rows.Add(entry.Name, entry.Type, entry.Category, entry.Id, entry.Type == "Tire" ? "Local tire name" : entry.Type == "Unresolved map upgrade" ? "Unresolved reward ID" : "Global upgrade ID", entry.Family, entry.Content, entry.Exploration,
++            table.Rows.Add(entry.Name, entry.Type, entry.Category, entry.Id, entry.Type == "Tire" ? "Local tire name" : entry.Type == "Unresolved map upgrade" ? "Unresolved reward ID" : "Global upgrade ID", entry.Family, entry.Content,
++                _explorationRows.TryGetValue(AddonExplorationStore.Key(entry), out var flag) ? AddonExplorationStore.Display(flag.Draft) : entry.Exploration,
+                 string.Join(", ", entry.MapReferences.Select(item => item.Map).Distinct(StringComparer.OrdinalIgnoreCase)), entry.Source,
+-                (object?)entry.Price ?? DBNull.Value, (object?)entry.UnlockRank ?? DBNull.Value, (decimal)entry.MapReferences.Count, entry);
++                ExplorationState(entry), (object?)entry.Price ?? DBNull.Value, (object?)entry.UnlockRank ?? DBNull.Value, (decimal)entry.MapReferences.Count, entry);
+         _binding = true;
+         try
+         {
+@@ -176,13 +187,15 @@ internal sealed class AddonsTab : UserControl
+             _addons.Columns["Entry"]!.Visible = false;
+             foreach (DataGridViewColumn column in _addons.Columns)
+             {
+-                column.Width = column.Name switch { "Addon / upgrade" => 210, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
++                column.Width = column.Name switch { "Addon / upgrade" => 210, "Exploration unlock" => 230, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
+                 if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
+             }
++            _addons.Columns["Exploration unlock"]!.DisplayIndex = 2;
++            _addons.Columns["Change state"]!.DisplayIndex = 3;
+         }
+         finally { _binding = false; }
+         _status.Text = $"{(_showInternal ? "Internal" : "External")} addons · {visible.Length} definitions · {_catalog.MapReferences.Count} level-setting reward entries. "
+-            + "Read-only catalog. Header funnels filter columns; map references do not verify physical zones.";
++            + "Exploration flags: edit/reset a selected row, Stage changes, then Apply pending changes from Start. Other properties are read-only.";
+         if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} warnings (see details).";
+         ShowProperties();
+     }
+@@ -234,6 +247,12 @@ internal sealed class AddonsTab : UserControl
+         foreach (var reference in entry.MapReferences)
+             _properties.Rows.Add($"Map reward: {reference.Map} / {reference.Zone} / upgrades[{reference.Index}]", reference.UpgradeId, reference.Source);
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++        if (!_frameAddonsOnly && _explorationRows.TryGetValue(AddonExplorationStore.Key(entry), out var flag))
++        {
++            _properties.Rows.Add("Exploration unlock — original", flag.HasOriginal ? AddonExplorationStore.Display(flag.Original) : "Original unavailable", entry.Source);
++            _properties.Rows.Add("Exploration unlock — in files", AddonExplorationStore.Display(flag.Current), entry.Source);
++            _properties.Rows.Add("Exploration unlock — preview", AddonExplorationStore.Display(flag.Draft), entry.Source);
++        }
+         if (_frameAddonsOnly && _fuelRows.TryGetValue(entry.Source, out var fuel))
+             _properties.Rows.Add("Fuel capacity preview (L)", fuel.Draft.ToString(CultureInfo.InvariantCulture), entry.Source);
+         TableHeaderBehavior.Refresh(_properties);
+diff --git "a/.checks\\AddonExplorationBaseline\\UpgradeChanges.cs" b/src/SnowPakTool.Desktop/UpgradeChanges.cs
+index cc49a36..62e2868 100644
+--- "a/.checks\\AddonExplorationBaseline\\UpgradeChanges.cs"
++++ b/src/SnowPakTool.Desktop/UpgradeChanges.cs
+@@ -56,6 +56,24 @@ internal static class UpgradeChanges
+         ? Pickup(text, edit.Zone, edit.RewardIndex).Text
+         : (string?)XmlPart(text, edit.Element, edit.Variant).Game?.Attribute("UnlockByExploration");
+ 
++    internal static string? ReadExploration(string text, string element, string variant) =>
++        (string?)XmlPart(text, element, variant).Game?.Attribute("UnlockByExploration");
++
++    internal static string PatchExploration(string text, string element, string variant, string? before, string? after)
++    {
++        if (after is not null) return Patch(text, new("Addon exploration", "", -1, element, variant, before, after));
++        var current = ReadExploration(text, element, variant);
++        if (current is null) return text;
++        if (current != before) throw new InvalidDataException("Exploration flag changed since staging. Reload and stage again.");
++        var (_, _, offset) = XmlPart(text, element, variant);
++        var tag = Regex.Match(text[offset..], @"^<[^>]+>").Value;
++        var attribute = Regex.Match(tag, "\\s+UnlockByExploration\\s*=\\s*([\"'])(?<value>.*?)\\1");
++        if (!attribute.Success) throw new InvalidDataException("Cannot locate explicit exploration flag.");
++        text = text.Remove(offset + attribute.Index, attribute.Length);
++        if (ReadExploration(text, element, variant) is not null) throw new InvalidDataException("Exploration reset verification failed.");
++        return text;
++    }
++
+     internal static string Patch(string text, UpgradeFileEdit edit)
+     {
+         var current = Read(text, edit);
+diff --git "a/.checks\\AddonExplorationBaseline\\TruckEditTab.cs" b/src/SnowPakTool.Desktop/TruckEditTab.cs
+index dc115c3..f76a0ea 100644
+--- "a/.checks\\AddonExplorationBaseline\\TruckEditTab.cs"
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -241,6 +241,12 @@ internal sealed class TruckEditTab : UserControl
+         _addonsTab.InvalidateCatalog();
+     }
+ 
++    internal void ApplyAddonExplorationChanges(string workspace)
++    {
++        AddonExplorationStore.Apply(workspace);
++        _addonsTab.InvalidateCatalog(); _frameAddonsTab.InvalidateCatalog();
++    }
++
+     private Control CreatePlaceholder(string text)
+     {
+         return new Label { Dock = DockStyle.Fill, Text = text, TextAlign = ContentAlignment.MiddleCenter, ForeColor = SystemColors.GrayText };
+@@ -666,6 +672,7 @@ internal sealed class TruckEditTab : UserControl
+     {
+         _engineEditTab.ExportPreview(destination);
+         _frameAddonsTab.ExportFuelPreview(destination);
++        _addonsTab.ExportExplorationPreview(destination);
+         if (!string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) EnsureLoaded();
+         if (!_winchGrid.EndEdit() || !_updatedWinchPropertiesGrid.EndEdit()) throw new InvalidDataException("Finish editing winch values before sharing.");
+         var staged = PendingWinchChangesStore.Load(_getWorkspacePath());
+diff --git "a/.checks\\AddonExplorationBaseline\\MainForm.cs" b/src/SnowPakTool.Desktop/MainForm.cs
+index 67a972e..251eda7 100644
+--- "a/.checks\\AddonExplorationBaseline\\MainForm.cs"
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -431,6 +431,7 @@ internal sealed class MainForm : Form
+                 FrameAddonFuelStore.Apply(temporary);
+                 if (upgrades is not null) UpgradeChanges.Stage(upgrades with { Workspace = temporary });
+                 UpgradeChanges.Apply(temporary);
++                AddonExplorationStore.Apply(temporary);
+             });
+             AppendLog($"Saved shared preset: {dialog.FileName} ({new FileInfo(dialog.FileName).Length:N0} bytes). Current previews, drafts, applied edits and planning included.");
+         }
+@@ -492,7 +493,7 @@ internal sealed class MainForm : Form
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -509,6 +510,7 @@ internal sealed class MainForm : Form
+         if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
+         if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
+         if (FrameAddonFuelStore.Pending(workspace).Any()) _truckEditTab.ApplyFrameAddonFuelChanges(workspace);
++        if (AddonExplorationStore.Pending(workspace).Any()) _truckEditTab.ApplyAddonExplorationChanges(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+ 
+diff --git a/src/SnowPakTool.Desktop/AddonExplorationStore.cs b/src/SnowPakTool.Desktop/AddonExplorationStore.cs
+new file mode 100644
+index 0000000..59aa652
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/AddonExplorationStore.cs
+@@ -0,0 +1,93 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record AddonExplorationEdit(string Source, string Element, string Variant, string Name, string? Before, string? After);
++internal sealed class AddonExplorationRow(AddonExplorationEdit identity, string? original, bool hasOriginal)
++{
++    public AddonExplorationEdit Identity { get; } = identity;
++    public string? Original { get; } = original;
++    public bool HasOriginal { get; } = hasOriginal;
++    public string? Current => Identity.Before;
++    public string? Draft { get; set; } = identity.Before;
++}
++
++internal static class AddonExplorationStore
++{
++    private static string PathFor(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "upgrade-randomization", "addon-exploration.json");
++    internal static string Key(string source, string element, string variant) => source.Replace('\\', '/') + "|" + element + "|" + variant;
++    internal static string Key(AddonCatalogEntry entry) => Key(entry.Source, Element(entry), entry.Type == "Addon" ? "" : entry.Id);
++    private static string Element(AddonCatalogEntry entry) => entry.Type switch { "Addon" => "TruckAddon", "Suspension" => "SuspensionSet", "Tire" => "TruckTire", _ => entry.Type };
++    internal static string Display(string? flag) => flag ?? "Inherited / unspecified";
++
++    internal static Dictionary<string, AddonExplorationRow> ReadRows(string workspace, AddonCatalog catalog)
++    {
++        var result = new Dictionary<string, AddonExplorationRow>(StringComparer.OrdinalIgnoreCase);
++        var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        string Text(string path) => texts.TryGetValue(path, out var value) ? value : texts[path] = File.ReadAllText(path);
++        foreach (var entry in catalog.Entries.Where(e => e.Source.Length > 0 && e.Type != "Unresolved map upgrade"))
++        {
++            try
++            {
++                var element = Element(entry); var variant = entry.Type == "Addon" ? "" : entry.Id;
++                var current = UpgradeChanges.ReadExploration(Text(WorkspaceOriginals.GetCurrentPath(workspace, entry.Source)), element, variant);
++                if (current is not null && current is not ("true" or "false")) continue;
++                var originalPath = WorkspaceOriginals.GetOriginalReadPath(workspace, entry.Source);
++                string? original = null; var hasOriginal = false;
++                if (File.Exists(originalPath))
++                    try { original = UpgradeChanges.ReadExploration(Text(originalPath), element, variant); hasOriginal = true; }
++                    catch (InvalidDataException) { }
++                if (original is not null && original is not ("true" or "false")) hasOriginal = false;
++                var identity = new AddonExplorationEdit(entry.Source, element, variant, entry.Name, current, current);
++                result[Key(entry)] = new(identity, original, hasOriginal);
++            }
++            catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException) { /* Ambiguous definitions stay read-only. */ }
++        }
++        return result;
++    }
++
++    internal static List<AddonExplorationEdit> Load(string workspace)
++    {
++        var path = PathFor(workspace);
++        var edits = File.Exists(path) ? JsonSerializer.Deserialize<List<AddonExplorationEdit>>(File.ReadAllText(path))
++            ?? throw new InvalidDataException("Invalid addon exploration snapshot.") : [];
++        Validate(edits); return edits;
++    }
++    private static void Validate(IReadOnlyList<AddonExplorationEdit> edits)
++    {
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var e in edits)
++        {
++            var path = e?.Source?.Replace('\\', '/');
++            if (e is null || path is null || e.Name is null || e.Variant is null || Path.IsPathRooted(path) || path.Contains(':')
++                || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase) || !path.Contains("/classes/", StringComparison.OrdinalIgnoreCase)
++                || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || path.Split('/').Any(p => p is ".." or "." or "")
++                || e.Element is not ("TruckAddon" or "Engine" or "Gearbox" or "SuspensionSet" or "Winch" or "TruckTire")
++                || e.Element != "TruckAddon" && e.Variant.Length == 0
++                || e.Before is not (null or "true" or "false") || e.After is not (null or "true" or "false")
++                || !seen.Add(Key(path, e.Element, e.Variant))) throw new InvalidDataException("Invalid or duplicate addon exploration edit.");
++        }
++    }
++    internal static void Save(string workspace, List<AddonExplorationEdit> edits)
++    {
++        Validate(edits); TruckPropertiesStore.WriteAtomic(PathFor(workspace), JsonSerializer.Serialize(edits));
++    }
++    internal static IEnumerable<WorkspaceChange> Pending(string workspace) => Load(workspace).Select(e =>
++        new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, e.Source),
++            e.Name + " / Unlock by exploration", Display(e.Before), Display(e.After)));
++    internal static void Apply(string workspace)
++    {
++        var outputs = Load(workspace).GroupBy(e => e.Source, StringComparer.OrdinalIgnoreCase).Select(group =>
++        {
++            var path = WorkspaceOriginals.GetCurrentPath(workspace, group.Key); var text = File.ReadAllText(path);
++            foreach (var e in group) text = UpgradeChanges.PatchExploration(text, e.Element, e.Variant, e.Before, e.After);
++            return (Path: path, Text: text);
++        }).ToArray();
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(workspace, output.Path);
++            TruckPropertiesStore.WriteAtomic(path, output.Text); WorkspaceDataCache.InvalidateFile(path);
++        }
++        Save(workspace, []);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/AddonsExploration.cs b/src/SnowPakTool.Desktop/AddonsExploration.cs
+new file mode 100644
+index 0000000..19e6c5a
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/AddonsExploration.cs
+@@ -0,0 +1,95 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed partial class AddonsTab
++{
++    private Dictionary<string, AddonExplorationRow> _explorationRows = new(StringComparer.OrdinalIgnoreCase);
++    private Dictionary<string, string?> _stagedExploration = new(StringComparer.OrdinalIgnoreCase);
++    private readonly ComboBox _explorationValue = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 155 };
++
++    private void InitializeExplorationTools(TableLayoutPanel layout)
++    {
++        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        tools.Controls.Add(new Label { Text = "Exploration unlock", AutoSize = true, Padding = new Padding(0, 5, 0, 0) });
++        _explorationValue.Items.AddRange(["false", "true", "Inherited / unspecified"]); _explorationValue.SelectedIndex = 0;
++        tools.Controls.Add(_explorationValue);
++        void Button(string text, Action action)
++        {
++            var button = new Button { Text = text, AutoSize = true };
++            button.Click += (_, _) =>
++            {
++                if (_loading || _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim()) return;
++                try { action(); } catch (Exception ex) { _status.Text = "Could not update exploration flags: " + ex.Message; }
++            };
++            tools.Controls.Add(button);
++        }
++        Button("Set selected", () =>
++        {
++            if (SelectedExploration() is not { } row) { _status.Text = "Select a resolved addon or upgrade first."; return; }
++            row.Draft = _explorationValue.SelectedIndex == 2 ? null : _explorationValue.SelectedItem!.ToString(); UpdateExplorationCells();
++        });
++        Button("Reset selected to original", () =>
++        {
++            if (SelectedExploration() is not { HasOriginal: true } row) { _status.Text = "The selected definition has no readable original exploration value."; return; }
++            row.Draft = row.Original; UpdateExplorationCells();
++        });
++        Button("Reset all exploration flags", () =>
++        {
++            foreach (var row in _explorationRows.Values.Where(r => r.HasOriginal)) row.Draft = row.Original;
++            UpdateExplorationCells();
++        });
++        Button("Stage exploration changes", () =>
++        {
++            var edits = ExplorationEdits(); AddonExplorationStore.Save(_loadedWorkspace!, edits);
++            _stagedExploration = edits.ToDictionary(e => AddonExplorationStore.Key(e.Source, e.Element, e.Variant), e => e.After, StringComparer.OrdinalIgnoreCase);
++            UpdateExplorationCells(); _status.Text = $"Staged {edits.Count} exploration changes across all addon views and filters. Apply pending changes from Start.";
++        });
++        Button("Revert unstaged exploration edits", () => { RestoreExploration(); UpdateExplorationCells(); });
++        Button("Revert staged exploration changes", () => { AddonExplorationStore.Save(_loadedWorkspace!, []); RestoreExploration(); UpdateExplorationCells(); });
++        layout.Controls.Add(tools, 0, 1);
++    }
++    private AddonExplorationRow? SelectedExploration() => _addons.CurrentRow?.DataBoundItem is DataRowView view
++        && view["Entry"] is AddonCatalogEntry entry ? _explorationRows.GetValueOrDefault(AddonExplorationStore.Key(entry)) : null;
++    private List<AddonExplorationEdit> ExplorationEdits() => _explorationRows.Values.Where(r => r.Draft != r.Current)
++        .Select(r => r.Identity with { After = r.Draft }).ToList();
++    private void RestoreExploration()
++    {
++        var edits = AddonExplorationStore.Load(_loadedWorkspace!);
++        var byKey = edits.ToDictionary(e => AddonExplorationStore.Key(e.Source, e.Element, e.Variant), StringComparer.OrdinalIgnoreCase);
++        _stagedExploration = edits.ToDictionary(e => AddonExplorationStore.Key(e.Source, e.Element, e.Variant), e => e.After, StringComparer.OrdinalIgnoreCase);
++        foreach (var (key, row) in _explorationRows) row.Draft = byKey.TryGetValue(key, out var edit) ? edit.After : row.Current;
++    }
++    private string ExplorationState(AddonCatalogEntry entry)
++    {
++        var key = AddonExplorationStore.Key(entry);
++        if (!_explorationRows.TryGetValue(key, out var row)) return "Read-only";
++        if (row.Draft != row.Current) return _stagedExploration.TryGetValue(key, out var staged) && staged == row.Draft ? "Staged" : "Draft";
++        return row.HasOriginal && row.Current != row.Original ? "In files" : "Original";
++    }
++    private void UpdateExplorationCells()
++    {
++        if (_addons.DataSource is not DataTable table) return;
++        foreach (DataRow data in table.Rows)
++            if (data["Entry"] is AddonCatalogEntry entry && _explorationRows.TryGetValue(AddonExplorationStore.Key(entry), out var row))
++            { data["Exploration unlock"] = AddonExplorationStore.Display(row.Draft); data["Change state"] = ExplorationState(entry); }
++        _addons.Invalidate(); ShowProperties();
++        _status.Text = $"{_explorationRows.Values.Count(r => r.Draft != r.Current)} exploration changes in preview. Reset all covers all addon views, including filtered rows. Stage, then Apply from Start.";
++    }
++    private void FormatExploration(object? sender, DataGridViewCellFormattingEventArgs e)
++    {
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || _addons.Columns[e.ColumnIndex].Name != "Exploration unlock"
++            || _addons.Rows[e.RowIndex].DataBoundItem is not DataRowView view || view["Entry"] is not AddonCatalogEntry entry
++            || !_explorationRows.TryGetValue(AddonExplorationStore.Key(entry), out var row)) return;
++        var current = AddonExplorationStore.Display(row.Draft);
++        e.Value = row.HasOriginal && row.Draft != row.Original ? $"{current} ({AddonExplorationStore.Display(row.Original)})" : current;
++        e.CellStyle!.BackColor = row.Draft != row.Current ? Color.LightGoldenrodYellow
++            : row.HasOriginal && row.Current != row.Original ? Color.Honeydew : AppColors.Get("Surface");
++        e.FormattingApplied = true;
++        _addons.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = $"Original: {(row.HasOriginal ? AddonExplorationStore.Display(row.Original) : "Unavailable")}\nIn files: {AddonExplorationStore.Display(row.Current)}\nPreview: {current}\nInherited / unspecified removes the local attribute; parent/template rules may still apply.";
++    }
++    internal void ExportExplorationPreview(string destination)
++    {
++        if (!_frameAddonsOnly && _loadedWorkspace == _getWorkspacePath().Trim()) AddonExplorationStore.Save(destination, ExplorationEdits());
++    }
++}
+diff --git a/.checks/AddonExploration/Program.cs b/.checks/AddonExploration/Program.cs
+new file mode 100644
+index 0000000..3fac95b
+--- /dev/null
++++ b/.checks/AddonExploration/Program.cs
+@@ -0,0 +1,88 @@
++using System.Collections;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++static class Program
++{
++    static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    static Type T(string n) => App.GetType("SnowPakTool.Desktop." + n)!;
++    static object F(object o, string n) => o.GetType().GetField(n, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(o)!;
++    static object P(object o, string n) => o.GetType().GetProperty(n)!.GetValue(o)!;
++    static object? Call(object o, string n, params object?[] args)
++    {
++        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
++        return o.GetType().GetMethod(n, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!.Invoke(o, args);
++    }
++    static object? S(string t, string n, params object?[] args) => T(t).GetMethod(n, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)!.Invoke(null, args);
++    static object[] Items(object o) => ((IEnumerable)o).Cast<object>().ToArray();
++    static void Check(bool b, string m) { if (!b) throw new Exception(m); Console.WriteLine("PASS " + m); }
++    static void Pump(Task t) { var until = DateTime.UtcNow.AddSeconds(45); while (!t.IsCompleted && DateTime.UtcNow < until) { Application.DoEvents(); Thread.Sleep(5); } Check(t.IsCompleted, "load completes"); t.GetAwaiter().GetResult(); }
++    static IEnumerable<Control> Controls(Control p) { foreach (Control c in p.Controls) { yield return c; foreach (var x in Controls(c)) yield return x; } }
++    static void Button(Control tab, string text) { SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext()); Controls(tab).OfType<Button>().Single(b => b.Text == text).PerformClick(); Application.DoEvents(); }
++    static DataGridViewRow Row(DataGridView grid, string id) => grid.Rows.Cast<DataGridViewRow>().Single(r => r.Cells["ID"].Value?.ToString() == id);
++    [STAThread] static void Main(string[] args)
++    {
++        Control.CheckForIllegalCrossThreadCalls = true;
++        if (args.Contains("--real-readonly"))
++        {
++            var workspace = @"S:\snowrunner_Shenanigans\AI\workspace";
++            var names = S("WorkspaceDataCache", "GetLocalizedNames", workspace)!;
++            var catalog = S("AddonCatalogService", "Load", workspace, names)!;
++            var rows = (IDictionary)S("AddonExplorationStore", "ReadRows", workspace, catalog)!;
++            var matches = rows.Values.Cast<object>().Where(r => (string)P(P(r, "Identity"), "Variant") == "engine_truck_hib_billert_m816_02").ToArray();
++            Check(matches.Length == 1 && (string)P(matches[0], "Original") == "false" && (string)P(matches[0], "Current") == "true", "reported HIB engine resolves to true (false) with exact variant identity");
++            Console.WriteLine($"Read-only real catalog: {rows.Count} editable definitions."); return;
++        }
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
++        var original = Path.Combine(root, "original_files"); var updated = Path.Combine(root, "updated");
++        const string file = "[media]/classes/engines/test.xml";
++        const string xml = "<_templates><Engine Name=\"a\"><GameData UnlockByExploration=\"true\"/></Engine></_templates>\r\n<EngineVariants>\r\n<Engine Name=\"a\"><GameData Price=\"100\" UnlockByExploration=\"false\"/></Engine>\r\n<Engine Name=\"b\"><GameData Price=\"200\"/></Engine>\r\n</EngineVariants>";
++        void Write(string tree, string path, string value) { var p = Path.Combine(tree, path); Directory.CreateDirectory(Path.GetDirectoryName(p)!); File.WriteAllText(p, value); }
++        Write(original, file, xml); Write(updated, file, xml.Replace("UnlockByExploration=\"false\"", "UnlockByExploration=\"true\"").Replace("Price=\"200\"", "Price=\"200\" UnlockByExploration=\"true\""));
++        const string addon = "[media]/classes/trucks/test_addon.xml";
++        Write(original, addon, "<TruckAddon><GameData Category=\"frame_addons\" UnlockByExploration=\"false\"/></TruckAddon>");
++        Write(updated, addon, File.ReadAllText(Path.Combine(original, addon)).Replace("false", "true"));
++        Write(original, "[strings]/strings_english.str", "");
++        var hashes = Directory.GetFiles(original, "*", SearchOption.AllDirectories).ToDictionary(f => f, f => SHA256.HashData(File.ReadAllBytes(f)));
++        using var host = new Form { Size = new Size(1400, 900) };
++        using var tab = (Control)Activator.CreateInstance(T("AddonsTab"), new object[] { new Func<string>(() => root), false })!;
++        tab.Dock = DockStyle.Fill; host.Controls.Add(tab); host.Show();
++        Pump((Task)Call(tab, "EnsureLoadedAsync")!);
++        var grid = (DataGridView)F(tab, "_addons"); var a = Row(grid, "a"); grid.CurrentCell = a.Cells["Exploration unlock"];
++        Check(a.Cells["Exploration unlock"].FormattedValue?.ToString() == "true (false)", "applied exploration flag compares against original");
++        Check(a.Cells["Change state"].Value?.ToString() == "In files", "applied flag has an identifiable state");
++        Button(tab, "Reset selected to original");
++        Check(Row(grid, "a").Cells["Change state"].Value?.ToString() == "Draft", "reset previews a specific variant restoration");
++        Button(tab, "Stage exploration changes");
++        Check(Items(S("AddonExplorationStore", "Load", root)!).Length == 1 && Row(grid, "a").Cells["Change state"].Value?.ToString() == "Staged", "stage persists exact selected variant");
++        ((ComboBox)F(tab, "_explorationValue")).SelectedIndex = 1; Button(tab, "Set selected");
++        using (var main = (Form)Activator.CreateInstance(T("MainForm"))!)
++        {
++            ((TextBox)F(main, "_workspacePath")).Text = root;
++            Check(Items(Call(main, "PendingPakChanges", root)!).Length == 1, "Start discovers staged addon flags without opening Addons");
++            Call(main, "SavePendingPakChanges");
++        }
++        var text = File.ReadAllText(Path.Combine(updated, file));
++        Check((string?)S("UpgradeChanges", "ReadExploration", text, "Engine", "a") == "false"
++            && (string?)S("UpgradeChanges", "ReadExploration", text, "Engine", "b") == "true", "Apply uses staged restoration, excludes later preview and preserves other variant");
++        Check(text.StartsWith(xml[..xml.IndexOf("<EngineVariants>")]), "templates and formatting are preserved");
++        Pump((Task)Call(tab, "LoadAsync", true)!);
++        Button(tab, "Reset all exploration flags"); Button(tab, "Stage exploration changes");
++        Check(Items(S("AddonExplorationStore", "Load", root)!).Length == 2, "reset all includes hidden external addon and absent original attribute");
++        S("AddonExplorationStore", "Apply", root);
++        text = File.ReadAllText(Path.Combine(updated, file));
++        Check(S("UpgradeChanges", "ReadExploration", text, "Engine", "b") is null && text.Contains("Price=\"200\""), "reset removes introduced attribute and preserves unrelated fields");
++        Check(File.ReadAllText(Path.Combine(updated, addon)).Contains("UnlockByExploration=\"false\""), "hidden external addon reset is applied");
++        Pump((Task)Call(tab, "LoadAsync", true)!);
++        a = Row(grid, "a"); grid.CurrentCell = a.Cells["Exploration unlock"];
++        ((ComboBox)F(tab, "_explorationValue")).SelectedIndex = 1; Button(tab, "Set selected"); Button(tab, "Stage exploration changes");
++        Write(updated, file, File.ReadAllText(Path.Combine(updated, file)).Replace("Price=\"100\" UnlockByExploration=\"false\"", "Price=\"100\""));
++        var failed = false;
++        try { S("AddonExplorationStore", "Apply", root); } catch (TargetInvocationException e) when (e.InnerException is InvalidDataException) { failed = true; }
++        Check(failed && Items(S("AddonExplorationStore", "Load", root)!).Length == 1, "conflicting exploration edit rejects Apply and retains snapshot");
++        Check(hashes.All(p => p.Value.SequenceEqual(SHA256.HashData(File.ReadAllBytes(p.Key)))), "all original files remain byte identical");
++        using var screenshot = new Bitmap(host.Width, host.Height); host.DrawToBitmap(screenshot, new Rectangle(Point.Empty, host.Size)); screenshot.Save(Path.Combine(AppContext.BaseDirectory, "addons-exploration.png"));
++        Console.WriteLine("Fixture: " + root);
++    }
++}
+diff --git a/.checks/AddonExploration/AddonExploration.csproj b/.checks/AddonExploration/AddonExploration.csproj
+new file mode 100644
+index 0000000..05e367c
+--- /dev/null
++++ b/.checks/AddonExploration/AddonExploration.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>

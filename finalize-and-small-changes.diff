@@ -1,0 +1,625 @@
+--- src\SnowPakTool.Desktop\ExperienceEditorTab.cs
++++ src\SnowPakTool.Desktop\ExperienceEditorTab.cs
+@@ -140,10 +140,16 @@
+     private string? _rankSettingsPath;
+     private string? _loadedFileText;
+     private List<int> _loadedValues = new();
++    private readonly RankXpStageStore _rankStageStore;
++    private StagedRankXp? _stagedRank;
+     private bool _isLoading;
+ 
+     public ExperienceEditorTab(Func<string> getWorkspacePath, OwnedRegionState ownedRegionState)
+-    {
++        : this(getWorkspacePath, ownedRegionState, new RankXpStageStore()) { }
++
++    internal ExperienceEditorTab(Func<string> getWorkspacePath, OwnedRegionState ownedRegionState, RankXpStageStore rankStageStore)
++    {
++        _rankStageStore = rankStageStore;
+         _getWorkspacePath = getWorkspacePath;
+         _ownedRegionState = ownedRegionState;
+         _ownedRegionState.Changed += UpdateOwnedRegion;
+@@ -182,7 +188,7 @@
+         };
+         var actionTips = new ToolTip();
+         actionTips.SetToolTip(_reloadButton, "Reload rank XP and region data from the selected workspace. Unsaved edits require confirmation.");
+-        actionTips.SetToolTip(_saveButton, "Save the Updated XP column to rank_settings.sso in the workspace.");
++        actionTips.SetToolTip(_saveButton, "Stage the Updated XP values in saved preferences. Start → Apply pending PAK edits writes them to the workspace.");
+         actionTips.SetToolTip(_selectAllRegions, "Include or exclude every region in the XP budget and progression graphs.");
+         actionTips.SetToolTip(_selectOwnedRegions, "Include only regions marked as owned in the Owned Content tab.");
+         _selectOwnedRegions.Click += (_, _) => SelectOwnedRegions();
+@@ -745,8 +751,11 @@
+         get
+         {
+             if (_isLoading || _loadedValues.Count != _grid.Rows.Count) return false;
+-            for (var i = 0; i < _loadedValues.Count; i++)
+-                if (!int.TryParse(Convert.ToString(_grid.Rows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture), out var value) || value != _loadedValues[i])
++            if (_stagedRank is not null && _stagedRank.SourceText != _loadedFileText) return true;
++            var baseline = _stagedRank?.Values ?? _loadedValues;
++            if (baseline.Count != _grid.Rows.Count) return true;
++            for (var i = 0; i < baseline.Count; i++)
++                if (!int.TryParse(Convert.ToString(_grid.Rows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture), out var value) || value != baseline[i])
+                     return true;
+             return false;
+         }
+@@ -759,6 +768,7 @@
+ 
+         _loadedWorkspace = null;
+         _rankSettingsPath = null;
++        _stagedRank = null;
+ 
+         var workspace = _getWorkspacePath();
+         if (string.IsNullOrWhiteSpace(workspace))
+@@ -797,6 +807,13 @@
+         try
+         {
+             var prepared = (PreparedRankData)WorkspaceDataCache.GetRankData(workspace);
++            // An Apply may have created an updated file since the shared snapshot was prepared.
++            if (!string.Equals(prepared.Path, path, StringComparison.OrdinalIgnoreCase) ||
++                prepared.Text != File.ReadAllText(path, Encoding.UTF8))
++            {
++                WorkspaceDataCache.InvalidateFile(path);
++                prepared = (PreparedRankData)PrepareRankData(workspace)!;
++            }
+             var text = prepared.Text;
+             var values = prepared.Values;
+             var originalValues = prepared.OriginalValues;
+@@ -814,14 +831,21 @@
+             _rankSettingsPath = prepared.Path;
+             _loadedFileText = text;
+             _loadedValues = values;
++            _stagedRank = _rankStageStore.Load(workspace);
+             RestoreProgressionSettings(workspace);
+             UpdateLevel30Total();
+             UpdateLinearProgression();
++            if (_stagedRank?.Values.Count == _grid.Rows.Count)
++            {
++                _isLoading = true;
++                for (var i = 0; i < _grid.Rows.Count; i++) _grid.Rows[i].Cells["UpdatedXP"].Value = _stagedRank.Values[i];
++                _isLoading = false;
++            }
+             ApplySectionHeights();
+             UpdateEditorContentLayout();
+             SetEditorEnabled(true);
+             UpdateDirtyState();
+-            _status.Text = $"Loaded {values.Count} rank steps from {path}.";
++            if (_stagedRank is null) _status.Text = $"Loaded {values.Count} rank steps from {path}. Preview changes require Save rank XP before Start can apply them.";
+         }
+         catch (Exception ex)
+         {
+@@ -833,19 +857,53 @@
+ 
+     public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
+     {
+-        if (!string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase) || _rankSettingsPath is null || _loadedValues is null) yield break;
+-        if (!IsDirty) yield break;
+-        if (!TryReadGridValues(out var values))
+-        {
+-            yield return new(WorkspaceChange.Pending, _rankSettingsPath, RankProgressionChanges.Property,
+-                RankProgressionChanges.Summary(_loadedValues), "Invalid XP values — review Experience / Ranks");
+-            yield break;
+-        }
+-        var change = RankProgressionChanges.Create(WorkspaceChange.Pending, _rankSettingsPath, _loadedValues, values);
+-        if (change is not null) yield return change;
+-    }
+-
+-    public void SavePendingChanges() => SaveSettings();
++        if (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace)) return [];
++        var path = WorkspaceOriginals.GetCurrentPath(workspace, Path.Combine("[ps]", "rank_settings.sso"));
++        try
++        {
++            var staged = _rankStageStore.Load(workspace);
++            if (staged is null) return [];
++            if (!RankProgressionChanges.TryRead(File.ReadAllText(path, Encoding.UTF8), out var before))
++                throw new InvalidDataException("Could not read rankExp from the current workspace file.");
++            var change = RankProgressionChanges.Create(WorkspaceChange.Pending, path, before, staged.Values);
++            return change is null ? [] : [change];
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
++        {
++            return [new(WorkspaceChange.Pending, path, RankProgressionChanges.Property, "Saved rank XP", "Could not read staged changes: " + ex.Message)];
++        }
++    }
++
++    public void SavePendingChanges()
++    {
++        var workspace = _getWorkspacePath();
++        var staged = _rankStageStore.Load(workspace);
++        if (staged is null) return;
++        var path = WorkspaceOriginals.GetCurrentPath(workspace, Path.Combine("[ps]", "rank_settings.sso"));
++        var currentText = File.ReadAllText(path, Encoding.UTF8);
++        if (!RankProgressionChanges.TryRead(currentText, out var currentValues))
++            throw new InvalidDataException("Could not read rankExp from the workspace file.");
++        if (!currentValues.SequenceEqual(staged.Values) && currentText != staged.SourceText)
++            throw new InvalidOperationException("rank_settings.sso changed since rank XP was staged. Reload Experience / Ranks and press Save rank XP again before applying.");
++        var updatedText = currentText;
++        if (!currentValues.SequenceEqual(staged.Values))
++        {
++            updatedText = ReplaceIntegerArray(currentText, RankExperienceArray, staged.Values, "rankExp");
++            path = WorkspaceOriginals.PrepareForEdit(workspace, path);
++            File.WriteAllText(path, updatedText, GameFileEncoding);
++            WorkspaceDataCache.InvalidateFile(path);
++        }
++        _rankStageStore.Clear(workspace);
++        if (string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase))
++        {
++            _rankSettingsPath = path;
++            _loadedFileText = updatedText;
++            _loadedValues = [.. staged.Values];
++            _stagedRank = null;
++            UpdateDirtyState();
++            _status.Text = IsDirty ? "Saved rank XP applied. New preview edits have not been staged." : "Saved rank XP applied to the workspace.";
++        }
++    }
+ 
+     private void SaveSettings()
+     {
+@@ -866,15 +924,11 @@
+                 return;
+             }
+ 
+-            var updatedText = ReplaceIntegerArray(currentText, RankExperienceArray, values, "rankExp");
+-            var updatedPath = WorkspaceOriginals.PrepareForEdit(_loadedWorkspace!, _rankSettingsPath);
+-            File.WriteAllText(updatedPath, updatedText, GameFileEncoding);
+-            WorkspaceDataCache.InvalidateFile(updatedPath);
+-            _rankSettingsPath = updatedPath;
+-            _loadedFileText = updatedText;
+-            _loadedValues = values;
++            _rankStageStore.Stage(_loadedWorkspace!, currentText, values);
++            _stagedRank = _rankStageStore.Load(_loadedWorkspace!);
+             UpdateDirtyState();
+-            _status.Text = $"Saved {values.Count} rank XP values to {_rankSettingsPath}.";
++            _status.Text = _stagedRank is null ? "Rank XP matches the workspace; no changes are staged." :
++                $"Staged {values.Count} rank XP values. Use Start → Apply pending PAK edits to write them to the workspace.";
+         }
+         catch (Exception ex)
+         {
+@@ -901,7 +955,8 @@
+         UpdateLevel30Total();
+         _experienceGraph.Invalidate();
+         _saveButton.Enabled = _rankSettingsPath is not null && IsDirty;
+-        if (IsDirty && _rankSettingsPath is not null) _status.Text = "Unsaved XP changes.";
++        if (IsDirty && _rankSettingsPath is not null) _status.Text = "Preview XP changes. Press Save rank XP to stage them for Start → Apply.";
++        else if (_stagedRank is not null) _status.Text = "Rank XP staged. Use Start → Apply pending PAK edits.";
+     }
+ 
+     private void UpdateLevel30Total()
+--- src\SnowPakTool.Desktop\MainForm.cs
++++ src\SnowPakTool.Desktop\MainForm.cs
+@@ -383,6 +383,11 @@
+         var output = dialog.FileName;
+         if (File.Exists(_pakPath.Text.Trim()) && Path.GetFullPath(output).Equals(Path.GetFullPath(_pakPath.Text.Trim()), StringComparison.OrdinalIgnoreCase))
+         { MessageBox.Show(this, "Choose a new PAK output file; the input PAK is preserved.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
++        if (_experienceTab.PendingChanges(workspace).Any())
++        {
++            MessageBox.Show(this, "Apply staged rank XP using Start → Apply pending PAK edits before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
++            return;
++        }
+         try { SavePendingPakChanges(); }
+         catch (Exception ex) { AppendLog(ex.Message); return; }
+         await RunBusyAsync("Building cache block and PAK…", () => PackWorkspace(workspace, output));
+--- src\SnowPakTool.Desktop\RegionProgressionTab.cs
++++ src\SnowPakTool.Desktop\RegionProgressionTab.cs
+@@ -12,6 +12,8 @@
+     private readonly Dictionary<string, string> _tiers = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Button _randomize = new() { Text = "Randomize", AutoSize = true, Enabled = false };
+     private readonly Button _restore = new() { Text = "Previous randomization", AutoSize = true, Enabled = false };
++    private readonly Button _finalize = new() { Text = "Finalize", AutoSize = true, Enabled = false };
++    private readonly List<RadioButton> _difficultyOptions = [];
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 0) };
+     private readonly TileFlowPanel _tiles = new(false)
+     {
+@@ -55,9 +57,10 @@
+                 Margin = new Padding(0, 5, 12, 0), Enabled = !_loadFailed
+             };
+             toolbar.Controls.Add(radio);
++            _difficultyOptions.Add(radio);
+             radio.CheckedChanged += (_, _) =>
+             {
+-                if (!radio.Checked || _state.Difficulty == difficulty) return;
++                if (!radio.Checked || _state.Difficulty == difficulty || _state.IsFinalized) return;
+                 if (Commit(Copy(_state, difficulty: difficulty)))
+                     _status.Text = "Difficulty saved. The current order stays unchanged until you randomize.";
+                 else
+@@ -67,6 +70,7 @@
+         }
+         toolbar.Controls.Add(_randomize);
+         toolbar.Controls.Add(_restore);
++        toolbar.Controls.Add(_finalize);
+         layout.Controls.Add(toolbar, 0, 1);
+         var pane = new GroupBox { Text = "Suggested play order — left to right, then next row", Dock = DockStyle.Fill, Padding = new Padding(7) };
+         pane.Controls.Add(_tiles);
+@@ -75,12 +79,14 @@
+         Controls.Add(layout);
+         _randomize.Click += (_, _) => Randomize();
+         _restore.Click += (_, _) => RestorePrevious();
++        _finalize.Click += (_, _) => ToggleFinalized();
+         AttachDropTarget(_tiles);
+         _dragScroll.Tick += (_, _) => ScrollDuringDrag();
+         var wheel = new DirectionalWheelFilter(this);
+         Application.AddMessageFilter(wheel);
+         Disposed += (_, _) => { Application.RemoveMessageFilter(wheel); _dragScroll.Dispose(); };
+         if (!_loadFailed) _status.Text = "Open an extracted workspace to list regions.";
++        RefreshActions();
+     }
+ 
+     public void RefreshRegions()
+@@ -91,9 +97,9 @@
+         var order = RegionProgressionService.AppendNew(_state.Order, _regions.Select(region => region.Code));
+         if (!order.SequenceEqual(_state.Order, StringComparer.OrdinalIgnoreCase) && !Commit(Copy(_state, order))) return;
+         RenderTiles();
+-        _randomize.Enabled = _regions.Count > 0;
+-        _restore.Enabled = _previous is not null && _regions.Count > 0;
++        RefreshActions();
+         _status.Text = _regions.Count == 0 ? "Open an extracted workspace to list regions." :
++            _state.IsFinalized ? $"{_regions.Count} regions. Finalized play order. Unlock to randomize or move tiles." :
+             $"{_regions.Count} regions. {(_state.HasRandomized ? "Saved play order." : "Choose a difficulty and randomize to generate a play order.")} Changes save automatically.";
+     }
+ 
+@@ -106,7 +112,7 @@
+ 
+     private void Randomize()
+     {
+-        if (_regions.Count == 0 || _loadFailed) return;
++        if (_regions.Count == 0 || _loadFailed || _state.IsFinalized) return;
+         ReadTiers();
+         var seed = Random.Shared.Next();
+         var order = RegionProgressionService.Generate(_regions.Select(region => new ProgressionRegion(region.Code,
+@@ -119,14 +125,14 @@
+         var previous = _state.HasRandomized ? Copy(_state) : null;
+         if (!Commit(candidate)) return;
+         _previous = previous;
+-        _restore.Enabled = _previous is not null;
++        RefreshActions();
+         RenderTiles();
+         _status.Text = "New play order saved. Unsorted regions are at the end.";
+     }
+ 
+     private void RestorePrevious()
+     {
+-        if (_previous is null) return;
++        if (_previous is null || _state.IsFinalized) return;
+         var restored = Copy(_previous, RegionProgressionService.AppendNew(_previous.Order, _state.Order), _state.Difficulty);
+         if (!Commit(restored)) return;
+         _previous = null;
+@@ -135,6 +141,34 @@
+         _status.Text = "Previous play order restored and saved.";
+     }
+ 
++    private void ToggleFinalized()
++    {
++        if (_loadFailed || (!_state.IsFinalized && _regions.Count == 0)) return;
++        var candidate = Copy(_state);
++        candidate.IsFinalized = !candidate.IsFinalized;
++        if (!Commit(candidate)) return;
++        StopDrag();
++        RefreshActions();
++        _status.Text = _state.IsFinalized ? "Play order finalized and saved. Unlock to make changes." :
++            "Play order unlocked. You can randomize, restore the previous order, or move tiles.";
++    }
++
++    private void RefreshActions()
++    {
++        var editable = !_loadFailed && !_state.IsFinalized;
++        _randomize.Enabled = editable && _regions.Count > 0;
++        _restore.Enabled = editable && _regions.Count > 0 && _previous is not null;
++        _finalize.Enabled = !_loadFailed && (_state.IsFinalized || _regions.Count > 0);
++        _finalize.Text = _state.IsFinalized ? "Unlock" : "Finalize";
++        foreach (var option in _difficultyOptions) option.Enabled = editable;
++        void SetDropEnabled(Control control)
++        {
++            control.AllowDrop = editable;
++            foreach (Control child in control.Controls) SetDropEnabled(child);
++        }
++        SetDropEnabled(_tiles);
++    }
++
+     private bool Commit(RegionProgressionState candidate)
+     {
+         if (_loadFailed) return false;
+@@ -149,7 +183,7 @@
+     private static RegionProgressionState Copy(RegionProgressionState state, List<string>? order = null, ProgressionDifficulty? difficulty = null) => new()
+     {
+         Order = order is null ? [.. state.Order] : [.. order], Difficulty = difficulty ?? state.Difficulty,
+-        HasRandomized = state.HasRandomized, Seed = state.Seed
++        HasRandomized = state.HasRandomized, Seed = state.Seed, IsFinalized = state.IsFinalized
+     };
+ 
+     private void RenderTiles()
+@@ -160,7 +194,7 @@
+         foreach (var code in _state.Order)
+         {
+             if (!regions.TryGetValue(code, out var region)) continue;
+-            var tile = CustomGroupWipTab.CreateTile(region, region: true);
++            var tile = CustomGroupWipTab.CreateTile(region, region: true, regionTier: _tiers.GetValueOrDefault(code, "Unsorted"));
+             var header = tile.Controls.OfType<Label>().First(label => label.Dock == DockStyle.Top);
+             var badge = new RegionOrderBadge();
+             header.Controls.Add(badge);
+@@ -171,13 +205,14 @@
+             }
+             header.SizeChanged += (_, _) => SizeBadge();
+             SizeBadge();
+-            CustomGroupWipTab.AttachTileDragHandlers(tile, tile, null);
++            CustomGroupWipTab.AttachTileDragHandlers(tile, tile, null, () => !_state.IsFinalized && !_loadFailed);
+             tile.QueryContinueDrag += (_, e) => { if (e.Action != DragAction.Continue) StopDrag(); };
+             AttachDropTarget(tile);
+             _tiles.Controls.Add(tile);
+         }
+         UpdateCaptions();
+         _tiles.ResumeLayout(true);
++        RefreshActions();
+     }
+ 
+     private void UpdateCaptions()
+@@ -212,7 +247,7 @@
+ 
+     private void PreviewDrop(Control source, DragEventArgs e)
+     {
+-        if (e.Data?.GetData(typeof(Panel)) is not Panel tile || tile.Parent != _tiles)
++        if (_state.IsFinalized || e.Data?.GetData(typeof(Panel)) is not Panel tile || tile.Parent != _tiles)
+         { e.Effect = DragDropEffects.None; StopDrag(); return; }
+         _dragTile = tile;
+         _dragScroll.Start();
+@@ -221,6 +256,7 @@
+ 
+     private void CompleteDrop(DragEventArgs e)
+     {
++        if (_state.IsFinalized) { StopDrag(); return; }
+         if (e.Data?.GetData(typeof(Panel)) is not Panel tile || tile.Parent != _tiles) return;
+         var insert = _tiles.DropIndex >= 0 ? _tiles.DropIndex :
+             _tiles.GetInsertionPosition(_tiles.PointToClient(new Point(e.X, e.Y)), tile).Index;
+@@ -279,9 +315,13 @@
+         using var outline = new Pen(Color.FromArgb(160, 170, 185));
+         e.Graphics.FillEllipse(fill, circle);
+         e.Graphics.DrawEllipse(outline, circle);
+-        using var font = new Font(Font.FontFamily, diameter * (Text.Length > 2 ? 0.34f : 0.46f), FontStyle.Bold, GraphicsUnit.Pixel);
++        using var font = new Font(Font.FontFamily, diameter * (Text.Length > 2 ? 0.38f : 0.54f), FontStyle.Bold, GraphicsUnit.Pixel);
+         using var text = new SolidBrush(Color.White);
+         using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+-        e.Graphics.DrawString(Text, font, text, circle, format);
++        using var glyph = new System.Drawing.Drawing2D.GraphicsPath();
++        glyph.AddString(Text, font.FontFamily, (int)font.Style, font.Size, circle, format);
++        using var weight = new Pen(Color.White, 0.65f) { LineJoin = System.Drawing.Drawing2D.LineJoin.Round };
++        e.Graphics.DrawPath(weight, glyph);
++        e.Graphics.FillPath(text, glyph);
+     }
+ }
+--- src\SnowPakTool.Desktop\RegionProgressionStore.cs
++++ src\SnowPakTool.Desktop\RegionProgressionStore.cs
+@@ -7,6 +7,7 @@
+     public List<string> Order { get; set; } = [];
+     public ProgressionDifficulty Difficulty { get; set; } = ProgressionDifficulty.Normal;
+     public bool HasRandomized { get; set; }
++    public bool IsFinalized { get; set; }
+     public int? Seed { get; set; }
+ }
+ 
+--- src\SnowPakTool.Desktop\CustomGroupWipTab.cs
++++ src\SnowPakTool.Desktop\CustomGroupWipTab.cs
+@@ -439,13 +439,13 @@
+         return data;
+     }
+ 
+-    internal static void AttachTileDragHandlers(Control control, Panel tile, FlowLayoutPanel? groupList)
++    internal static void AttachTileDragHandlers(Control control, Panel tile, FlowLayoutPanel? groupList, Func<bool>? canDrag = null)
+     {
+         Point mouseDown = Point.Empty;
+         control.MouseDown += (_, e) => mouseDown = e.Location;
+         control.MouseMove += (_, e) =>
+         {
+-            if ((e.Button & MouseButtons.Left) == 0 ||
++            if (canDrag?.Invoke() == false || (e.Button & MouseButtons.Left) == 0 ||
+                 Math.Abs(e.X - mouseDown.X) < SystemInformation.DragSize.Width / 2 &&
+                 Math.Abs(e.Y - mouseDown.Y) < SystemInformation.DragSize.Height / 2)
+                 return;
+@@ -469,7 +469,7 @@
+         };
+ 
+         foreach (Control child in control.Controls)
+-            AttachTileDragHandlers(child, tile, groupList);
++            AttachTileDragHandlers(child, tile, groupList, canDrag);
+     }
+ 
+     private void AttachTileDropTargets(Control control, FlowLayoutPanel? groupList)
+@@ -590,7 +590,7 @@
+         UpdateUnsortedPaneWidth();
+     }
+ 
+-    internal static Panel CreateTile(CustomTruck truck, bool region = false)
++    internal static Panel CreateTile(CustomTruck truck, bool region = false, string? regionTier = null)
+     {
+         var tile = new SearchableTruckTile
+         {
+@@ -669,10 +669,16 @@
+                 "highway" => "TruckClassHighway",
+                 _ => null
+             };
++            var tierBackground = regionTier is "S" or "A" or "B" or "C" or "D"
++                ? AppColors.Get("Tier" + regionTier) : Color.FromArgb(215, 220, 225);
+             var background = tile.SearchActive ? AppColors.Get("SearchActive") : tile.SearchMatch ? AppColors.Get("EngineMatch") :
++                region && regionTier is not null ? tierBackground :
+                 key is null ? Color.FromArgb(32, 38, 45) : AppColors.Get(key);
+             name.BackColor = classOverlay.BackColor = background;
+-            name.ForeColor = classOverlay.ForeColor = background.GetBrightness() < 0.55f ? Color.White : Color.Black;
++            name.ForeColor = classOverlay.ForeColor = region && regionTier is not null ? ContrastingTileText(background) :
++                background.GetBrightness() < 0.55f ? Color.White : Color.Black;
++            if (region && regionTier is not null)
++                tile.BackColor = image.BackColor = background;
+         }
+         tile.SearchMatchChanged += (_, _) => ApplyClassColor();
+         ApplyClassColor();
+@@ -680,6 +686,17 @@
+         AppColors.Changed += colorsChanged;
+         tile.Disposed += (_, _) => AppColors.Changed -= colorsChanged;
+         return tile;
++    }
++
++    private static Color ContrastingTileText(Color background)
++    {
++        static double Linear(byte channel)
++        {
++            var value = channel / 255d;
++            return value <= 0.04045 ? value / 12.92 : Math.Pow((value + 0.055) / 1.055, 2.4);
++        }
++        var luminance = 0.2126 * Linear(background.R) + 0.7152 * Linear(background.G) + 0.0722 * Linear(background.B);
++        return luminance > 0.179 ? Color.FromArgb(20, 20, 20) : Color.White;
+     }
+ 
+     private static async Task LoadTileImageAsync(PictureBox picture, CustomTruck truck)
+--- README.md
++++ README.md
+@@ -14,9 +14,9 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles show circular position badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the Region Difficulty tier palette (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+-A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
++A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+--- SMALL_CHANGE_QUEUE.md
++++ SMALL_CHANGE_QUEUE.md
+@@ -1,12 +1,13 @@
+ # Small change queue
+ 
+-Queued requests (3 of 10):
++Queued requests (0 of 10):
++
++Completed requests:
+ 
+ - Rank XP staging: opening/leaving Experience / Ranks, loading saved settings, or changing the preview must not create a pending change on Start. Only pressing Save rank XP stages the selected values in internal/persisted memory, without editing game/workspace rank files. Start → Apply performs the actual file changes from those explicitly staged values.
+ - In Region progression, replace the dark tile backgrounds with the corresponding Region Difficulty tier palette color. Use dark/blackish text on light tier colors and light text where needed for contrast; keep Unsorted visually distinct.
+ - Make the numbers in Region progression position badges slightly larger and thicker/heavier while keeping them centered and readable, including double digits.
+ 
+-Completed requests:
+ 
+ - Move Region progression to the first sub-tab under Randomizer, before Truck-Randomization.
+ 
+--- /dev/null
++++ src\SnowPakTool.Desktop\RankXpStageStore.cs
+@@ -0,0 +1,56 @@
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class StagedRankXp
++{
++    public string SourceText { get; set; } = "";
++    public List<int> Values { get; set; } = [];
++}
++
++/// <summary>Only explicitly confirmed XP values enter this per-workspace preference store.</summary>
++internal sealed class RankXpStageStore
++{
++    private readonly string _directory;
++    public RankXpStageStore(string? directory = null) => _directory = directory ?? Path.Combine(
++        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SnowPakTool.Desktop", "staged-rank-xp");
++
++    private string StatePath(string workspace)
++    {
++        var key = WorkspaceOriginals.GetWorkspaceRoot(workspace).ToUpperInvariant();
++        return Path.Combine(_directory, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json");
++    }
++
++    public StagedRankXp? Load(string workspace)
++    {
++        var path = StatePath(workspace);
++        if (!File.Exists(path)) return null;
++        var staged = JsonSerializer.Deserialize<StagedRankXp>(File.ReadAllText(path))
++            ?? throw new JsonException("The staged rank XP settings are empty.");
++        Validate(staged);
++        return staged;
++    }
++
++    public void Stage(string workspace, string sourceText, IReadOnlyList<int> values)
++    {
++        var staged = new StagedRankXp { SourceText = sourceText, Values = [.. values] };
++        Validate(staged);
++        RankProgressionChanges.TryRead(sourceText, out var before);
++        if (before.SequenceEqual(values)) { Clear(workspace); return; }
++        var path = StatePath(workspace);
++        Directory.CreateDirectory(_directory);
++        File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(staged, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(path + ".tmp", path, overwrite: true);
++    }
++
++    public void Clear(string workspace) => File.Delete(StatePath(workspace));
++
++    private static void Validate(StagedRankXp staged)
++    {
++        if (staged.SourceText is null || staged.Values is null || staged.Values.Count == 0 || staged.Values.Any(value => value < 0) ||
++            !RankProgressionChanges.TryRead(staged.SourceText, out var baseline) || baseline.Count != staged.Values.Count)
++            throw new JsonException("The staged rank XP values are invalid.");
++    }
++}
+--- /dev/null
++++ .checks\RankStaging\Program.cs
+@@ -0,0 +1,60 @@
++using System.Collections;
++using System.Reflection;
++internal static class Program
++{
++ static readonly Assembly App=Assembly.Load("SnowPakTool.Desktop");
++ static Type T(string n)=>App.GetType("SnowPakTool.Desktop."+n)!;
++ static object? Invoke(object value,string name,params object?[] args)=>value.GetType().GetMethod(name,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(value,args);
++ static object? Static(string type,string name,params object?[] args)=>T(type).GetMethod(name,BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,args);
++ static object Field(object obj,string name)=>obj.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance)!.GetValue(obj)!;
++ static void Set(object obj,string name,object value)=>obj.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(obj,value);
++ static void Check(bool ok,string name){if(!ok)throw new Exception(name);}
++ static List<object> Rows(object? value)=>((IEnumerable)value!).Cast<object>().ToList();
++ static List<int> Values(object staged)=>(List<int>)staged.GetType().GetProperty("Values")!.GetValue(staged)!;
++ static string Text(object row,string name)=>(string)row.GetType().GetProperty(name)!.GetValue(row)!;
++ static Control Editor(string workspace,object store)=> (Control)Activator.CreateInstance(T("ExperienceEditorTab"),BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public,null,new object[]{new Func<string>(()=>workspace),Activator.CreateInstance(T("OwnedRegionState"))!,store},null)!;
++ [STAThread]static void Main()
++ {
++  var root=Path.Combine(AppContext.BaseDirectory,"fixtures",Guid.NewGuid().ToString("N"));
++  var workspace=Path.Combine(root,"workspace");var original=Path.Combine(workspace,"initial.pak","original_files","[ps]","rank_settings.sso");var updated=Path.Combine(workspace,"initial.pak","updated","[ps]","rank_settings.sso");
++  Directory.CreateDirectory(Path.GetDirectoryName(original)!);const string source="rankExp = [700, 1000,]\nother = 1\n";File.WriteAllText(original,source);
++  var stateDir=Path.Combine(root,"preferences");var store=Activator.CreateInstance(T("RankXpStageStore"),new object[]{stateDir})!;
++  using(var editor=Editor(workspace,store))
++  {
++   var grid=(DataGridView)Field(editor,"_grid");Set(editor,"_isLoading",true);grid.Rows.Clear();grid.Rows.Add(2,700,1000);grid.Rows.Add(3,1000,2000);
++   Set(editor,"_loadedWorkspace",workspace);Set(editor,"_rankSettingsPath",original);Set(editor,"_loadedFileText",source);Set(editor,"_loadedValues",new List<int>{700,1000});Set(editor,"_isLoading",false);
++   List<object> Pending()=>Rows(Invoke(editor,"PendingChanges",workspace));
++   Check(Pending().Count==0,"preview edits not pending");
++   Invoke(editor,"EnsureLoaded");Check(Pending().Count==0,"navigation not pending");
++   Invoke(editor,"SaveSettings");
++   Check(File.ReadAllText(original)==source && !File.Exists(updated),"Save rank XP leaves game files untouched");
++   var staged=Invoke(store,"Load",workspace)!;Check(Values(staged).SequenceEqual(new[]{1000,2000}),"explicit staged snapshot");
++   Check(Pending().Count==1 && Text(Pending()[0],"After")=="2 steps; 3,000 XP total","staged pending summary");
++   Check(Rows(Invoke(editor,"PendingChanges",Path.Combine(root,"other"))).Count==0,"workspace isolation");
++   using(var restarted=Editor(workspace,store))
++   {
++    Check(Rows(Invoke(restarted,"PendingChanges",workspace)).Count==1,"staged settings available before rank tab loaded");
++    Invoke(restarted,"EnsureLoaded");var restored=(DataGridView)Field(restarted,"_grid");
++    Check(restored.Rows.Count==2 && Convert.ToInt32(restored.Rows[0].Cells["UpdatedXP"].Value)==1000 && Convert.ToInt32(restored.Rows[1].Cells["UpdatedXP"].Value)==2000,"staged grid survives restart/reload");
++   }
++   grid.Rows[0].Cells["UpdatedXP"].Value=9999;grid.Rows[1].Cells["UpdatedXP"].Value="invalid";
++   Check(Text(Pending().Single(),"After")=="2 steps; 3,000 XP total","later invalid preview cannot replace saved snapshot");
++   Invoke(editor,"SavePendingChanges");
++   Check(File.ReadAllText(original)==source,"Apply preserves original");
++   var result=File.ReadAllText(updated);Check(result=="rankExp = [1000, 2000,]\nother = 1\n","Apply writes only saved values with formatting preserved");
++   Check(Pending().Count==0 && Invoke(store,"Load",workspace) is null,"Apply clears pending stage");
++   Check((string)grid.Rows[1].Cells["UpdatedXP"].Value=="invalid","Apply does not consume unstaged preview edits");
++   Invoke(store,"Stage",workspace,result,new List<int>{1500,2500});
++   File.WriteAllText(updated,result+"external = 2\n");
++   bool refused=false;try{Invoke(editor,"SavePendingChanges");}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){refused=true;}
++   Check(refused && File.ReadAllText(updated)==result+"external = 2\n" && Invoke(store,"Load",workspace) is not null,"external edits protected and staged values retained");
++   Invoke(store,"Stage",workspace,result,new List<int>{1000,2000});Check(Invoke(store,"Load",workspace) is null,"saving current values removes staged change");
++   var malformed=false;try{Invoke(store,"Stage",workspace,result,new List<int>{-1,5});}catch(TargetInvocationException e)when(e.InnerException is System.Text.Json.JsonException){malformed=true;}
++   Check(malformed && Invoke(store,"Load",workspace) is null,"invalid values rejected without staging");
++   File.WriteAllText(updated,result);
++   using(var fresh=Editor(workspace,store))
++   {Invoke(fresh,"EnsureLoaded");Check((string)Field(fresh,"_loadedFileText")==result,"reload sees applied file rather than stale cache");Check(Rows(Invoke(fresh,"PendingChanges",workspace)).Count==0,"default preview after Apply does not re-stage");}
++  }
++  Console.WriteLine("PASS rank XP: preview/navigation never stage, explicit Save persists only preferences, restart before tab load, exact snapshot Apply, original/unrelated-data preservation, invalid later previews, workspace isolation, external-edit conflicts, no-op and invalid staging, applied-file cache refresh.");
++ }
++}
+--- /dev/null
++++ .checks\RankStaging\RankStaging.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>

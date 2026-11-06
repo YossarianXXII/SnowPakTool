@@ -1,0 +1,14 @@
+diff --git a/SMALL_CHANGE_QUEUE.md b/SMALL_CHANGE_QUEUE.md
+index 4483f94..e062f9e 100644
+--- a/SMALL_CHANGE_QUEUE.md
++++ b/SMALL_CHANGE_QUEUE.md
+@@ -3,4 +3,8 @@
+ Queued requests (2 of 10):
+ 
+ - Shorten the Engines tab description to no more than one row, ideally two sentences and at most three, explaining the tab's general purpose.
+-- Close the search overlay when clicking anywhere.
++- In Game data → Regions-Trucks, show the underlying tire class in parentheses for Custom tires in the Tires column, e.g. `Custom (Offroad)` or `Custom (Mudtires)`.
++
++Completed requests:
++
++- Close the search overlay when clicking anywhere (implemented in the shared search overlay).

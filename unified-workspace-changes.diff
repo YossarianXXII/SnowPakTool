@@ -1,0 +1,815 @@
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\AddonsTab.cs" "b/src\\SnowPakTool.Desktop\\AddonsTab.cs"
+index 043757c..f47b9b2 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\AddonsTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\AddonsTab.cs"
+@@ -280,7 +280,7 @@ internal sealed class AddonsTab : UserControl
+         var edits = _fuelRows.Where(pair => pair.Value.Draft != pair.Value.Current)
+             .Select(pair => new FrameAddonFuelEdit(pair.Key, pair.Value.Name, pair.Value.Current, pair.Value.Draft)).ToList();
+         FrameAddonFuelStore.Save(_loadedWorkspace!, edits);
+-        _status.Text = $"Staged {edits.Count} frame addon fuel changes. Apply pending PAK edits from Start.";
++        _status.Text = $"Staged {edits.Count} frame addon fuel changes. Apply pending changes from Start.";
+     }
+ 
+     private void UpdateFuelCells()
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\ExperienceEditorTab.cs" "b/src\\SnowPakTool.Desktop\\ExperienceEditorTab.cs"
+index 0401a28..e81b72f 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\ExperienceEditorTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\ExperienceEditorTab.cs"
+@@ -189,7 +189,7 @@ internal sealed class ExperienceEditorTab : UserControl
+         };
+         var actionTips = new ToolTip();
+         actionTips.SetToolTip(_reloadButton, "Reload rank XP and region data from the selected workspace. Unsaved edits require confirmation.");
+-        actionTips.SetToolTip(_saveButton, "Stage the Updated XP values in saved preferences. Start → Apply pending PAK edits writes them to the workspace.");
++        actionTips.SetToolTip(_saveButton, "Stage the Updated XP values in saved preferences. Start → Apply pending changes writes them to the workspace.");
+         actionTips.SetToolTip(_selectAllRegions, "Include or exclude every region in the XP budget and progression graphs.");
+         actionTips.SetToolTip(_selectOwnedRegions, "Include only regions marked as owned in the Owned Content tab.");
+         _selectOwnedRegions.Click += (_, _) => SelectOwnedRegions();
+@@ -884,7 +884,7 @@ internal sealed class ExperienceEditorTab : UserControl
+             _stagedRank = _rankStageStore.Load(_loadedWorkspace!);
+             UpdateDirtyState();
+             _status.Text = _stagedRank is null ? "Rank XP matches the workspace; no changes are staged." :
+-                $"Staged {values.Count} rank XP values. Use Start → Apply pending PAK edits to write them to the workspace.";
++                $"Staged {values.Count} rank XP values. Use Start → Apply pending changes to write them to the workspace.";
+         }
+         catch (Exception ex)
+         {
+@@ -912,7 +912,7 @@ internal sealed class ExperienceEditorTab : UserControl
+         _experienceGraph.Invalidate();
+         _saveButton.Enabled = _rankSettingsPath is not null && IsDirty;
+         if (IsDirty && _rankSettingsPath is not null) _status.Text = "Preview XP changes. Press Save rank XP to stage them for Start → Apply.";
+-        else if (_stagedRank is not null) _status.Text = "Rank XP staged. Use Start → Apply pending PAK edits.";
++        else if (_stagedRank is not null) _status.Text = "Rank XP staged. Use Start → Apply pending changes.";
+     }
+ 
+     private void UpdateLevel30Total()
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\MainForm.cs" "b/src\\SnowPakTool.Desktop\\MainForm.cs"
+index 41cadca..e3fd64d 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\MainForm.cs"
++++ "b/src\\SnowPakTool.Desktop\\MainForm.cs"
+@@ -398,12 +398,12 @@ internal sealed class MainForm : Form
+         { MessageBox.Show(this, "Choose a new PAK output file; the input PAK is preserved.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+         if (_experienceTab.PendingChanges(workspace).Any())
+         {
+-            MessageBox.Show(this, "Apply staged rank XP using Start → Apply pending PAK edits before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
++            MessageBox.Show(this, "Apply staged rank XP using Start → Apply pending changes before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+             return;
+         }
+         if (UpgradeChanges.Pending(workspace).Any())
+         {
+-            MessageBox.Show(this, "Apply staged upgrade changes using Start → Apply pending PAK edits before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
++            MessageBox.Show(this, "Apply staged upgrade changes using Start → Apply pending changes before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+             return;
+         }
+         try { SavePendingPakChanges(); }
+@@ -447,6 +447,7 @@ internal sealed class MainForm : Form
+         });
+         await _regionsTrucksTab.RefreshChangesAsync();
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
++        if (!succeeded) throw new InvalidOperationException("Map changes could not be applied. See the shared log for the source error.");
+     }
+ 
+     private async Task RandomizeObtainableAsync(IProgress<RandomizationLogEntry> progress)
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\MapUpgradesTab.cs" "b/src\\SnowPakTool.Desktop\\MapUpgradesTab.cs"
+index 9e2927b..6d45c0d 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\MapUpgradesTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\MapUpgradesTab.cs"
+@@ -218,7 +218,7 @@ internal sealed partial class MapUpgradesTab : UserControl
+         _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
+         _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nSelected ID: {id}\r\nDefinition: {part?.Source}\r\nNew compatible trucks: {string.Join(", ", TruckNames(part))}\r\nOriginal compatible trucks: {string.Join(", ", TruckNames(original))}"
+             + (assignment is null ? "" : $"\r\nSelection: {assignment.Path}; {assignment.Relation}; fallback={assignment.Fallback}; reused={assignment.Reused}")
+-            + "\r\nStage changes, then Apply pending PAK edits from Start. Exploration locks follow the resulting map pickups."
++            + "\r\nStage changes, then Apply pending changes from Start. Exploration locks follow the resulting map pickups."
+             + (_catalog.Warnings.Count == 0 ? "" : "\r\nSource warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+     private string[] TruckNames(UpgradeTrialPart? part) => (part?.Definition.CompatibleTrucks ?? [])
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\RegionsTrucksTab.cs" "b/src\\SnowPakTool.Desktop\\RegionsTrucksTab.cs"
+index 1b0bdcf..27f7f0b 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\RegionsTrucksTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\RegionsTrucksTab.cs"
+@@ -167,7 +167,7 @@ internal sealed partial class RegionsTrucksTab : UserControl
+             var count = PendingTruckReplacements.Stage(workspace);
+             await RefreshChangesAsync();
+             var reloadError = _status.Text.StartsWith("Could not", StringComparison.Ordinal) ? " " + _status.Text : "";
+-            _status.Text = $"Staged {count} map changes. Apply them from Start → Map files. Editing a staged placement returns it to Draft." + reloadError;
++            _status.Text = $"Staged {count} map changes. Apply them from Start → Apply pending changes. Editing a staged placement returns it to Draft." + reloadError;
+         }
+         finally { _editingPlan = false; ShowDetails(); }
+         ChangesStaged?.Invoke();
+@@ -190,7 +190,7 @@ internal sealed partial class RegionsTrucksTab : UserControl
+         {
+             PendingTruckReplacements.Reset(_loadedWorkspace, entries);
+             await RefreshChangesAsync();
+-            _status.Text = "Original trucks and equipment restored in the draft; randomization assignments cleared. Stage changes, then apply restorations from Start → Map files.";
++            _status.Text = "Original trucks and equipment restored in the draft; randomization assignments cleared. Stage changes, then apply restorations from Start → Apply pending changes.";
+         }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
+         { _status.Text = "Could not reset trucks: " + ex.Message; }
+@@ -471,7 +471,7 @@ internal sealed partial class RegionsTrucksTab : UserControl
+         {
+             e.ToolTipText = $"Original truck: {entry.BaselineTruck} ({entry.BaselineTruckCode}).";
+             if (entry.FileEntry is not null)
+-                e.ToolTipText += $"\r\nPreview: {entry.FileEntry.Truck} → {entry.Truck}. Stage changes, then apply from Start → Map files.";
++                e.ToolTipText += $"\r\nPreview: {entry.FileEntry.Truck} → {entry.Truck}. Stage changes, then apply from Start → Apply pending changes.";
+             else if (entry.TruckChanged)
+                 e.ToolTipText += $"\r\nSaved replacement: {entry.Truck}.";
+             e.ToolTipText += "\r\nCompare replacement trucks (⇄ button, F4 or Alt+Down).";
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\StartChangesPanel.cs" "b/src\\SnowPakTool.Desktop\\StartChangesPanel.cs"
+index 77a3494..ef7287b 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\StartChangesPanel.cs"
++++ "b/src\\SnowPakTool.Desktop\\StartChangesPanel.cs"
+@@ -7,23 +7,23 @@ internal sealed class StartChangesPanel : UserControl
+ {
+     private sealed record PakChangeGroup(string Name, IReadOnlyList<WorkspaceChange> Changes);
+     private sealed record MapChangeGroup(string RegionCode, IReadOnlyList<WorkspaceChange> Changes);
++    private sealed record ChangeGroup(string Area, string Target, string Summary, IReadOnlyList<WorkspaceChange> Changes, bool IsMap = false);
+ 
+     private readonly Func<string> _workspace;
+     private readonly Func<string, IReadOnlyList<WorkspaceChange>> _pendingPak;
+     private readonly Action _savePak;
+     private readonly Func<Task> _applyMaps;
+     private readonly Func<Task> _reloadRegions;
+-    private readonly DataGridView _pak = Grid();
+-    private readonly DataGridView _maps = Grid();
++    private readonly DataGridView _changes = Grid();
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 7, 4, 2) };
+     private readonly Button _refresh = new() { Text = "Refresh changes", AutoSize = true };
+-    private readonly Button _savePakButton = new() { Text = "Apply pending PAK edits", AutoSize = true, Enabled = false };
+-    private readonly Button _applyMapsButton = new() { Text = "Apply pending map changes", AutoSize = true, Enabled = false };
++    private readonly Button _applyButton = new() { Text = "Apply pending changes", AutoSize = true, Enabled = false };
+     private readonly Button _discardMap = new() { Text = "Discard selected pending changes", AutoSize = true, Enabled = false };
+     private readonly Button _repairMaps = new() { Text = "Repair saved maps", AutoSize = true, Enabled = false };
+     private readonly List<Label> _legend = [];
+     private int _request;
+     private string _displayedWorkspace = "";
++    private bool _applying;
+ 
+     public event Action<int>? PendingCountChanged;
+ 
+@@ -40,22 +40,14 @@ internal sealed class StartChangesPanel : UserControl
+         legend.Controls.Add(new Label { Text = "Pending — not applied", AutoSize = true, BackColor = AppColors.Get("EngineMatch"), Padding = new Padding(6) });
+         _legend.AddRange(legend.Controls.OfType<Label>());
+         legend.Controls.Add(_status); layout.Controls.Add(legend, 0, 0);
+-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(950, 650), SplitterDistance = 310, Panel1MinSize = 80, Panel2MinSize = 80, SplitterWidth = 6 };
+-        var pakTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+         if (pakActions is FlowLayoutPanel flow)
+         { flow.WrapContents = false; flow.AutoSizeMode = AutoSizeMode.GrowAndShrink; flow.Padding = Padding.Empty; }
+-        pakActions.Dock = DockStyle.None; pakActions.Margin = Padding.Empty; pakTools.Controls.Add(pakActions); pakTools.Controls.Add(_savePakButton);
+-        var mapTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+-        mapTools.Controls.Add(_applyMapsButton); mapTools.Controls.Add(_discardMap); mapTools.Controls.Add(_repairMaps);
+-        split.Panel1.Controls.Add(Section("PAK", pakTools, _pak)); split.Panel2.Controls.Add(Section("Map files", mapTools, _maps));
+-        layout.Controls.Add(split, 0, 1); Controls.Add(layout);
++        pakActions.Dock = DockStyle.None; pakActions.Margin = Padding.Empty; tools.Controls.Add(pakActions);
++        tools.Controls.Add(_applyButton); tools.Controls.Add(_discardMap); tools.Controls.Add(_repairMaps);
++        layout.Controls.Add(Section("Initial PAK and map changes", tools, _changes), 0, 1); Controls.Add(layout);
+         _refresh.Click += async (_, _) => await RefreshAsync();
+-        _savePakButton.Click += async (_, _) =>
+-        {
+-            string? error = null; try { _savePak(); } catch (Exception ex) { error = ex.Message; }
+-            await RefreshAsync(); if (error is not null) _status.Text = error;
+-        };
+-        _applyMapsButton.Click += async (_, _) => await _applyMaps();
++        _applyButton.Click += async (_, _) => await ApplyPendingAsync();
+         _repairMaps.Click += async (_, _) =>
+         {
+             var workspacePath = _workspace().Trim(); _repairMaps.Enabled = false;
+@@ -69,7 +61,7 @@ internal sealed class StartChangesPanel : UserControl
+         };
+         _discardMap.Click += async (_, _) =>
+         {
+-            if (_maps.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not MapChangeGroup group) return;
++            if (_applying || _changes.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not ChangeGroup { IsMap: true } group) return;
+             var keys = group.Changes.Where(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0).Select(change => change.Key).ToArray();
+             if (keys.Length == 0) return;
+             _discardMap.Enabled = false;
+@@ -81,33 +73,55 @@ internal sealed class StartChangesPanel : UserControl
+             }
+             catch (Exception ex) { await RefreshAsync(); _status.Text = "Could not discard map changes: " + ex.Message; }
+         };
+-        _maps.CurrentCellChanged += (_, _) => _discardMap.Enabled = _maps.CurrentRow?.DataBoundItem is DataRowView row
+-            && row["Entry"] is MapChangeGroup group && group.Changes.Any(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0);
+-        _pak.CellToolTipTextNeeded += (_, e) =>
++        _changes.CurrentCellChanged += (_, _) => UpdateDiscardButton();
++        _changes.CellToolTipTextNeeded += (_, e) =>
+         {
+-            if (e.RowIndex < 0 || _pak.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not PakChangeGroup group) return;
+-            e.ToolTipText = string.Join(Environment.NewLine, group.Changes.Select(change =>
+-                $"{change.Target}{Environment.NewLine}{change.Property}: {change.Before} → {change.After}"));
++            if (e.RowIndex < 0 || _changes.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not ChangeGroup group) return;
++            e.ToolTipText = group.IsMap
++                ? string.Join(Environment.NewLine, group.Changes.GroupBy(change => change.Target).Select(map => $"{map.Key}: {map.Count()} change(s)"))
++                : string.Join(Environment.NewLine, group.Changes.Select(change => $"{change.Target}{Environment.NewLine}{change.Property}: {change.Before} → {change.After}"));
+         };
+-        _maps.CellToolTipTextNeeded += (_, e) =>
+-        {
+-            if (e.RowIndex < 0 || _maps.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not MapChangeGroup group) return;
+-            e.ToolTipText = string.Join(Environment.NewLine, group.Changes.GroupBy(change => change.Target)
+-                .Select(map => $"{map.Key}: {map.Count()} change(s)"));
+-        };
+-        _maps.Sorted += (_, _) => PaintRows(_maps); _pak.Sorted += (_, _) => PaintRows(_pak);
++        _changes.Sorted += (_, _) => PaintRows(_changes);
++        _changes.DataBindingComplete += (_, _) => { PaintRows(_changes); UpdateDiscardButton(); };
+         AppColors.Changed += ColorsChanged; Disposed += (_, _) => AppColors.Changed -= ColorsChanged;
+     }
+ 
++    private async Task ApplyPendingAsync()
++    {
++        if (_applying) return;
++        var workspace = _workspace().Trim();
++        if (!Directory.Exists(workspace)) return;
++        _applying = true; _applyButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = _refresh.Enabled = false;
++        string message;
++        try
++        {
++            // These remain separate stores. If the second operation fails, the first
++            // stays applied and refresh shows the remaining staged work for retry.
++            if (_pendingPak(workspace).Count > 0) _savePak();
++            if (!workspace.Equals(_workspace().Trim(), StringComparison.OrdinalIgnoreCase))
++                throw new InvalidOperationException("Workspace changed during Apply. Review the remaining pending changes.");
++            if (PendingTruckReplacements.LoadStaged(workspace).Count > 0) await _applyMaps();
++            await _reloadRegions();
++            message = "Pending changes applied to the workspace. Pack the initial PAK as needed; install the resulting PAK and map files manually.";
++        }
++        catch (Exception ex) { message = "Apply stopped: " + ex.Message + " Completed changes remain in files; remaining changes stay pending."; }
++        finally { _applying = false; await RefreshAsync(); }
++        _status.Text = message;
++    }
++
++    private void UpdateDiscardButton() => _discardMap.Enabled = !_applying && _changes.CurrentRow?.DataBoundItem is DataRowView row
++        && row["Entry"] is ChangeGroup { IsMap: true } group
++        && group.Changes.Any(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0);
++
+     public async Task RefreshAsync()
+     {
+         if (IsDisposed) return;
+         if (InvokeRequired)
+         { await InvokeAsync(async (CancellationToken _) => { await RefreshAsync(); }); return; }
+         var request = ++_request; var workspace = _workspace().Trim();
+-        if (_displayedWorkspace != workspace) { BindPak([], new Dictionary<string, (string Name, string Class)>()); BindMaps([], new Dictionary<string, string>()); _displayedWorkspace = workspace; }
+-        _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
+-        if (!Directory.Exists(workspace)) { BindPak([], new Dictionary<string, (string Name, string Class)>()); BindMaps([], new Dictionary<string, string>()); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
++        if (_displayedWorkspace != workspace) { BindChanges([]); _displayedWorkspace = workspace; }
++        _applyButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
++        if (!Directory.Exists(workspace)) { BindChanges([]); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
+         _status.Text = "Comparing files…"; _refresh.Enabled = false;
+         try
+         {
+@@ -118,16 +132,16 @@ internal sealed class StartChangesPanel : UserControl
+             await InvokeAsync(() =>
+             {
+                 if (request != _request || workspace != _workspace().Trim()) return;
+-                BindPak(result.Pak.Concat(pending).ToArray(), result.Trucks); BindMaps(result.Maps, WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase));
+-                _savePakButton.Enabled = pending.Count > 0;
+-                _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
+-                _repairMaps.Enabled = result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
++                BindChanges(PakGroups(result.Pak.Concat(pending).ToArray(), result.Trucks).Concat(MapGroups(result.Maps,
++                    WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase))));
++                _applyButton.Enabled = !_applying && (pending.Count > 0 || result.Maps.Any(change => change.State == WorkspaceChange.Pending));
++                _repairMaps.Enabled = !_applying && result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
+                 PendingCountChanged?.Invoke(pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending));
+                 _status.Text = $"{result.Pak.Count + result.Maps.Count(change => change.State == WorkspaceChange.InFiles)} in files · {pending.Count + result.Maps.Count(change => change.State == WorkspaceChange.Pending)} pending";
+             });
+         }
+         catch (Exception ex) { if (!IsDisposed) await InvokeAsync(() => { if (request == _request) _status.Text = "Could not compare changes: " + ex.Message; }); }
+-        finally { if (!IsDisposed) await InvokeAsync(() => { if (request == _request) _refresh.Enabled = true; }); }
++        finally { if (!IsDisposed) await InvokeAsync(() => { if (request == _request) _refresh.Enabled = !_applying; }); }
+     }
+ 
+     private static GroupBox Section(string title, Control tools, Control grid)
+@@ -143,7 +157,7 @@ internal sealed class StartChangesPanel : UserControl
+         BackgroundColor = AppColors.Get("Surface"), ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold) },
+         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowTemplate = { Height = 26 } };
+ 
+-    private void BindPak(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, (string Name, string Class)> trucks)
++    private static IEnumerable<ChangeGroup> PakGroups(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, (string Name, string Class)> trucks)
+     {
+         (string Key, string Name) Identity(WorkspaceChange change, int index)
+         {
+@@ -162,25 +176,14 @@ internal sealed class StartChangesPanel : UserControl
+         var groups = changes.Select((change, index) => (Change: change, Identity: Identity(change, index)))
+             .GroupBy(item => (item.Change.State, item.Identity.Key))
+             .Select(group => new PakChangeGroup(group.First().Identity.Name, group.Select(item => item.Change).ToArray()));
+-        var data = new DataTable();
+-        foreach (var column in new[] { "State", "File / target", "Change" }) data.Columns.Add(column);
+-        data.Columns.Add("Entry", typeof(PakChangeGroup));
+         foreach (var group in groups)
+         {
+             var first = group.Changes[0];
+             var target = group.Name.Length > 0 ? group.Name : first.Target;
+             var parts = group.Changes.Select(change => BriefPakChange(change, group.Name)).ToArray();
+             var summary = string.Join("; ", parts.Take(3)) + (parts.Length > 3 ? $"; +{parts.Length - 3} more" : "");
+-            data.Rows.Add(first.State, target, summary, group);
++            yield return new ChangeGroup("Initial PAK", target, summary, group.Changes);
+         }
+-        TableHeaderBehavior.Attach(_pak);
+-        _pak.DataSource = data; _pak.Columns["Entry"]!.Visible = false;
+-        _pak.Columns["State"]!.FillWeight = 35;
+-        _pak.Columns["File / target"]!.HeaderText = "Truck / winch / target";
+-        _pak.Columns["File / target"]!.FillWeight = 90;
+-        _pak.Columns["Change"]!.HeaderText = "Summary";
+-        _pak.Columns["Change"]!.FillWeight = 220;
+-        PaintRows(_pak);
+     }
+ 
+     private static string BriefPakChange(WorkspaceChange change, string truckName)
+@@ -213,7 +216,7 @@ internal sealed class StartChangesPanel : UserControl
+             ? property + " updated" : $"{property}: {before} → {after}";
+     }
+ 
+-    private void BindMaps(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, string> regionNames)
++    private static IEnumerable<ChangeGroup> MapGroups(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, string> regionNames)
+     {
+         static string Region(WorkspaceChange change) => Regex.Match(change.Target, @"level_((?:us|ru)_\d{2})_", RegexOptions.IgnoreCase).Groups[1].Value.ToLowerInvariant();
+         static bool TruckChange(WorkspaceChange change) => Region(change).Length > 0 && (change.Property is "Truck randomization" or "Obtainable randomization" or "Reset to original"
+@@ -223,9 +226,6 @@ internal sealed class StartChangesPanel : UserControl
+             .Concat(changes.Where(change => !TruckChange(change)).Select(change => new MapChangeGroup(Region(change), [change])))
+             .OrderBy(group => regionNames.GetValueOrDefault(group.RegionCode, group.RegionCode), StringComparer.CurrentCultureIgnoreCase)
+             .ThenBy(group => group.Changes[0].State == WorkspaceChange.Pending ? 1 : 0).ToArray();
+-        var data = new DataTable();
+-        foreach (var column in new[] { "State", "Region", "Change", "Before", "After" }) data.Columns.Add(column);
+-        data.Columns.Add("Entry", typeof(MapChangeGroup));
+         foreach (var group in groups)
+         {
+             var first = group.Changes[0];
+@@ -234,15 +234,27 @@ internal sealed class StartChangesPanel : UserControl
+             {
+                 var maps = group.Changes.Select(change => change.Target).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+                 var resets = group.Changes.Count(change => change.Property == "Reset to original");
+-                data.Rows.Add(first.State, region, resets == group.Changes.Count ? "Reset to original" : "Truck / equipment changes",
+-                    first.State == WorkspaceChange.Pending ? "Current placements" : "Preserved originals",
+-                    $"{group.Changes.Count} change(s) across {maps} map(s)" + (resets > 0 ? $"; {resets} reset(s)" : "") + ". Details in Map trucks.", group);
++                var title = resets == group.Changes.Count ? "Reset to original" : "Truck / equipment changes";
++                yield return new ChangeGroup("Maps", region, title + $": {group.Changes.Count} change(s) across {maps} map(s)"
++                    + (resets > 0 ? $"; {resets} reset(s)" : "") + ". Details in Map trucks.", group.Changes, true);
+             }
+-            else data.Rows.Add(first.State, region, first.Target + " / " + first.Property, first.Before, first.After, group);
++            else yield return new ChangeGroup("Maps", region, first.Target + " / " + first.Property + $": {first.Before} → {first.After}", group.Changes, true);
+         }
+-        TableHeaderBehavior.Attach(_maps);
+-        _maps.DataSource = data; _maps.Columns["Entry"]!.Visible = false; _maps.Columns["State"]!.FillWeight = 45;
+-        PaintRows(_maps);
++    }
++
++    private void BindChanges(IEnumerable<ChangeGroup> groups)
++    {
++        var data = new DataTable();
++        foreach (var column in new[] { "State", "Area", "File / target", "Change" }) data.Columns.Add(column);
++        data.Columns.Add("Entry", typeof(ChangeGroup));
++        foreach (var group in groups) data.Rows.Add(group.Changes[0].State, group.Area, group.Target, group.Summary, group);
++        TableHeaderBehavior.Attach(_changes);
++        _changes.DataSource = data; _changes.Columns["Entry"]!.Visible = false;
++        _changes.Columns["State"]!.FillWeight = 35; _changes.Columns["Area"]!.FillWeight = 35;
++        _changes.Columns["File / target"]!.HeaderText = "Truck / winch / region / target";
++        _changes.Columns["File / target"]!.FillWeight = 100;
++        _changes.Columns["Change"]!.HeaderText = "Summary"; _changes.Columns["Change"]!.FillWeight = 220;
++        PaintRows(_changes); UpdateDiscardButton();
+     }
+ 
+     private static void PaintRows(DataGridView grid)
+@@ -256,8 +268,8 @@ internal sealed class StartChangesPanel : UserControl
+     }
+     private void ColorsChanged(object? sender, EventArgs e)
+     {
+-        PaintRows(_pak); PaintRows(_maps);
+-        _pak.BackgroundColor = _maps.BackgroundColor = AppColors.Get("Surface");
++        PaintRows(_changes);
++        _changes.BackgroundColor = AppColors.Get("Surface");
+         for (var i = 0; i < _legend.Count; i++) _legend[i].BackColor = AppColors.Get(i == 0 ? "DAF8E0" : "EngineMatch");
+     }
+ }
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckEditTab.cs" "b/src\\SnowPakTool.Desktop\\TruckEditTab.cs"
+index d86d014..e4e3e56 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckEditTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\TruckEditTab.cs"
+@@ -185,7 +185,7 @@ internal sealed class TruckEditTab : UserControl
+             AutoSize = true,
+             MaximumSize = new Size(900, 0),
+             Margin = new Padding(8, 8, 4, 4),
+-            Text = "Edit the Updated values, reset them, or apply a saved preset. Save custom presets for this workspace. Stage changes here, then use Start → Apply pending PAK edits to write them to the workspace."
++            Text = "Edit the Updated values, reset them, or apply a saved preset. Save custom presets for this workspace. Stage changes here, then use Start → Apply pending changes to write them to the workspace."
+         });
+         updatedLayout.Controls.Add(_presetPanel, 0, 0);
+         updatedLayout.Controls.Add(_updatedWinchPropertiesGrid, 0, 1);
+@@ -696,7 +696,7 @@ internal sealed class TruckEditTab : UserControl
+                 row.StagedTypes = new HashSet<string>(row.Types, StringComparer.OrdinalIgnoreCase);
+             UpdateSaveCompatibilityButton();
+             error = string.Empty;
+-            _winchStatus.Text = $"Staged winch compatibility changes. Apply pending PAK edits from Start to write them to the workspace.";
++            _winchStatus.Text = $"Staged winch compatibility changes. Apply pending changes from Start to write them to the workspace.";
+             return true;
+         }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+@@ -1093,7 +1093,7 @@ internal sealed class TruckEditTab : UserControl
+             error = string.Empty;
+             _winchStatus.Text = pending.Count == 0
+                 ? "There are no unstaged winch property edits. Existing staged changes remain pending in Start."
+-                : $"Staged property changes for {pending.Count} winch definition{(pending.Count == 1 ? string.Empty : "s")}. Apply pending PAK edits from Start to write them to the workspace.";
++                : $"Staged property changes for {pending.Count} winch definition{(pending.Count == 1 ? string.Empty : "s")}. Apply pending changes from Start to write them to the workspace.";
+             return true;
+         }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckPropertiesTab.cs" "b/src\\SnowPakTool.Desktop\\TruckPropertiesTab.cs"
+index 646d273..aa558dc 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckPropertiesTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\TruckPropertiesTab.cs"
+@@ -462,7 +462,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (!_grid.EndEdit() || !Ready()) return;
+         var edits = DraftValues(true);
+         TruckPropertiesStore.SavePending(_loadedWorkspace!, edits);
+-        _status.Text = $"Staged {edits.Count} truck property changes. Apply pending PAK edits from Start.";
++        _status.Text = $"Staged {edits.Count} truck property changes. Apply pending changes from Start.";
+     }
+ 
+     private void SavePreset()
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckRandomizationTab.cs" "b/src\\SnowPakTool.Desktop\\TruckRandomizationTab.cs"
+index 9cf18ff..1cecba8 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckRandomizationTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\TruckRandomizationTab.cs"
+@@ -275,7 +275,7 @@ internal sealed class TruckRandomizationTab : UserControl
+         if (_stageMapChanges is null || _running) return;
+         _running = true; RefreshStagingState();
+         void Message(string text) { if (missions) AddMissionMessage(new(text)); else AddMessage(new(text)); }
+-        try { await _stageMapChanges(); Message("Map changes staged. Apply them from Start → Map files."); }
++        try { await _stageMapChanges(); Message("Map changes staged. Apply them from Start → Apply pending changes."); }
+         catch (Exception ex) { Message("Could not stage map changes: " + ex.Message); }
+         finally { _running = false; RefreshStagingState(); }
+     }
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckReplacementDialog.cs" "b/src\\SnowPakTool.Desktop\\TruckReplacementDialog.cs"
+index f956f9b..5031957 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\TruckReplacementDialog.cs"
++++ "b/src\\SnowPakTool.Desktop\\TruckReplacementDialog.cs"
+@@ -230,7 +230,7 @@ internal sealed class TruckReplacementDialog : Form
+             await InvokeAsync(() =>
+             {
+                 QueuedReplacement = queued;
+-                _status.Text = $"Draft saved: {selected.Truck.Name}. Stage changes in Map trucks or Randomizer, then apply from Start → Map files.";
++                _status.Text = $"Draft saved: {selected.Truck.Name}. Stage changes in Map trucks or Randomizer, then apply from Start → Apply pending changes.";
+             });
+         }
+         catch (Exception ex) { if (!IsDisposed) await InvokeAsync(() => _status.Text = "Replacement was not saved: " + ex.Message); }
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeRandomizationRuleStore.cs" "b/src\\SnowPakTool.Desktop\\UpgradeRandomizationRuleStore.cs"
+index ea9f6ef..317e253 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeRandomizationRuleStore.cs"
++++ "b/src\\SnowPakTool.Desktop\\UpgradeRandomizationRuleStore.cs"
+@@ -11,7 +11,7 @@ internal sealed class UpgradeRandomizationRules
+         "For shared slots, choose from all eligible shared upgrades of the same type. There is no purchase-only restriction and no locality percentage roll.",
+         "Try unused shared and other same-type upgrades before reusing a compatible choice. Stock/default parts, unavailable content and objective-locked replacement parts are excluded.",
+         "In the first progression region, shared slots get an extra preference for upgrades with no compatible obtainable truck in that region.",
+-        "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → PAK. Upgrades found on any resulting map require exploration; upgrades absent from maps do not."
++        "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → Apply pending changes. Upgrades found on any resulting map require exploration; upgrades absent from maps do not."
+     ];
+ }
+ 
+@@ -30,7 +30,9 @@ internal sealed class UpgradeRandomizationRuleStore
+             ?? throw new JsonException("The saved rule list is empty.");
+         Validate(rules);
+         for (var i = 0; i < rules.Rules.Count; i++)
+-            if (rules.Rules[i] == "Randomize owned regions using enabled content. Review the saved preview in Map upgrades; game-file staging and applying are disabled for this trial.") rules.Rules[i] = "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → PAK. Upgrades found on any resulting map require exploration; upgrades absent from maps do not.";
++            if (rules.Rules[i] is "Randomize owned regions using enabled content. Review the saved preview in Map upgrades; game-file staging and applying are disabled for this trial."
++                or "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → PAK. Upgrades found on any resulting map require exploration; upgrades absent from maps do not.")
++                rules.Rules[i] = new UpgradeRandomizationRules().Rules[^1];
+         return rules;
+     }
+ 
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeRandomizationTab.cs" "b/src\\SnowPakTool.Desktop\\UpgradeRandomizationTab.cs"
+index 3c7d300..4fc60c2 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeRandomizationTab.cs"
++++ "b/src\\SnowPakTool.Desktop\\UpgradeRandomizationTab.cs"
+@@ -27,7 +27,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         _run = run;
+         _randomize.Enabled = run is not null;
+         _actionTips.SetToolTip(_randomize, "Generate and save an upgrade draft from the current obtainable truck assignments.");
+-        _actionTips.SetToolTip(_stageChanges, "Stage all upgrade drafts and exploration flags; apply from Start → PAK.");
++        _actionTips.SetToolTip(_stageChanges, "Stage all upgrade drafts and exploration flags; apply from Start → Apply pending changes.");
+         _randomize.Click += async (_, _) => await RandomizeAsync();
+         _showDetails.CheckedChanged += (_, _) => RenderMessages();
+         VisibleChanged += (_, _) => RefreshStagingState();
+@@ -50,7 +50,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         panes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         panes.Controls.Add(CreatePane("Upgrades", _rules.Rules, Padding.Empty), 0, 0);
+-        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Stage upgrades and exploration locks, then apply from Start → PAK.";
++        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Stage upgrades and exploration locks, then apply from Start → Apply pending changes.";
+         root.Controls.Add(panes, 0, 0);
+         root.Controls.Add(_status, 0, 1);
+         Controls.Add(root);
+@@ -144,7 +144,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         actions.Controls.Add(_showDetails);
+         actions.Controls.Add(new Label
+         {
+-            Text = "Review/reset in Randomizer → Map upgrades. Stage changes, then Apply pending PAK edits from Start.",
++            Text = "Review/reset in Randomizer → Map upgrades. Stage changes, then Apply pending changes from Start.",
+             AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(600, 0)
+         });
+         layout.Controls.Add(actions, 0, 2);
+@@ -202,7 +202,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         if (_stageMapChanges is null || _running) return;
+         _running = true; RefreshStagingState();
+         void Message(string text) => AddMessage(new(text));
+-        try { await _stageMapChanges(); Message("Upgrades and exploration flags staged. Apply pending PAK edits from Start."); }
++        try { await _stageMapChanges(); Message("Upgrades and exploration flags staged. Apply pending changes from Start."); }
+         catch (Exception ex) { Message("Could not stage upgrades: " + ex.Message); }
+         finally { _running = false; RefreshStagingState(); }
+     }
+@@ -222,7 +222,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+             {
+                 if (!_messages.IsDisposed) AddMessage(message);
+             }));
+-            AddMessage(new("Finished. Review in Map upgrades, stage changes, then Apply pending PAK edits from Start."));
++            AddMessage(new("Finished. Review in Map upgrades, stage changes, then Apply pending changes from Start."));
+         }
+         catch (InvalidOperationException ex) { AddMessage(new("Error: " + ex.Message)); }
+         catch (Exception) { AddMessage(new("Error: could not read or save the upgrade plan. Check the workspace and reload map data.")); }
+diff --git "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeTrialService.cs" "b/src\\SnowPakTool.Desktop\\UpgradeTrialService.cs"
+index 89638b2..55bde78 100644
+--- "a/S:\\snowrunner_Shenanigans\\AI\\SnowRunnerTools-master\\.checks\\UnifiedChangesBaseline\\UpgradeTrialService.cs"
++++ "b/src\\SnowPakTool.Desktop\\UpgradeTrialService.cs"
+@@ -97,7 +97,7 @@ internal static class UpgradeTrialService
+         var draft = new UpgradeTrialDraft(plan.Seed, DateTimeOffset.UtcNow, catalog.Stamp, retained.Concat(plan.Assignments).ToArray(), plan.Report,
+             previous?.ResetKeys?.Where(k => !keys.Contains(k)).ToArray());
+         UpgradeTrialStore.Save(catalog.Workspace, draft);
+-        progress.Report(new($"Seed {plan.Seed}. Draft saved: {plan.Assignments.Count(a => !Codes.Equals(a.UpgradeId, a.Slot.OriginalUpgradeId))} changed rewards. Stage changes, then Apply pending PAK edits from Start."));
++        progress.Report(new($"Seed {plan.Seed}. Draft saved: {plan.Assignments.Count(a => !Codes.Equals(a.UpgradeId, a.Slot.OriginalUpgradeId))} changed rewards. Stage changes, then Apply pending changes from Start."));
+         return draft;
+     }
+ }
+diff --git a/.checks/UnifiedChangesBaseline/README.md b/README.md
+index 5acb16f..d5550c1 100644
+--- a/.checks/UnifiedChangesBaseline/README.md
++++ b/README.md
+@@ -14,9 +14,11 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++**Start** has one differences table for Initial PAK and map files, one shared log, and one **Apply pending changes** button. The Area column and shared filters identify each output; truck/winch summaries, per-region map summaries, hover details and pending/in-files colors remain. Apply processes all staged changes, including hidden rows. Map-discard remains limited to the selected staged map group. If one store fails, completed outputs remain applied and the remaining staged changes are shown for retry. The app writes workspace outputs only: pack the initial PAK as needed and install all resulting files manually.
++
+ **Editors → Frame addons** lists frame attachments, roof racks and service equipment with the same table, description and source-property view as Addons and Cargo. The main table shows cargo slots, fuel/water capacity, repair points, spare wheels, price, unlock rank, exploration lock, install socket, content and ID, with shared column sorting/filtering. Selecting a row shows all XML properties and source files below. Explicit file parents supply inherited summary values; templates remain visible without expansion, so blanks are unresolved rather than assumed zero. Install sockets do not establish complete truck compatibility.
+ 
+-The **Fuel multiplier** slider uses Truck properties' shared calculations: 0.5×–3× in 0.5 steps. Moving it only selects the factor; **Multiply all fuel** multiplies the current preview of every frame addon with a locally explicit fuel capacity and category, rounds to the nearest 5 litres (ties upward), and clamps to 5–100,000 L. Repeated clicks multiply again; column filters do not restrict the operation. Blank/inherited capacities stay unchanged. Changed fuel cells show the preserved original in parentheses, with amber preview/staged and green applied highlights. **Stage changes** saves an explicit snapshot across restarts; only **Start → Apply pending PAK edits** writes it to the updated overlay. Later previews do not change the staged snapshot. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews rounded baseline capacities. Reload discards unstaged previews. Apply validates every fuel target before writing, preserves unrelated XML/templates and original files, and retains staged edits if a capacity changed externally.
++The **Fuel multiplier** slider uses Truck properties' shared calculations: 0.5×–3× in 0.5 steps. Moving it only selects the factor; **Multiply all fuel** multiplies the current preview of every frame addon with a locally explicit fuel capacity and category, rounds to the nearest 5 litres (ties upward), and clamps to 5–100,000 L. Repeated clicks multiply again; column filters do not restrict the operation. Blank/inherited capacities stay unchanged. Changed fuel cells show the preserved original in parentheses, with amber preview/staged and green applied highlights. **Stage changes** saves an explicit snapshot across restarts; only **Start → Apply pending changes** writes it to the updated overlay. Later previews do not change the staged snapshot. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews rounded baseline capacities. Reload discards unstaged previews. Apply validates every fuel target before writing, preserves unrelated XML/templates and original files, and retains staged edits if a capacity changed externally.
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer â†’ Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+@@ -24,11 +26,11 @@ A **slot-based upgrade randomizer** is available in **Randomizer â†’ Upgrad
+ 
+ **Randomizer â†’ Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer â†’ Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions queue original pickup restoration, including after Apply. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Stage changes** in either upgrade tab snapshots all pickup changes together with exploration flags. Upgrades found on any resulting map are exploration-locked; upgrades absent from all maps are unlocked. Unrandomized maps retain their current pickups and count toward these flags. Tire sizes sharing a definition share one flag: any discoverable size locks that variant. The full current pickup inventory is scanned; unreadable settings or unresolved pickup definitions block staging rather than guessing absence. Source catalog warnings remain visible.
+ 
+-**Start â†’ Apply pending PAK edits** writes the staged level-SSO reward strings and component XML exploration flags to the sparse updated overlay. Upgrade edits appear in Start even after restarting; later draft/reset changes do not alter the staged snapshot until staged again. Every target is checked before any upgrade file is written. Changed pickup sets, conflicting reward IDs or conflicting flag values reject Apply and retain the staged snapshot; unrelated XML/SSO edits are preserved. Only the exact source + zone + reward index and named component variant are patched. Original files, zone IDs, map scenes, rank/objective locks and installed archives are preserved. Pack to a new PAK using the existing workflow after applying. Runtime collection and already-collected zones in existing saves still require in-game verification.
++**Start â†’ Apply pending changes** writes the staged level-SSO reward strings and component XML exploration flags to the sparse updated overlay. Upgrade edits appear in Start even after restarting; later draft/reset changes do not alter the staged snapshot until staged again. Every target is checked before any upgrade file is written. Changed pickup sets, conflicting reward IDs or conflicting flag values reject Apply and retain the staged snapshot; unrelated XML/SSO edits are preserved. Only the exact source + zone + reward index and named component variant are patched. Original files, zone IDs, map scenes, rank/objective locks and installed archives are preserved. Pack to a new PAK using the existing workflow after applying. Runtime collection and already-collected zones in existing saves still require in-game verification.
+ 
+-**Start â†’ PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Winch definition edits are grouped per winch and state in the same brief style, with every field and source retained in the hover details. Pending name/description edits join their winch summary; applied XML variants use their definition ID. Rank XP, shared engine definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
++**Start's unified changes list** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Winch definition edits are grouped per winch and state in the same brief style, with every field and source retained in the hover details. Pending name/description edits join their winch summary; applied XML variants use their definition ID. Rank XP, shared engine definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+-**Start â†’ Map files** groups truck/equipment changes (obtainable, mission and manual) across maps into one summary per region and state. Applied and pending rows retain their distinct colors. Summaries show change/map counts without replacement identities; hover to see the contributing map IDs and counts. Map repair and other metadata warnings remain separate rows. **Discard selected pending changes** discards the staged changes represented by that region summary in one atomic update; other regions, applied assignments and unstaged drafts remain intact. Pending badges and Apply still count/use individual changes.
++**Start's unified changes list** groups truck/equipment changes (obtainable, mission and manual) across maps into one summary per region and state. Applied and pending rows retain their distinct colors. Summaries show change/map counts without replacement identities; hover to see the contributing map IDs and counts. Map repair and other metadata warnings remain separate rows. **Discard selected pending changes** discards the staged changes represented by that region summary in one atomic update; other regions, applied assignments and unstaged drafts remain intact. Pending badges and Apply still count/use individual changes.
+ 
+ In **Randomizer â†’ Map trucks**, **Reset selected to original** resets every truck matching the selected regions and current column filters, regardless of the highlighted row or scroll position. Rows excluded by filters remain untouched. The existing region-wide and all-truck reset actions remain available. Reset updates the draft; Stage and Start â†’ Apply are still required for map writes.
+ 
+@@ -50,11 +52,11 @@ Navigation uses four main tabs and at most one sub-tab row: **Start** (workspace
+ 
+ The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization** and **Map trucks**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts with the five mission randomization rules. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Randomizer â†’ Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start â†’ Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is available in the matching Missions pane. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+-A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The region checklist and graphs follow the saved Region progression order, refreshed whenever the editor is opened; regions absent from that order append in the usual release order. Local sorting/dragging and the old separately saved XP region order no longer override it. Included-region selections, curve controls and staged rank XP are preserved. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start â†’ Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
++A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The region checklist and graphs follow the saved Region progression order, refreshed whenever the editor is opened; regions absent from that order append in the usual release order. Local sorting/dragging and the old separately saved XP region order no longer override it. Included-region selections, curve controls and staged rank XP are preserved. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start â†’ Apply pending changes writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-**Editors â†’ Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Tier cells use exactly the soft tier-pane background tints. A five-character horizontal line replaces the missing verified-placement message; the explanation remains in its tooltip. Edit numeric cells individually; changed fuel values also round to the nearest 5 litres. The compact fuel multiplier slider selects 0.5Ã— through 3Ã— in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to the nearest 5 litres (ties upward, minimum 5 L), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start â†’ Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
++**Editors â†’ Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Tier cells use exactly the soft tier-pane background tints. A five-character horizontal line replaces the missing verified-placement message; the explanation remains in its tooltip. Edit numeric cells individually; changed fuel values also round to the nearest 5 litres. The compact fuel multiplier slider selects 0.5Ã— through 3Ã— in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to the nearest 5 litres (ties upward, minimum 5 L), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start â†’ Apply pending changes writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+ **Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. All modes use wider independent per-truck variation: Easy is broadest and early-biased, Normal has a medium spread, and Hard unlocks later with a narrower but still substantial spread. Original game class is used for starter coverage only; other ranks depend on tier and independent random draws. There is no class balancing, rank-spacing enforcement or gap filling, so multiple trucks may share a rank and empty ranks can still occur. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. Starter coverage uses only the first region in the saved Region progression order and its existing store country. It sets one owned, directly purchasable Scout and Offroad starter to rank 1, and one Highway, Heavy Duty and Heavy starter to a randomly selected rank from 1-3; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in that first store country, the generator reports that class gap and proceeds with the achievable rank changes. Missing first-region/store definitions explicitly skip starter coverage. Other countries receive no starter guarantees. It does not add country assignments or remove task locks. Each generation asks whether to update UnlockByExploration, with Yes strongly recommended and selected by default; No changes ranks only and Cancel changes nothing. Yes sets true for trucks in current obtainable map placements (including randomized/pending replacements and task rewards), and false for other trucks; mission-only vehicles do not count. The table shows true/false with original values and change highlights. Starter eligibility uses these resulting flags, so a discovery-locked truck cannot satisfy immediate buyability. With no maps loaded, map-read warnings or unverified placements, uncertain flags are preserved and explained in the log; confirmed obtainable trucks can still be set true after partial reads. The report lists changed, unchanged and skipped exploration flags. Generate again after changing map-truck assignments, then stage both truck properties and map changes before applying. Staging, Apply, presets, revert and reset handle numeric values and exploration flags; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview. Generation opens a resizable, copyable report, which can be hidden with Show unlock log. It records the seed, difficulty, first region/store country, coverage warnings and changed/unchanged/skipped totals. Each truck lists its before/after preview rank, file and original ranks, and the reason for its result, including equal random draws, missing tiers/ranks and exclusions from starter coverage. UnlockByExploration=true keeps a truck store-locked until discovered on a map; rank changes do not clear that separate requirement.
+ 
+@@ -72,7 +74,7 @@ dotnet run --project .\src\SnowPakTool.Desktop\SnowPakTool.Desktop.csproj
+ 
+ The UI uses the original SnowPakTool cache-block and PAK writer classes and writes to a new output file without replacing the input archive.
+ 
+-Manual replacements, randomization and resets first create persistent **Draft** map changes. **Stage changes** appears in both Randomizer â†’ Truck randomization and Randomizer â†’ Map trucks; either button stages the same complete current draft across regions, including hidden rows. The table distinguishes **Draft**, **Staged**, and **In files**. Editing a staged placement returns that placement to Draft; other staged placements stay staged. Start lists/counts and applies only staged changes. Drafts and staged choices survive reloads and restarts, but neither action writes map files. A draft on the same map as an applied staged change is retained and rebased to the updated map offsets/hash, so it can be staged later. Existing plans from versions without a staging flag remain staged for compatibility. Only **Start â†’ Map files** writes the staged changes. The map writer updates both scene size boundaries, preserves the PAK entry order and each entry's compression method, and copies unrelated ZIP records unchanged. Original maps and previous edited versions remain backed up under `workspace/region-maps/backups`. **Repair saved maps** rebuilds outputs produced by the older writer using their original archive layout, while retaining the selected trucks. Repair verifies the unchanged scene payload and unrelated archive contents before replacing a workspace output; it never writes installed game files. Reload and review any pending replacements after repairing their source map.
++Manual replacements, randomization and resets first create persistent **Draft** map changes. **Stage changes** appears in both Randomizer â†’ Truck randomization and Randomizer â†’ Map trucks; either button stages the same complete current draft across regions, including hidden rows. The table distinguishes **Draft**, **Staged**, and **In files**. Editing a staged placement returns that placement to Draft; other staged placements stay staged. Start lists/counts and applies only staged changes. Drafts and staged choices survive reloads and restarts, but neither action writes map files. A draft on the same map as an applied staged change is retained and rebased to the updated map offsets/hash, so it can be staged later. Existing plans from versions without a staging flag remain staged for compatibility. Only **Start's unified changes list** writes the staged changes. The map writer updates both scene size boundaries, preserves the PAK entry order and each entry's compression method, and copies unrelated ZIP records unchanged. Original maps and previous edited versions remain backed up under `workspace/region-maps/backups`. **Repair saved maps** rebuilds outputs produced by the older writer using their original archive layout, while retaining the selected trucks. Repair verifies the unchanged scene payload and unrelated archive contents before replacing a workspace output; it never writes installed game files. Reload and review any pending replacements after repairing their source map.
+ 
+ Regions-Trucks uses `workspace/region-maps/backups/<map>/original.pak` (or `original.bin`) as the baseline whenever present. Saved workspace maps override that baseline and pending replacements override the displayed rows. Deleting an updated map therefore restores the backed-up placements on reload or when returning to the tab. Maps without a workspace backup are read from the selected map folder. Workspace backups and updates can also be used without the installed map folder. Truck cells that differ from the preserved original placement are highlighted: yellow for pending replacements and green for applied replacements. Hovering a truck cell shows the original truck tile on the left and current truck tile on the right, with a right-pointing glyph arrow between them and their IDs below, including after repeated replacements and reloads. The preview follows sorted rows and closes when scrolling or leaving the cell; equipment tooltips remain available. Restoring the original model clears the change highlight.
+ 
+diff --git "a/.checks\\UnifiedChangesBaseline\\WinchSummaryRegression.Program.cs" "b/.checks\\WinchSummaryRegression\\Program.cs"
+index cd3fea3..afd8086 100644
+--- "a/.checks\\UnifiedChangesBaseline\\WinchSummaryRegression.Program.cs"
++++ "b/.checks\\WinchSummaryRegression\\Program.cs"
+@@ -23,8 +23,9 @@ static class Program
+   var array=Array.CreateInstance(change,list.Count);for(int i=0;i<list.Count;i++)array.SetValue(list[i],i);
+   using var main=(Form)Activator.CreateInstance(T("MainForm"))!;
+   var panel=F(main,"_startChanges");
+-  panel.GetType().GetMethod("BindPak",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(panel,[array,new Dictionary<string,(string Name,string Class)>{{"test",("Test truck","Heavy")}}]);
+-  var grid=(DataGridView)F(panel,"_pak");var table=(DataTable)grid.DataSource!;
++  var groups=panel.GetType().GetMethod("PakGroups",BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,[array,new Dictionary<string,(string Name,string Class)>{{"test",("Test truck","Heavy")}}]);
++  panel.GetType().GetMethod("BindChanges",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(panel,[groups]);
++  var grid=(DataGridView)F(panel,"_changes");var table=(DataTable)grid.DataSource!;
+   Check(table.Rows.Count==6,"separate winches, states, truck and unrelated entries");
+   var pending=table.Rows.Cast<DataRow>().Single(r=>(string)r["File / target"]=="Heavy winch" && ((string)r["Change"]).Contains("+2 more"));
+   Check(((string)pending["Change"]).StartsWith("Length (m):"),"brief fields and overflow count");
+diff --git "a/.checks\\UnifiedChangesBaseline\\RegionsTrucksRegression.Program.cs" "b/.checks\\RegionsTrucksRegression\\Program.cs"
+index 9766126..3c0a0cd 100644
+--- "a/.checks\\UnifiedChangesBaseline\\RegionsTrucksRegression.Program.cs"
++++ "b/.checks\\RegionsTrucksRegression\\Program.cs"
+@@ -570,7 +570,7 @@ internal static class Program
+             while (!task.IsCompleted && clock.ElapsedMilliseconds < 5000) { Application.DoEvents(); Thread.Sleep(5); }
+             task.GetAwaiter().GetResult(); Application.DoEvents();
+         }
+-        Refresh(); var pak = Field<DataGridView>(panel, "_pak"); var maps = Field<DataGridView>(panel, "_maps");
++        Refresh(); var pak = Field<DataGridView>(panel, "_changes"); var maps = pak;
+         Check(pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending)
+             && pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.InFiles)
+             && maps.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.Pending), "Start shows saved file changes together with pending PAK and map edits");
+@@ -578,8 +578,11 @@ internal static class Program
+             && pak.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["State"].Value?.ToString() == WorkspaceChange.InFiles).All(row => row.DefaultCellStyle.BackColor == AppColors.Get("DAF8E0")), "Start uses distinct state colors");
+         using (var image = new Bitmap(host.Width, host.Height))
+         { host.DrawToBitmap(image, new Rectangle(0, 0, host.Width, host.Height)); image.Save(Path.Combine(AppContext.BaseDirectory, "start-sections-preview.png")); }
+-        Field<Button>(panel, "_savePakButton").PerformClick(); Refresh(); Check(!pendingPak, "Start PAK apply invokes pending editor saves");
+-        Field<Button>(panel, "_applyMapsButton").PerformClick(); Refresh(); Check(PendingTruckReplacements.Load(workspace).Count == 0, "Start map apply commits queued replacements");
++        Field<Button>(panel, "_applyButton").PerformClick();
++        var until = DateTime.UtcNow.AddSeconds(15);
++        while (Field<bool>(panel, "_applying") && DateTime.UtcNow < until) { Application.DoEvents(); Thread.Sleep(5); }
++        Refresh(); Check(!pendingPak, "Start unified Apply invokes pending editor saves");
++        Check(PendingTruckReplacements.Load(workspace).Count == 0, "The same Apply commits queued map replacements");
+         host.Close();
+         Console.WriteLine("PASS: Start PAK/map sections, applied/pending lists, state colors and apply actions.");
+     }
+diff --git "a/.checks\\UnifiedChangesBaseline\\StartSmoke.Program.cs" "b/.checks\\StartSmoke\\Program.cs"
+index e9503ca..78caf33 100644
+--- "a/.checks\\UnifiedChangesBaseline\\StartSmoke.Program.cs"
++++ "b/.checks\\StartSmoke\\Program.cs"
+@@ -26,12 +26,12 @@ internal static class Program
+         Pump((Task)start.GetType().GetMethod("RefreshAsync")!.Invoke(start, null)!);
+         var tabs = form.Controls.OfType<TabControl>().Single();
+         if (tabs.TabPages[0].Text != "Start") throw new Exception("Start tab was not renamed.");
+-        var pak = Field<DataGridView>(start, "_pak");
++        var pak = Field<DataGridView>(start, "_changes");
+         if (!pak.Rows.Cast<DataGridViewRow>().Any(row => row.Cells["State"].Value?.ToString() == "Pending" && row.Cells["Change"].Value?.ToString()?.Contains("Rank 2 XP") == true))
+             throw new Exception("Actual rank editor changes were not listed on Start.");
+         using var image = new Bitmap(form.Width, form.Height); form.DrawToBitmap(image, new Rectangle(0, 0, form.Width, form.Height));
+         image.Save(Path.Combine(AppContext.BaseDirectory, "start-main-preview.png"));
+-        Field<Button>(start, "_savePakButton").PerformClick(); Application.DoEvents();
++        Field<Button>(start, "_applyButton").PerformClick(); Application.DoEvents();
+         Pump((Task)start.GetType().GetMethod("RefreshAsync")!.Invoke(start, null)!);
+         var updated = Path.Combine(workspace, "[ps]", "rank_settings.sso");
+         if (!File.Exists(updated) || !File.ReadAllText(updated).Contains("150")) throw new Exception("Start did not apply the actual XP edit.");
+diff --git "a/.checks\\UnifiedChangesBaseline\\PakSummaryChecks.cs" "b/.checks\\RegionsTrucksRegression\\PakSummaryChecks.cs"
+index 7cc310e..84cc6d5 100644
+--- "a/.checks\\UnifiedChangesBaseline\\PakSummaryChecks.cs"
++++ "b/.checks\\RegionsTrucksRegression\\PakSummaryChecks.cs"
+@@ -21,7 +21,7 @@ internal static class PakSummaryChecks
+   var pending=new WorkspaceChange[]{new(WorkspaceChange.Pending,Path.Combine(updated,relA),"Truck A: Fuel capacity (L)","360","400"),new(WorkspaceChange.Pending,Path.Combine(updated,relA),"Truck A / Engine compatibility","default","advanced"),new(WorkspaceChange.Pending,Path.Combine(updated,relB),"Truck B: Unlock rank","10","2"),new(WorkspaceChange.Pending,"[ps]/rank_settings.sso","Rank XP","100, 200","150, 300")};
+   var hasPending=true;var applied=0;var badge=-1;
+   using var panel=new StartChangesPanel(()=>root,new Button(),_=>hasPending?pending:[],()=>{applied=pending.Length;hasPending=false;},()=>Task.CompletedTask,()=>Task.CompletedTask){BindingContext=new BindingContext(),Size=new Size(1120,850)};
+-  panel.PendingCountChanged+=n=>badge=n;panel.CreateControl();var pak=Field<DataGridView>(panel,"_pak");_=pak.Handle;
++  panel.PendingCountChanged+=n=>badge=n;panel.CreateControl();var pak=Field<DataGridView>(panel,"_changes");_=pak.Handle;
+   var refresh=panel.RefreshAsync();Pump(()=>refresh.IsCompleted);refresh.GetAwaiter().GetResult();
+   Check(pak.Rows.Count==5,"truck edits group by truck/state, shared engine and rank XP stay separate");
+   var rows=pak.Rows.Cast<DataGridViewRow>().ToArray();
+@@ -30,7 +30,7 @@ internal static class PakSummaryChecks
+   Check(saved.Cells["Change"].Value!.ToString()!.Contains("Fuel capacity (L): 240 → 360")&&saved.Cells["Change"].Value!.ToString()!.Contains("+1 more"),"brief applied summary uses readable attributes and truncates by field count");
+   Check(staged.Cells["Change"].Value!.ToString()!.Contains("Engine compatibility: default → advanced")&&staged.Cells["Change"].Value!.ToString()!.Contains("Fuel capacity (L): 360 → 400"),"pending property and compatibility edits combine under one truck");
+   Check(rows.Any(r=>r.Cells["File / target"].Value!.ToString()!.Contains("shared_engine"))&&rows.Any(r=>r.Cells["Change"].Value!.ToString()!.Contains("Rank XP")),"shared component and general changes remain identifiable");
+-  Check(badge==4&&Field<Button>(panel,"_savePakButton").Enabled,"pending count and Apply use individual edits, not summary count");
++  Check(badge==4&&Field<Button>(panel,"_applyButton").Enabled,"pending count and Apply use individual edits, not summary count");
+   Check(staged.DefaultCellStyle.BackColor==AppColors.Get("EngineMatch")&&saved.DefaultCellStyle.BackColor==AppColors.Get("DAF8E0"),"state colors preserved");
+   var args=(DataGridViewCellToolTipTextNeededEventArgs)Activator.CreateInstance(typeof(DataGridViewCellToolTipTextNeededEventArgs),BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic,null,new object[]{pak.Columns["Change"]!.Index,saved.Index,""},null)!;
+   typeof(DataGridView).GetMethod("OnCellToolTipTextNeeded",BindingFlags.NonPublic|BindingFlags.Instance,null,new[]{typeof(DataGridViewCellToolTipTextNeededEventArgs)},null)!.Invoke(pak,new object[]{args});
+@@ -38,8 +38,8 @@ internal static class PakSummaryChecks
+   using(var image=new Bitmap(panel.Width,panel.Height)){panel.DrawToBitmap(image,new Rectangle(Point.Empty,panel.Size));image.Save(Path.Combine(AppContext.BaseDirectory,"pak-truck-summaries.png"));}
+   TableHeaderBehavior.Attach(pak).AddFilter("File / target").SelectValues(["Truck A"]);TableHeaderBehavior.Attach(pak).AddFilter("State").SelectValues([WorkspaceChange.Pending]);Application.DoEvents();
+   Check(pak.Rows.Count==1,"summary rows retain header filtering");
+-  Field<Button>(panel,"_savePakButton").PerformClick();Pump(()=>Field<Label>(panel,"_status").Text.EndsWith("0 pending"));
+-  Check(applied==4&&badge==0&&!Field<Button>(panel,"_savePakButton").Enabled,"Apply includes hidden general and other-truck edits and refreshes pending state");
++  Field<Button>(panel,"_applyButton").PerformClick();Pump(()=>Field<Label>(panel,"_status").Text.StartsWith("Pending changes applied"));
++  Check(applied==4&&badge==0&&!Field<Button>(panel,"_applyButton").Enabled,"Apply includes hidden general and other-truck edits and refreshes pending state");
+   Check(File.ReadAllText(Path.Combine(originals,relA))==source,"display grouping preserves original source files");
+   Console.WriteLine("PASS PAK truck summaries: localized per-truck/state groups, concise before/after fields, full hover details, shared/rank separation, colors, filters, raw edit counts and Apply including hidden edits.");
+  }
+diff --git "a/.checks\\UnifiedChangesBaseline\\RegionBatchChecks.cs" "b/.checks\\RegionsTrucksRegression\\RegionBatchChecks.cs"
+index be81a69..ea43717 100644
+--- "a/.checks\\UnifiedChangesBaseline\\RegionBatchChecks.cs"
++++ "b/.checks\\RegionsTrucksRegression\\RegionBatchChecks.cs"
+@@ -33,13 +33,14 @@ internal static class RegionBatchChecks
+    panel.BindingContext=new BindingContext();panel.Size=new Size(1100,850);panel.CreateControl();
+    var actual=WorkspaceChangeAudit.MapFiles(root);
+    var rows=actual.Concat(new[]{new WorkspaceChange(WorkspaceChange.InFiles,second,"Truck randomization","Original placement","Saved — details in Map trucks"),new WorkspaceChange(WorkspaceChange.InFiles,first,TruckReplacementStore.RepairRequired,"Original scene","Use Repair saved maps")}).ToArray();
+-   Call(panel,"BindMaps",rows,regions);var grid=Field<DataGridView>(panel,"_maps");_=grid.Handle;
++   var groups=typeof(StartChangesPanel).GetMethod("MapGroups",BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,new object[]{rows,regions});
++   Call(panel,"BindChanges",groups);var grid=Field<DataGridView>(panel,"_changes");_=grid.Handle;
+    Check(grid.Rows.Count==4,"two pending regions, separate applied region, and standalone repair warning");
+-   var michigan=grid.Rows.Cast<DataGridViewRow>().Single(r=>r.Cells["Region"].Value?.ToString()=="Michigan"&&r.Cells["State"].Value?.ToString()==WorkspaceChange.Pending);
+-   Check(michigan.Cells["After"].Value!.ToString()!.Contains("3 change(s) across 2 map(s)"),"obtainable and mission changes grouped across maps by region");
++   var michigan=grid.Rows.Cast<DataGridViewRow>().Single(r=>r.Cells["File / target"].Value?.ToString()=="Michigan"&&r.Cells["State"].Value?.ToString()==WorkspaceChange.Pending);
++   Check(michigan.Cells["Change"].Value!.ToString()!.Contains("3 change(s) across 2 map(s)"),"obtainable and mission changes grouped across maps by region");
+    Check(!grid.Rows.Cast<DataGridViewRow>().Any(r=>r.Cells.Cast<DataGridViewCell>().Any(c=>c.OwningColumn.Name!="Entry"&&(c.Value?.ToString()?.Contains("Secret")==true))),"group summaries do not expose replacement identities");
+    Check(grid.Rows.Cast<DataGridViewRow>().Where(r=>r.Cells["State"].Value?.ToString()==WorkspaceChange.Pending).All(r=>r.DefaultCellStyle.BackColor==AppColors.Get("EngineMatch")),"pending group colors retained");
+-   grid.Sort(grid.Columns["Region"]!,System.ComponentModel.ListSortDirection.Descending);grid.CurrentCell=grid.Rows.Cast<DataGridViewRow>().Single(r=>r.Cells["Region"].Value?.ToString()=="Michigan"&&r.Cells["State"].Value?.ToString()==WorkspaceChange.Pending).Cells["Region"];
++   grid.Sort(grid.Columns["File / target"]!,System.ComponentModel.ListSortDirection.Descending);grid.CurrentCell=grid.Rows.Cast<DataGridViewRow>().Single(r=>r.Cells["File / target"].Value?.ToString()=="Michigan"&&r.Cells["State"].Value?.ToString()==WorkspaceChange.Pending).Cells["File / target"];
+    using(var image=new Bitmap(panel.Width,panel.Height)){panel.DrawToBitmap(image,new Rectangle(Point.Empty,panel.Size));image.Save(Path.Combine(AppContext.BaseDirectory,"region-change-groups.png"));}
+    var discard=Field<Button>(panel,"_discardMap");Check(discard.Enabled,"pending group can be discarded");discard.PerformClick();
+    Pump(()=>Field<Label>(panel,"_status").Text.StartsWith("Discarded 3"));
+diff --git "a/.checks\\UnifiedChanges\\Program.cs" "b/.checks\\UnifiedChanges\\Program.cs"
+new file mode 100644
+index 0000000..fda9544
+--- /dev/null
++++ "b/.checks\\UnifiedChanges\\Program.cs"
+@@ -0,0 +1,91 @@
++using System.Collections;
++using System.Data;
++using System.Reflection;
++using System.Text.Json;
++
++static class Program
++{
++    static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    static object F(object o, string name) => o.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(o)!;
++    static object? Call(object o, string name, params object?[] args)
++    {
++        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
++        return o.GetType().GetMethod(name, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!.Invoke(o, args);
++    }
++    static object? Static(string type, string name, params object?[] args) => T(type).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)!.Invoke(null, args);
++    static void Check(bool ok, string message) { if (!ok) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    static void Pump(Task task)
++    {
++        var until = DateTime.UtcNow.AddSeconds(30);
++        while (!task.IsCompleted && DateTime.UtcNow < until) { Application.DoEvents(); Thread.Sleep(5); }
++        Check(task.IsCompleted, "async operation completes"); task.GetAwaiter().GetResult();
++    }
++    static bool HasPak = true;
++    static readonly List<object> Rows = [];
++    public static IReadOnlyList<TChange> Pending<TChange>(string workspace) => HasPak ? Rows.Cast<TChange>().ToArray() : [];
++    static object[] Items(object data) => ((IEnumerable)data).Cast<object>().ToArray();
++
++    [STAThread] static void Main()
++    {
++        Control.CheckForIllegalCrossThreadCalls = true;
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
++        var trucks = Path.Combine(root, "original_files", "[media]", "classes", "trucks");
++        Directory.CreateDirectory(trucks); Directory.CreateDirectory(Path.Combine(root, "original_files", "[strings]"));
++        var source = Path.Combine(trucks, "test.xml");
++        const string original = "<Truck><TruckData FuelCapacity=\"100\"/><GameData Price=\"100\"/></Truck>";
++        File.WriteAllText(source, original); File.WriteAllText(Path.Combine(root, "original_files", "[strings]", "strings_english.str"), "");
++        var planPath = Path.Combine(root, "region-maps", "pending-replacements.json"); Directory.CreateDirectory(Path.GetDirectoryName(planPath)!);
++        object Entry(string key, string map, bool staged) => new { Key = key, Original = new { TruckCode = "test", Truck = "Test truck", MapCode = map,
++            RegionCode = map.Contains("us_01") ? "us_01" : "us_02", PlacementId = key, Class = "SCOUT" }, Target = new { Code = "test", Name = "Secret replacement", Class = "SCOUT" }, QueuedAt = DateTimeOffset.UtcNow, Staged = staged };
++        void Seed() => File.WriteAllText(planPath, JsonSerializer.Serialize(new { Pending = new[] { Entry("one", "level_us_01_01", true), Entry("two", "level_us_01_02", true), Entry("draft", "level_us_02_01", false) }, Assignments = Array.Empty<object>() }));
++        Seed();
++        foreach (var property in new[] { "FuelCapacity", "Price" }) Rows.Add(Activator.CreateInstance(T("WorkspaceChange"), "Pending", "[media]/classes/trucks/test.xml", "Test truck / " + property, "100", "150", "", "", "")!);
++        var changeType = T("WorkspaceChange");
++        var pending = typeof(Program).GetMethod(nameof(Pending))!.MakeGenericMethod(changeType).CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(string), typeof(IReadOnlyList<>).MakeGenericType(changeType)));
++        var saved = 0; var mapCalls = 0; var failPak = false; var failMaps = false;
++        Action save = () => { if (failPak) throw new InvalidDataException("PAK conflict"); saved++; HasPak = false;
++            var updated = Path.Combine(root, "updated", "[media]", "classes", "trucks"); Directory.CreateDirectory(updated); File.WriteAllText(Path.Combine(updated, "test.xml"), original.Replace("100", "150")); };
++        Func<Task> maps = () => { mapCalls++; if (failMaps) throw new InvalidDataException("Map conflict");
++            Static("PendingTruckReplacements", "DiscardMany", root, new[] { "one", "two" }, true); return Task.CompletedTask; };
++        using var host = new Form { Size = new Size(1100, 850) };
++        using var panel = (Control)Activator.CreateInstance(T("StartChangesPanel"), new object[] { new Func<string>(() => root), new Button { Text = "Pack to new PAK…" }, pending, save, maps, new Func<Task>(() => Task.CompletedTask) })!;
++        panel.Dock = DockStyle.Fill; host.Controls.Add(panel); host.Show();
++        var count = 0;
++        T("StartChangesPanel").GetEvent("PendingCountChanged")!.AddEventHandler(panel, new Action<int>(value => count = value));
++        Pump((Task)Call(panel, "RefreshAsync")!);
++        var grid = (DataGridView)F(panel, "_changes"); var apply = (Button)F(panel, "_applyButton");
++        var data = (DataTable)grid.DataSource!;
++        Check(data.Rows.Count == 2 && data.Rows.Cast<DataRow>().Select(r => (string)r["Area"]).Distinct().Count() == 2, "one table groups both initial PAK and multi-map region changes");
++        Check(count == 4, "pending badge counts underlying edits rather than summary rows");
++        Check(data.Rows.Cast<DataRow>().Any(r => ((string)r["Change"]).Contains("2 change(s) across 2 map(s)")), "regional summary retains map counts");
++        Check(!data.Rows.Cast<DataRow>().Any(r => ((string)r["Change"]).Contains("Secret")), "map summaries do not reveal replacement identities");
++        grid.CurrentCell = grid.Rows[0].Cells["File / target"];
++        Check(!((Button)F(panel, "_discardMap")).Enabled, "PAK row cannot trigger map discard");
++        var headers = Static("TableHeaderBehavior", "Attach", grid, null, null, null)!;
++        var filter = Call(headers, "AddFilter", "Area", null, Array.Empty<string>())!;
++        Call(filter, "SelectValues", new object[] { new[] { "Initial PAK" } }); Application.DoEvents();
++        Check(grid.Rows.Count == 1, "shared table can filter to one file area");
++        Check(grid.Rows.Cast<DataGridViewRow>().Where(r => (string)r.Cells["State"].Value == "Pending")
++            .All(r => r.DefaultCellStyle.BackColor == (Color)Static("AppColors", "Get", "EngineMatch")!), "pending colors survive shared header filtering");
++        Pump((Task)Call(panel, "ApplyPendingAsync")!);
++        Check(saved == 1 && mapCalls == 1, "one Apply handles PAK and maps even when map rows are filtered out");
++        Check(Items(Static("PendingTruckReplacements", "Load", root)!).Length == 1 && Items(Static("PendingTruckReplacements", "LoadStaged", root)!).Length == 0, "unstaged map draft remains untouched");
++        Check(File.ReadAllText(source) == original, "preserved source file is unchanged");
++        Check(!apply.Enabled && ((Label)F(panel, "_status")).Text.Contains("manually"), "Apply disables after completion and explains manual installation");
++
++        Seed(); HasPak = true; failMaps = true;
++        Pump((Task)Call(panel, "ApplyPendingAsync")!);
++        Check(!HasPak && saved == 2 && Items(Static("PendingTruckReplacements", "LoadStaged", root)!).Length == 2, "map failure preserves completed PAK outputs and staged maps for retry");
++        Check(apply.Enabled && ((Label)F(panel, "_status")).Text.Contains("Map conflict"), "failure is visible and retry remains available");
++        failMaps = false; Pump((Task)Call(panel, "ApplyPendingAsync")!);
++        Check(saved == 2 && Items(Static("PendingTruckReplacements", "LoadStaged", root)!).Length == 0, "retry applies remaining maps without repeating PAK saves");
++        Seed(); HasPak = true; failPak = true; var previousMapCalls = mapCalls;
++        Pump((Task)Call(panel, "ApplyPendingAsync")!);
++        Check(mapCalls == previousMapCalls && HasPak, "PAK failure stops the map operation and retains staged work");
++        failPak = false; Pump((Task)Call(panel, "RefreshAsync")!);
++        data = (DataTable)grid.DataSource!; Call(filter, "SelectValues", new object[] { new[] { "Initial PAK", "Maps" } }); Application.DoEvents();
++        using var bitmap = new Bitmap(host.Width, host.Height); host.DrawToBitmap(bitmap, new Rectangle(Point.Empty, host.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, "unified-changes.png"));
++        Console.WriteLine("Fixture: " + root);
++    }
++}
+diff --git "a/.checks\\UnifiedChanges\\UnifiedChanges.csproj" "b/.checks\\UnifiedChanges\\UnifiedChanges.csproj"
+new file mode 100644
+index 0000000..82a29a7
+--- /dev/null
++++ "b/.checks\\UnifiedChanges\\UnifiedChanges.csproj"
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

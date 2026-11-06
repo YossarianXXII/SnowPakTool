@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SnowPakTool\SnowPakTool.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Assets\aac-58dw.png" />
+    <EmbeddedResource Include="Assets\Trucks\*.png" />
+    <EmbeddedResource Include="Assets\Trucks\aliases.json" />
+    <EmbeddedResource Include="Assets\Regions\*.png" />
+    <EmbeddedResource Include="Assets\Regions\sources.json" />
+  </ItemGroup>
+</Project>

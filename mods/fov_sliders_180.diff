@@ -1,0 +1,20 @@
+--- ui_settings_controller.sso.orig	Wed Jun 10 12:54:13 2020
++++ ui_settings_controller.sso	Wed Jun 10 13:21:11 2020
+@@ -1394,7 +1394,7 @@
+       header   =   "UI_SETTINGS_FIRST_PERSON_CAMERA_FOV"
+       desc   =   "UI_SETTINGS_FIRST_PERSON_CAMERA_FOV_DESC"
+       minValue   =   80
+-      maxValue   =   130
++      maxValue   =   180
+       defaultValue   =   107
+       stepInterval   =   1
+       textfield   =   "INTEGER"
+@@ -1405,7 +1405,7 @@
+       header   =   "UI_SETTINGS_THIRD_PERSON_CAMERA_FOV"
+       desc   =   "UI_SETTINGS_THIRD_PERSON_CAMERA_FOV_DESC"
+       minValue   =   80
+-      maxValue   =   130
++      maxValue   =   180
+       defaultValue   =   80
+       stepInterval   =   1
+       textfield   =   "INTEGER"

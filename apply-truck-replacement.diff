@@ -1,0 +1,544 @@
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index 9732c8b..f0b0a2b 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -3,6 +3,7 @@ using System.Buffers;
+ using System.IO.Compression;
+ using System.Text;
+ using System.Text.RegularExpressions;
++using System.Security.Cryptography;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+@@ -11,7 +12,8 @@ internal sealed record RegionTruckEntry(string RegionCode, string Region, string
+     float X, float Y, float Z, string Evidence, string Source,
+     string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
+     IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
+-    IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1);
++    IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1,
++    string MapDataHash = "");
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead,
+     TruckEquipmentCatalog? EquipmentCatalog = null);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment, IReadOnlyList<float>? Transform = null);
+@@ -45,6 +47,8 @@ internal static class RegionTruckCatalogService
+             var bin = Path.Combine(directory, "[scene]", "data_for_ssl.bin");
+             if (File.Exists(bin)) sources[match.Value] = bin;
+         }
++        foreach (var (map, source) in TruckReplacementStore.SavedMaps(workspace))
++            if (sources.ContainsKey(map)) sources[map] = source;
+         var entries = new List<RegionTruckEntry>();
+         var mapsRead = 0;
+         foreach (var (map, source) in sources.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+@@ -56,6 +60,7 @@ internal static class RegionTruckCatalogService
+                 var regionCode = MapCode.Match(map).Groups["region"].Value.ToLowerInvariant();
+                 var region = regionNames.GetValueOrDefault(regionCode, regionCode);
+                 var mapName = MapName(data, map, names);
++                var mapHash = Convert.ToHexString(SHA256.HashData(data));
+                 mapsRead++;
+                 foreach (var placement in ReadPlacements(data, models))
+                 {
+@@ -105,7 +110,7 @@ internal static class RegionTruckCatalogService
+                         placement.Id, placement.X, placement.Y, placement.Z, evidence, source,
+                         equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails, InstalledAddons: equipment.InstalledAddons,
+                         FrameAddons: equipment.FrameAddons, FrameAddonDetails: equipment.FrameAddonDetails,
+-                        InternalEquipment: equipment.InternalEquipment, Transform: placement.Transform, BinaryOffset: placement.Offset));
++                        InternalEquipment: equipment.InternalEquipment, Transform: placement.Transform, BinaryOffset: placement.Offset, MapDataHash: mapHash));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+@@ -205,7 +210,7 @@ internal static class RegionTruckCatalogService
+ 
+     private static float ReadFloat(byte[] data, int offset) => BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(offset, 4));
+ 
+-    private static bool TryString(byte[] data, int offset, out string value, out int next)
++    internal static bool TryString(byte[] data, int offset, out string value, out int next)
+     {
+         value = "";
+         next = offset;
+@@ -218,7 +223,7 @@ internal static class RegionTruckCatalogService
+         return true;
+     }
+ 
+-    private static byte[]? ReadMapData(string source)
++    internal static byte[]? ReadMapData(string source)
+     {
+         if (source.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) return File.ReadAllBytes(source);
+         using var archive = ZipFile.OpenRead(source);
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+index 2af8c03..88898fa 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -56,7 +56,7 @@ internal static class TruckReplacementComparison
+     }
+ }
+ 
+-/// <summary>Read-only preparation of a replacement; candidate equipment uses vehicle defaults.</summary>
++/// <summary>Compare and save a replacement using the candidate's default equipment.</summary>
+ internal sealed class TruckReplacementDialog : Form
+ {
+     private readonly RegionTruckEntry _current;
+@@ -75,6 +75,9 @@ internal sealed class TruckReplacementDialog : Form
+     private bool _updating;
+     private TruckEquipmentCatalog? _equipmentCatalog;
+     private int _comparisonRequest;
++    private readonly Button _apply = new() { Text = "Apply replacement", AutoSize = true, Enabled = false };
++    private bool _saving;
++    public SavedTruckReplacement? SavedReplacement { get; private set; }
+ 
+     public TruckReplacementDialog(string workspace, RegionTruckEntry current, Func<IReadOnlyList<CustomTruck>> getEnabled,
+         TruckEquipmentCatalog? equipmentCatalog = null)
+@@ -98,14 +101,17 @@ internal sealed class TruckReplacementDialog : Form
+         split.Panel1.Controls.Add(_list); split.Panel2.Controls.Add(_comparisonScroll); layout.Controls.Add(split, 0, 2);
+         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
+         var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel }; footer.Controls.Add(close);
+-        footer.Controls.Add(new Label { Text = "Defaults preview • socket matches may have extra constraints • no files changed", AutoSize = true, Padding = new Padding(4, 7, 12, 0) });
++        footer.Controls.Add(_apply);
++        footer.Controls.Add(new Label { Text = "Uses default equipment • saves a workspace map copy and original backup", AutoSize = true, Padding = new Padding(4, 7, 12, 0) });
+         layout.Controls.Add(footer, 0, 3); Controls.Add(layout); CancelButton = close;
+         _comparison.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+         _comparison.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+         _comparison.SelectionMode = DataGridViewSelectionMode.CellSelect;
+         _class.SelectedIndexChanged += (_, _) => ApplyFilter(); _tires.SelectedIndexChanged += (_, _) => ApplyFilter();
+         _differences.CheckedChanged += (_, _) => Compare();
+-        _list.SelectionChanged += (_, _) => Compare();
++        _list.CurrentCellChanged += (_, _) => Compare();
++        _apply.Click += async (_, _) => await ApplyReplacementAsync();
++        FormClosing += (_, e) => { if (_saving) e.Cancel = true; };
+         _search = new CurrentTabSearch(() => layout); _search.Attach(this);
+         Shown += async (_, _) => await LoadTrucksAsync();
+         AppColors.Changed += PaletteChanged; Disposed += (_, _) => { _search.Dispose(); AppColors.Changed -= PaletteChanged; };
+@@ -171,6 +177,8 @@ internal sealed class TruckReplacementDialog : Form
+ 
+     private void Compare()
+     {
++        _apply.Enabled = !_saving && SavedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
++            && !choice.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase);
+         var request = ++_comparisonRequest;
+         var selected = Selected();
+         var table = new DataTable(); table.Columns.Add("Property");
+@@ -209,6 +217,42 @@ internal sealed class TruckReplacementDialog : Form
+         _comparison.Columns[0].FillWeight = 60;
+     }
+ 
++    private async Task ApplyReplacementAsync()
++    {
++        if (_saving || SavedReplacement is not null || Selected() is not { } selected) return;
++        var enabled = _getEnabled();
++        if (!enabled.Any(truck => truck.Code.Equals(selected.Truck.Code, StringComparison.OrdinalIgnoreCase)))
++        { _status.Text = "This truck is no longer enabled. Close and reopen the replacement window."; return; }
++        _saving = true; _apply.Enabled = false; _apply.Text = "Saving…";
++        _list.Enabled = _class.Enabled = _tires.Enabled = false;
++        _status.Text = "Backing up the map and saving the replacement…";
++        try
++        {
++            var saved = await Task.Run(() => TruckReplacementStore.Save(_workspace, _current, selected));
++            if (IsDisposed) return;
++            await InvokeAsync(() =>
++            {
++                SavedReplacement = saved;
++                _status.Text = $"Saved {saved.TruckName}.\r\nEdited map: {saved.OutputPath}\r\nOriginal backup: {saved.OriginalBackupPath}"
++                    + (saved.PreviousBackupPath is null ? "" : "\r\nPrevious edited version: " + saved.PreviousBackupPath);
++            });
++        }
++        catch (Exception ex) { if (!IsDisposed) await InvokeAsync(() => _status.Text = "Replacement was not saved: " + ex.Message); }
++        finally
++        {
++            if (!IsDisposed)
++            {
++                await InvokeAsync(() =>
++                {
++                    _saving = false; _apply.Text = SavedReplacement is null ? "Apply replacement" : "Saved";
++                    _list.Enabled = _class.Enabled = _tires.Enabled = true;
++                    _apply.Enabled = SavedReplacement is null && _current.MapDataHash.Length > 0 && Selected() is { } choice
++                        && !choice.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase);
++                });
++            }
++        }
++    }
++
+     private static DataGridView Grid()
+     {
+         var grid = new DataGridView(); ConfigureGrid(grid); return grid;
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 926cf89..28f7dc4 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -342,12 +342,18 @@ internal sealed class RegionsTrucksTab : UserControl
+         if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+ 
+-    private void OpenReplacement(int rowIndex)
++    private async void OpenReplacement(int rowIndex)
+     {
+         if (rowIndex < 0 || rowIndex >= _trucks.Rows.Count || _loadedWorkspace is null
+             || _trucks.Rows[rowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry) return;
+         using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks, _catalog?.EquipmentCatalog);
+         dialog.ShowDialog(this);
++        if (dialog.SavedReplacement is { } saved)
++        {
++            _loadedMapFolder = null;
++            await LoadAsync(force: false);
++            _status.Text += $" Saved {saved.TruckName}. Edited map: {saved.OutputPath} · Original backup: {saved.OriginalBackupPath}";
++        }
+     }
+ 
+     private void EquipmentToolTipNeeded(object? sender, DataGridViewCellToolTipTextNeededEventArgs e)
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 2105378..432d6c5 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -42,7 +42,7 @@ The table excludes visual (`_tuning`) parts from both addon columns. The remaini
+ 
+ The bottom details pane is resizable using the horizontal divider above it. It lists internal equipment by slot and name, visual addons by name with their game category in parentheses, vehicle properties and tire/wheel details. AWD/transfer-box and differential-lock components appear only under internal equipment, even when stored in a `_tuning` folder; the folder distinction remains in the underlying metadata. Placement, availability evidence, truck/map headings and frame/other addon lists are omitted from this pane. Vehicle property labels omit the TruckData/GameData prefixes and use spaces around =. Map overrides take precedence over vehicle socket defaults. Component names resolve through workspace definitions, including parent variant files; unresolved names fall back to their IDs. Definition properties are separate from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
+ 
+-Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** when focused) that opens the replacement comparison popup. Its candidates use the same enabled base-game/owned-DLC catalog as Tier list, regardless of Tier list groups or filters. Class and default-tire filters combine; column headers sort the list. The popup uses the shared double-Shift search with a three-character minimum to search all displayed strings and attached metadata. Selecting a candidate updates the resizable lower comparison table: current map equipment versus candidate defaults, internal component names, nonvisual installed addons, vehicle properties, compatible wheel families/tires and nonvisual addon socket options. Truck/Class/Truck ID rows and detailed engine, gearbox, suspension and winch settings are omitted from the comparison. Socket options shared by both trucks are always hidden, independently of the Differences only checkbox. The comparison uses an animated pixel-scrolling viewport instead of jumping by variable-height rows; wheel input over the table, keyboard navigation and shared search all use this viewport. Changed values are highlighted, with a **Differences only** checkbox. Socket matches alone do not validate addon conflicts or other restrictions; explicit definition values do not fully resolve templates. This is a preparation/preview popup: it does not yet apply a replacement or modify map archives or workspace files.
++Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** when focused) that opens the replacement comparison popup. Its candidates use the same enabled base-game/owned-DLC catalog as Tier list, regardless of Tier list groups or filters. Class and default-tire filters combine; column headers sort the list. The popup uses the shared double-Shift search with a three-character minimum to search all displayed strings and attached metadata. Selecting a candidate updates the resizable lower comparison table: current map equipment versus candidate defaults, internal component names, nonvisual installed addons, vehicle properties, compatible wheel families/tires and nonvisual addon socket options. Truck/Class/Truck ID rows and detailed engine, gearbox, suspension and winch settings are omitted from the comparison. Socket options shared by both trucks are always hidden, independently of the Differences only checkbox. The comparison uses an animated pixel-scrolling viewport instead of jumping by variable-height rows; wheel input over the table, keyboard navigation and shared search all use this viewport. Changed values are highlighted, with a **Differences only** checkbox. Socket matches alone do not validate addon conflicts or other restrictions; explicit definition values do not fully resolve templates. The **Apply replacement** button saves the selected model with its default addons and default engine/gearbox/winch/suspension/wheels. Placement ID, transform and all bytes outside the model/equipment fields are preserved. The button is disabled for the current model, during saving, and after a successful save. Saved and backup paths are displayed; closing the popup reloads Regions-Trucks from the edited map.
+ 
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Classification evidence, map coordinates and source metadata remain available internally for search. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+@@ -51,3 +51,7 @@ Regions-Trucks waits for the shared workspace/ownership snapshot without waiting
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+ 
+ Small improvements: Engines uses a short one-line description; Custom tires include their underlying category. The shared search uses Tab/Shift+Tab to cycle focus through matches, wrapping at either end. Farming Tractor is an app-only class for Ankatra 1160, Futom 7290RA, Kirovets K-700 and K-7M; XML TruckType values are preserved. The Unpack / Pack tab has a bottom activity bar that animates while unpacking/merging or packing, and resets on completion, cancellation or error. Replacement comparisons hide hood-ornament and miscellaneous addon categories and the requested technical fields, with only Compatible families and scale under Wheels.
++
++Replacement outputs are stored separately under the workspace root: `.snowpaktool/region-maps/updated/level_*.pak` (or `level_*/[scene]/data_for_ssl.bin` for extracted maps). The first original is kept under `.snowpaktool/region-maps/backups/<map>/original.pak` or `original.bin`; further saves also preserve a timestamped copy of the preceding edited version. Input archives, original extracted maps and player saves are not overwritten. These map outputs are separate from the initial.pak build on the Unpack / Pack tab and are not installed into the game automatically. The catalog prefers saved maps belonging to the selected map folder and workspace. Save checks the scanned metadata hash, exact placement boundary and transform, verifies the patch by re-reading placements, verifies backup bytes, stages archive changes in a temporary file, re-reads the written metadata and checks the full source file hash before an atomic output replacement. In-game behavior has not been validated by the automated checks.
++
++The [official truck placement documentation](https://expeditions-guides.saber.games/map_modding/creating_a_map/trucks/adding_trucks/) describes placement IDs as objective references and the vehicle defaults/upgrades used by this replacement behavior.
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 8b8b602..ee894dc 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -9,6 +9,7 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckDetailsFormatter.cs" Link="TruckDetailsFormatter.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckClasses.cs" Link="TruckClasses.cs" />
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 311bc5c..c2a7479 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -15,7 +15,7 @@ internal static class Program
+         var maps = Path.GetFullPath(args[1]);
+         var parsed = SsoDataReader.Parse("// comment\n obj = { uiDesc = \"braces { inside }\" nested = [ { truckId = \"A\" }, { truckId = \"B\" } ] }");
+         Check(parsed.DescendantsAndSelf().Count(node => node.Get("truckId").Length > 0) == 2, "Nested settings and strings");
+-        var fixture = Path.Combine(AppContext.BaseDirectory, "fixture");
++        var fixture = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
+         var statePath = Path.Combine(fixture, "availability-" + Guid.NewGuid().ToString("N") + ".json");
+         var availabilityStore = new RegionTruckAvailabilityStore(statePath);
+         var media = Path.Combine(fixture, "original_files", "[media]", "classes", "trucks");
+@@ -115,6 +115,7 @@ internal static class Program
+         Check(replacementCatalog.IsCurrent(fixture), "Catalog belongs to the active workspace version");
+         WorkspaceDataCache.ContentVersion++;
+         Check(!replacementCatalog.IsCurrent(fixture), "Workspace changes invalidate reusable equipment catalogs");
++        ReplacementSaveRegression(fixture, mapRoot, sample, replacementCatalog);
+ 
+         var catalog = RegionTruckCatalogService.Load(workspace, maps, WorkspaceDataCache.GetLocalizedNames(workspace), new Dictionary<string, string>(), availabilityStore);
+         Check(catalog.MapsRead > 50 && catalog.Entries.Count > 100, "Installed map coverage");
+@@ -146,6 +147,7 @@ internal static class Program
+             "Visual addon names include categories and exclude drivetrain components");
+         File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "gmc-details-preview.txt"), detailText);
+         ReplacementPopupRegression(workspace, gmc, catalog.EquipmentCatalog!);
++        RealMapReplacementRegression(catalog, gmc);
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "gmc_9500_diff_lock_default") is { IsVisual: true, Category: "diff_lock" }, "User's visual group follows tuning folders even for functional diff locks");
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "frame_addon_sideboard_2") is { IsVisual: false, Category: "frame_addons" }, "Shared bed is outside the tuning group");
+         Check(gmc.Addons == "None" && gmc.FrameAddons == "Sideboard Bed" && !gmc.AddonDetails.Contains("gmc_9500_diff_lock_default")
+@@ -277,6 +279,102 @@ internal static class Program
+         Console.WriteLine("PASS: map equipment, confirmed exceptions, checkbox filters, overlay search, tile counts, editable unknowns and persistent availability choices.");
+     }
+ 
++    private static void RealMapReplacementRegression(RegionTruckCatalog catalog, RegionTruckEntry discovery)
++    {
++        var equipment = catalog.EquipmentCatalog!;
++        var replacement = new ReplacementTruck(new("tayga_6436", "Tayga 6436", "Offroad"), equipment.ResolveDefault("tayga_6436"), equipment.ComparisonProperties("tayga_6436"));
++        var task = catalog.Entries.First(entry => entry.Availability == "Obtainable — task reward" && entry.TruckCode != replacement.Truck.Code);
++        var codes = catalog.Entries.Select(entry => entry.TruckCode).Append(replacement.Truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        foreach (var current in new[] { discovery, task })
++        {
++            var data = RegionTruckCatalogService.ReadMapData(current.Source)!;
++            var patched = TruckReplacementStore.Patch(data, current, replacement);
++            var oldRows = RegionTruckCatalogService.ReadPlacements(data, codes); var rows = RegionTruckCatalogService.ReadPlacements(patched, codes);
++            Check(oldRows.Count == rows.Count && oldRows.Zip(rows).All(pair => pair.First.Id == pair.Second.Id && pair.First.Transform!.SequenceEqual(pair.Second.Transform!)),
++                "Real map patch preserves all placement IDs, positions and orientations");
++            var index = oldRows.ToList().FindIndex(row => row.Offset == current.BinaryOffset);
++            Check(rows[index].TruckCode == replacement.Truck.Code && rows.Where((_, row) => row != index).Select(row => row.TruckCode)
++                .SequenceEqual(oldRows.Where((_, row) => row != index).Select(row => row.TruckCode)), "Real map patch changes only the selected discovery/task truck");
++        }
++        Console.WriteLine("PASS: real discovery and task map replacements re-read correctly with all other placements preserved (in memory only).");
++    }
++
++    private static void ReplacementSaveRegression(string workspace, string maps, RegionTruckCatalog before, TruckEquipmentCatalog equipment)
++    {
++        var current = before.Entries.Single(entry => entry.PlacementId == "AWARD");
++        var target = new ReplacementTruck(new("test_truck_second", "Second truck", "Scout"), equipment.ResolveDefault("test_truck_second"), equipment.ComparisonProperties("test_truck_second"));
++        // Each run uses independent map copies; live game files are never written.
++        var run = Path.Combine(AppContext.BaseDirectory, "save-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(run);
++        var pak = Path.Combine(run, "level_us_01_01.pak"); File.Copy(current.Source, pak);
++        using (var zip = ZipFile.Open(pak, ZipArchiveMode.Update))
++        { using var writer = new StreamWriter(zip.CreateEntry("unrelated_payload.bin", CompressionLevel.NoCompression).Open()); writer.Write("unrelated payload remains unchanged"); }
++        var originalBytes = File.ReadAllBytes(pak);
++        var saveWorkspace = Path.Combine(run, "workspace"); Directory.CreateDirectory(saveWorkspace);
++        current = current with { Source = pak };
++        var saved = TruckReplacementStore.Save(saveWorkspace, current, target);
++        Check(File.ReadAllBytes(pak).SequenceEqual(originalBytes) && File.ReadAllBytes(saved.OriginalBackupPath).SequenceEqual(originalBytes), "Input archive stays untouched and original backup is byte-identical");
++        using (var zip = ZipFile.OpenRead(saved.OutputPath))
++        { using var reader = new StreamReader(zip.GetEntry("unrelated_payload.bin")!.Open()); Check(reader.ReadToEnd() == "unrelated payload remains unchanged", "Saving preserves unrelated archive entries"); }
++        var data = RegionTruckCatalogService.ReadMapData(saved.OutputPath)!;
++        var codes = new HashSet<string> { "test_truck", "test_truck_second" };
++        var rows = RegionTruckCatalogService.ReadPlacements(data, codes);
++        var changed = rows.Single(entry => entry.Id == "AWARD");
++        Check(rows.Count == 5 && changed.TruckCode == "test_truck_second" && changed.Equipment.Engine == "" && changed.Equipment.Addons.Count == 0
++            && changed.Transform!.SequenceEqual(current.Transform!), "Named task placement becomes the new model with defaults, retaining ID and transform");
++        Check(rows.Where(entry => entry.Id != "AWARD").All(entry => entry.TruckCode == "test_truck"), "Other copies of the same truck are preserved");
++        Check(TruckReplacementStore.SavedMaps(saveWorkspace).Single().Source == saved.OutputPath, "Saved map overlay is discoverable after reopening");
++        var currentSaved = current with { TruckCode = changed.TruckCode, BinaryOffset = changed.Offset, Source = saved.OutputPath,
++            MapDataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)) };
++        var back = new ReplacementTruck(new("test_truck", "Test truck", "Scout"), equipment.ResolveDefault("test_truck"), equipment.ComparisonProperties("test_truck"));
++        var previousBytes = File.ReadAllBytes(saved.OutputPath);
++        var second = TruckReplacementStore.Save(saveWorkspace, currentSaved, back);
++        Check(File.ReadAllBytes(saved.OriginalBackupPath).SequenceEqual(originalBytes) && second.PreviousBackupPath is not null
++            && File.ReadAllBytes(second.PreviousBackupPath).SequenceEqual(previousBytes), "Repeat saves retain the first original and back up the preceding edited version");
++        var staleRejected = false;
++        try { TruckReplacementStore.Save(saveWorkspace, currentSaved, back); } catch (InvalidDataException) { staleRejected = true; }
++        Check(staleRejected, "Stale placement data cannot overwrite a newer edit");
++        var binFolder = Path.Combine(run, "level_us_01_01", "[scene]"); Directory.CreateDirectory(binFolder);
++        var bin = Path.Combine(binFolder, "data_for_ssl.bin"); File.WriteAllBytes(bin, RegionTruckCatalogService.ReadMapData(pak)!);
++        var binWorkspace = Path.Combine(run, "bin-workspace"); Directory.CreateDirectory(binWorkspace);
++        var unnamed = before.Entries.Single(entry => entry.PlacementId.Length == 0) with { Source = bin };
++        var binSaved = TruckReplacementStore.Save(binWorkspace, unnamed, target);
++        var binPlacements = RegionTruckCatalogService.ReadPlacements(File.ReadAllBytes(binSaved.OutputPath), codes);
++        Check(binPlacements.Single(entry => entry.Id.Length == 0).TruckCode == target.Truck.Code && File.ReadAllBytes(bin).SequenceEqual(File.ReadAllBytes(binSaved.OriginalBackupPath)),
++            "Unnamed discovery placements and extracted map metadata can be replaced and backed up");
++        var invalidRejected = false;
++        try { TruckReplacementStore.Patch(File.ReadAllBytes(bin), unnamed with { BinaryOffset = unnamed.BinaryOffset + 1 }, target); }
++        catch (InvalidDataException) { invalidRejected = true; }
++        Check(invalidRejected, "Invalid placement boundaries are rejected");
++        var overlayRoot = Path.Combine(workspace, ".snowpaktool", "region-maps", "updated"); Directory.CreateDirectory(overlayRoot);
++        File.Copy(saved.OutputPath, Path.Combine(overlayRoot, "level_us_01_01.pak"), overwrite: true);
++        var reloaded = RegionTruckCatalogService.Load(workspace, maps, new Dictionary<string, string>(), new Dictionary<string, string>(), new RegionTruckAvailabilityStore(Path.Combine(run, "availability.json")));
++        Check(reloaded.Entries.Single(entry => entry.PlacementId == "AWARD").Source.StartsWith(overlayRoot), "Region catalog loads saved maps ahead of input archives");
++        var stringsFolder = Path.Combine(workspace, "original_files", "[strings]"); Directory.CreateDirectory(stringsFolder);
++        File.WriteAllText(Path.Combine(stringsFolder, "strings_english.str"), "");
++        var popupCurrent = reloaded.Entries.Single(entry => entry.PlacementId == "AWARD");
++        using (var popup = new TruckReplacementDialog(workspace, popupCurrent,
++                   () => [new("test_truck", "Test truck", "Scout"), new("test_truck_second", "Second truck", "Scout")], reloaded.EquipmentCatalog))
++        {
++            popup.Show(); var grid = Field<DataGridView>(popup, "_list"); var timer = System.Diagnostics.Stopwatch.StartNew();
++            while (grid.Rows.Count == 0 && timer.ElapsedMilliseconds < 5000) { Application.DoEvents(); Thread.Sleep(5); }
++            Check(grid.Rows.Count == 2, "Apply popup loads fixture candidates");
++            foreach (DataGridViewRow row in grid.Rows)
++                if (Convert.ToString(row.Cells["Truck ID"].Value) == "test_truck") grid.CurrentCell = row.Cells[0];
++            Check(!Field<Button>(popup, "_apply").Enabled, "Apply is disabled for the existing truck model");
++            foreach (DataGridViewRow row in grid.Rows)
++                if (Convert.ToString(row.Cells["Truck ID"].Value) == "test_truck_second") grid.CurrentCell = row.Cells[0];
++            Check(Field<Button>(popup, "_apply").Enabled, "Apply is enabled for a different enabled truck");
++            Field<Button>(popup, "_apply").PerformClick(); timer.Restart();
++            while ((popup.SavedReplacement is null || Field<bool>(popup, "_saving")) && timer.ElapsedMilliseconds < 10000)
++            { Application.DoEvents(); Thread.Sleep(5); }
++            Check(popup.SavedReplacement is not null && File.Exists(popup.SavedReplacement.OutputPath)
++                && !Field<Button>(popup, "_apply").Enabled && Field<Label>(popup, "_status").Text.Contains("Original backup:"),
++                "Clicking Apply saves the selected truck, displays paths and prevents duplicate saves");
++            popup.Close();
++        }
++        Console.WriteLine("PASS: replacement saving, byte-identical backups, repeat revisions, task/discovery identity, stale rejection, overlay reload and unrelated archive content.");
++    }
++
+     private static void ReplacementPopupRegression(string workspace, RegionTruckEntry source, TruckEquipmentCatalog equipmentCatalog)
+     {
+         var enabled = new[] { new CustomTruck(source.TruckCode, source.Truck, source.Class),
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementStore.cs b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+new file mode 100644
+index 0000000..f3f63a8
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckReplacementStore.cs
+@@ -0,0 +1,188 @@
++using System.Buffers.Binary;
++using System.IO.Compression;
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record SavedTruckReplacement(string OutputPath, string OriginalBackupPath, string? PreviousBackupPath, string TruckName);
++
++/// <summary>Writes validated map copies; input map archives and workspace originals are never overwritten.</summary>
++internal static class TruckReplacementStore
++{
++    private const string SceneEntry = "[scene]/data_for_ssl.bin";
++    private static readonly object SaveGate = new();
++
++    private static string Root(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "region-maps");
++
++    public static IEnumerable<(string Map, string Source)> SavedMaps(string workspace)
++    {
++        var updated = Path.Combine(Root(workspace), "updated");
++        if (!Directory.Exists(updated)) yield break;
++        foreach (var file in Directory.EnumerateFiles(updated, "level_*.pak"))
++            yield return (Path.GetFileNameWithoutExtension(file), file);
++        foreach (var directory in Directory.EnumerateDirectories(updated, "level_*"))
++        {
++            var file = Path.Combine(directory, "[scene]", "data_for_ssl.bin");
++            if (File.Exists(file)) yield return (Path.GetFileName(directory), file);
++        }
++    }
++
++    public static SavedTruckReplacement Save(string workspace, RegionTruckEntry current, ReplacementTruck replacement)
++    {
++        lock (SaveGate) return SaveCore(workspace, current, replacement);
++    }
++
++    private static SavedTruckReplacement SaveCore(string workspace, RegionTruckEntry current, ReplacementTruck replacement)
++    {
++        if (!Regex.IsMatch(current.MapCode, @"^level_(?:us|ru)_\d{2}_\d{2}(?:_[a-z0-9]+)*$", RegexOptions.IgnoreCase))
++            throw new InvalidDataException("The map has no valid map identifier.");
++        if (replacement.Truck.Code.Equals(current.TruckCode, StringComparison.OrdinalIgnoreCase))
++            throw new InvalidOperationException("Choose a different replacement truck.");
++        if (replacement.Equipment.InstalledAddons is null)
++            throw new InvalidDataException("The replacement truck's default equipment could not be resolved.");
++        var source = Path.GetFullPath(current.Source);
++        var sourceHash = FileHash(source);
++        var data = RegionTruckCatalogService.ReadMapData(source) ?? throw new InvalidDataException("The source map has no scene metadata.");
++        if (current.MapDataHash.Length == 0 || current.MapDataHash != Hash(data))
++            throw new InvalidDataException("The map changed since it was scanned. Reload maps before replacing this truck.");
++        var patched = Patch(data, current, replacement);
++        var root = Root(workspace);
++        var archive = source.EndsWith(".pak", StringComparison.OrdinalIgnoreCase);
++        if (!archive && !source.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Unsupported map file.");
++        var output = archive ? Path.Combine(root, "updated", current.MapCode + ".pak")
++            : Path.Combine(root, "updated", current.MapCode, "[scene]", "data_for_ssl.bin");
++        var sameOutput = source.Equals(Path.GetFullPath(output), StringComparison.OrdinalIgnoreCase);
++        if (File.Exists(output) && !sameOutput)
++            throw new IOException("A saved version of this map already exists. Reload maps to edit that version.");
++        var backups = Path.Combine(root, "backups", current.MapCode);
++        Directory.CreateDirectory(backups);
++        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
++        var original = Path.Combine(backups, archive ? "original.pak" : "original.bin");
++        if (!File.Exists(original)) Backup(source, original);
++        string? previous = null;
++        if (sameOutput)
++        {
++            previous = Path.Combine(backups, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff") + "-" + Guid.NewGuid().ToString("N") + (archive ? ".pak" : ".bin"));
++            Backup(source, previous);
++        }
++        var temporary = output + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try
++        {
++            if (archive)
++            {
++                File.Copy(source, temporary, overwrite: false);
++                using var zip = ZipFile.Open(temporary, ZipArchiveMode.Update);
++                var entries = zip.Entries.Where(entry => entry.FullName.Replace('\\', '/').Equals(SceneEntry, StringComparison.OrdinalIgnoreCase)).ToArray();
++                if (entries.Length != 1) throw new InvalidDataException("Expected exactly one scene metadata entry in the map archive.");
++                var name = entries[0].FullName; var modified = entries[0].LastWriteTime; var attributes = entries[0].ExternalAttributes;
++                entries[0].Delete();
++                var created = zip.CreateEntry(name, CompressionLevel.Optimal); created.LastWriteTime = modified; created.ExternalAttributes = attributes;
++                using var stream = created.Open(); stream.Write(patched);
++            }
++            else File.WriteAllBytes(temporary, patched);
++            // Read back the staged output before publishing it atomically.
++            var written = archive ? ReadArchiveMetadata(temporary) : File.ReadAllBytes(temporary);
++            if (!written.AsSpan().SequenceEqual(patched)) throw new IOException("The saved map did not pass verification.");
++            if (sourceHash != FileHash(source)) throw new IOException("The source map changed during saving. Reload and try again.");
++            if (!sameOutput && File.Exists(output)) throw new IOException("A new edited map appeared while saving. Reload maps.");
++            File.Move(temporary, output, overwrite: sameOutput);
++            return new(output, original, previous, replacement.Truck.Name);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    private static byte[] ReadArchiveMetadata(string path)
++    {
++        using var zip = ZipFile.OpenRead(path);
++        var entry = zip.Entries.Single(entry => entry.FullName.Replace('\\', '/').Equals(SceneEntry, StringComparison.OrdinalIgnoreCase));
++        using var input = entry.Open(); using var output = new MemoryStream(); input.CopyTo(output); return output.ToArray();
++    }
++
++    private static void Backup(string source, string destination)
++    {
++        var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try
++        {
++            File.Copy(source, temporary, overwrite: false);
++            using (var input = File.OpenRead(source))
++            using (var copy = File.OpenRead(temporary))
++                if (!SHA256.HashData(input).AsSpan().SequenceEqual(SHA256.HashData(copy))) throw new IOException("The map backup did not pass verification.");
++            File.Move(temporary, destination, overwrite: false);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    internal static byte[] Patch(byte[] data, RegionTruckEntry current, ReplacementTruck replacement)
++    {
++        var offset = current.BinaryOffset;
++        if (offset < 0 || !RegionTruckCatalogService.TryString(data, offset, out var model, out var idOffset)
++            || model != current.TruckCode || !RegionTruckCatalogService.TryString(data, idOffset, out var id, out var transform)
++            || id != current.PlacementId || current.Transform is not { Count: 16 } || transform + 93 > data.Length)
++            throw new InvalidDataException("The selected placement no longer matches the map. Reload maps.");
++        for (var i = 0; i < 16; i++)
++            if (BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(transform + i * 4, 4)) != BitConverter.SingleToInt32Bits(current.Transform[i]))
++                throw new InvalidDataException("The placement transform changed. Reload maps.");
++        var addonsStart = transform + 64 + 1 + 24;
++        var count = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(addonsStart, 4));
++        if (count > 128 || data[transform + 64] > 1) throw new InvalidDataException("Unsupported placement equipment record.");
++        var end = addonsStart + 4;
++        for (var i = 0; i < count + 7; i++)
++            if (!RegionTruckCatalogService.TryString(data, end, out _, out end)) throw new InvalidDataException("Incomplete placement equipment record.");
++        if (end + 4 > data.Length) throw new InvalidDataException("Missing wheel scale in placement record.");
++        end += 4;
++        using var output = new MemoryStream(); using var writer = new BinaryWriter(output, Encoding.ASCII, leaveOpen: true);
++        writer.Write(data.AsSpan(0, offset));
++        WriteString(writer, replacement.Truck.Code);
++        writer.Write(data.AsSpan(idOffset, addonsStart - idOffset)); // ID, transform, flags and bounds stay byte-identical.
++        var addons = replacement.Equipment.InstalledAddons ?? throw new InvalidDataException("Replacement default addons are unavailable.");
++        if (addons.Count > 128) throw new InvalidDataException("Too many default addons for this placement format.");
++        writer.Write((uint)addons.Count);
++        foreach (var addon in addons) WriteString(writer, addon.Id);
++        for (var i = 0; i < 7; i++) WriteString(writer, ""); // Engine/drivetrain/wheels resolve from the new vehicle's defaults.
++        writer.Write(0f); // Default wheel scale; don't carry the previous truck's size override.
++        writer.Write(data.AsSpan(end)); // Preserve the untouched placement suffix and all following data.
++        writer.Flush();
++        var patched = output.ToArray();
++        ValidatePlacements(data, patched, current, replacement);
++        return patched;
++    }
++
++    private static void WriteString(BinaryWriter writer, string value)
++    {
++        if (value.Length > 255 || value.Any(character => character is < ' ' or > '~')) throw new InvalidDataException("Unsupported non-ASCII or oversized truck/part identifier.");
++        writer.Write((ushort)(value.Length + 1)); writer.Write(Encoding.ASCII.GetBytes(value)); writer.Write((byte)0);
++    }
++
++    private static void ValidatePlacements(byte[] before, byte[] after, RegionTruckEntry current, ReplacementTruck replacement)
++    {
++        // Every other placement of either model must survive the variable-length splice.
++        var codes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { current.TruckCode, replacement.Truck.Code };
++        var oldRows = RegionTruckCatalogService.ReadPlacements(before, codes);
++        var newRows = RegionTruckCatalogService.ReadPlacements(after, codes);
++        var targetFound = false;
++        if (oldRows.Count != newRows.Count) throw new InvalidDataException("Replacement changed the placement count.");
++        for (var i = 0; i < oldRows.Count; i++)
++        {
++            var original = oldRows[i]; var updated = newRows[i];
++            if (original.Id != updated.Id || !original.Transform!.SequenceEqual(updated.Transform!)) throw new InvalidDataException("Replacement changed placement identity or position.");
++            if (original.Offset == current.BinaryOffset)
++            {
++                targetFound = true;
++                if (updated.TruckCode != replacement.Truck.Code || !updated.Equipment.Parsed
++                    || !updated.Equipment.Addons.SequenceEqual(replacement.Equipment.InstalledAddons!.Select(addon => addon.Id)))
++                    throw new InvalidDataException("Replacement truck did not pass re-read verification.");
++            }
++            else if (original.TruckCode != updated.TruckCode || !EquipmentEqual(original.Equipment, updated.Equipment))
++                throw new InvalidDataException("Replacement changed another vehicle's equipment.");
++        }
++        if (!targetFound) throw new InvalidDataException("The selected placement was not found during verification.");
++    }
++
++    private static bool EquipmentEqual(MapTruckEquipment a, MapTruckEquipment b) => a.Parsed == b.Parsed && a.Addons.SequenceEqual(b.Addons)
++        && a.Engine == b.Engine && a.Gearbox == b.Gearbox && a.Winch == b.Winch && a.Suspension == b.Suspension
++        && a.WheelType == b.WheelType && a.Tire == b.Tire && a.Rim == b.Rim && a.WheelScale == b.WheelScale;
++    private static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
++    private static string FileHash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
++}

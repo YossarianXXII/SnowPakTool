@@ -1,0 +1,461 @@
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 09fd5d1..0fdb811 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -7,6 +7,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Func<string> _getPakPath;
+     private readonly RegionTruckAvailabilityStore _availabilityStore;
++    private readonly Func<IReadOnlyList<CustomTruck>> _getEnabledTrucks;
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+     private readonly CheckBox _showObtainable = new() { Text = "Obtainable", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+     private readonly CheckBox _showMission = new() { Text = "Mission", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+@@ -38,11 +39,13 @@ internal sealed class RegionsTrucksTab : UserControl
+     private bool _updatingTable;
+     private bool _savingAvailability;
+ 
+-    public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath, RegionTruckAvailabilityStore? availabilityStore = null)
++    public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath, RegionTruckAvailabilityStore? availabilityStore = null,
++        Func<IReadOnlyList<CustomTruck>>? getEnabledTrucks = null)
+     {
+         _getWorkspacePath = getWorkspacePath;
+         _getPakPath = getPakPath;
+         _availabilityStore = availabilityStore ?? new RegionTruckAvailabilityStore();
++        _getEnabledTrucks = getEnabledTrucks ?? (() => []);
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
+@@ -231,6 +234,10 @@ internal sealed class RegionsTrucksTab : UserControl
+         try
+         {
+             _trucks.DataSource = table;
++            var truckColumn = _trucks.Columns["Truck"]!;
++            truckColumn.CellTemplate = new TruckReplacementCell { Open = OpenReplacement };
++            foreach (DataGridViewRow row in _trucks.Rows)
++                row.Cells[truckColumn.Index] = new TruckReplacementCell { Open = OpenReplacement, Value = row.Cells[truckColumn.Index].Value };
+             _trucks.Columns["Entry"]!.Visible = false;
+             foreach (DataGridViewColumn column in _trucks.Columns)
+             {
+@@ -332,11 +339,20 @@ internal sealed class RegionsTrucksTab : UserControl
+         if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+ 
++    private void OpenReplacement(int rowIndex)
++    {
++        if (rowIndex < 0 || rowIndex >= _trucks.Rows.Count || _loadedWorkspace is null
++            || _trucks.Rows[rowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry) return;
++        using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks);
++        dialog.ShowDialog(this);
++    }
++
+     private void EquipmentToolTipNeeded(object? sender, DataGridViewCellToolTipTextNeededEventArgs e)
+     {
+         if (e.RowIndex < 0 || e.ColumnIndex < 0 || _trucks.Rows[e.RowIndex].DataBoundItem is not DataRowView row
+             || row["Entry"] is not RegionTruckEntry entry) return;
+         // Resolve from the bound entry so tooltips remain correct after sorting.
++        if (_trucks.Columns[e.ColumnIndex].Name == "Truck") e.ToolTipText = "Compare replacement trucks (⇄ button, F4 or Alt+Down).";
+         if (_trucks.Columns[e.ColumnIndex].Name == "Tires") e.ToolTipText = entry.TireDetails;
+         if (_trucks.Columns[e.ColumnIndex].Name == "Addons") e.ToolTipText = entry.AddonDetails;
+         if (_trucks.Columns[e.ColumnIndex].Name == "Frame addons") e.ToolTipText = entry.FrameAddonDetails;
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index a8673ba..ef55db0 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -45,7 +45,11 @@ internal sealed class MainForm : Form
+         _ownedContentTab.OwnedTrucksChanged += _tierListTab.RefreshOwnedTrucks;
+         _truckEditTab = new TruckEditTab(() => _workspacePath.Text.Trim(), _ownedContentTab);
+         _trucksCargoTab = new TrucksCargoTab(() => _workspacePath.Text.Trim());
+-        _regionsTrucksTab = new RegionsTrucksTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim());
++        _regionsTrucksTab = new RegionsTrucksTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim(), getEnabledTrucks: () =>
++        {
++            _ownedContentTab.EnsureLoaded();
++            return _ownedContentTab.GetAvailableCustomGroupingTrucks();
++        });
+         _settingsTab = new SettingsTab();
+         BuildLayout();
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index 5a95eaf..fd5bc27 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -139,6 +139,34 @@ internal sealed class TruckEquipmentCatalog
+             FormatNames(frame), FormatDetails(frame), internalEquipment);
+     }
+ 
++    public IReadOnlyDictionary<string, string> ComparisonProperties(string truck)
++    {
++        var chain = FileChain(truck).ToArray();
++        var properties = chain.SelectMany(definition => new[] { "TruckData", "GameData" }
++                .SelectMany(section => (definition.Xml.Element(section)?.Attributes() ?? [])
++                    .Where(attribute => attribute.Name.LocalName != "TruckType")
++                    .Select(attribute => (Key: section + " / " + attribute.Name.LocalName, attribute.Value))))
++            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => group.First().Value, StringComparer.OrdinalIgnoreCase);
++        var wheels = chain.SelectMany(definition => definition.Xml.Descendants("CompatibleWheels"))
++            .Select(element => new { Type = (string?)element.Attribute("Type") ?? "", Scale = (string?)element.Attribute("Scale") ?? "" })
++            .Distinct().ToArray();
++        properties["Wheels / Compatible families and scale"] = string.Join("\r\n", wheels.Select(wheel => wheel.Type + (wheel.Scale.Length > 0 ? " (scale " + wheel.Scale + ")" : "")));
++        foreach (var type in wheels.Select(wheel => wheel.Type).Distinct(StringComparer.OrdinalIgnoreCase))
++            properties["Wheels / " + type + " tires"] = string.Join("\r\n", Tires(type).Values
++                .Select(tire => tire.Name + " (" + tire.Category + ")").Distinct().Order(StringComparer.CurrentCultureIgnoreCase));
++        var sockets = chain.SelectMany(definition => definition.Xml.Element("GameData")?.Elements("AddonSockets") ?? [])
++            .SelectMany(element => element.Elements("Socket")).SelectMany(socket => Split((string?)socket.Attribute("Names")))
++            .ToHashSet(StringComparer.OrdinalIgnoreCase);
++        properties["Addons / Supported sockets"] = string.Join(", ", sockets.Order(StringComparer.CurrentCultureIgnoreCase));
++        foreach (var group in _files.Keys.Where(id => SocketTypes(id).Any(sockets.Contains)).GroupBy(id =>
++                     FileChain(id).Select(definition => (string?)definition.Xml.Element("GameData")?.Attribute("Category"))
++                         .FirstOrDefault(value => value is not null) ?? "Uncategorized"))
++            foreach (var name in group.Select(AddonName).Distinct().Order(StringComparer.CurrentCultureIgnoreCase))
++                properties["Addon socket options / " + group.Key.Replace('_', ' ') + " / " + name] = "Supported socket match";
++        return properties;
++    }
++
+     private InternalEquipmentInfo ResolveComponent(IReadOnlyList<Definition> truck, string kind, string socket, string mapId)
+     {
+         var sockets = truck.Select(definition => definition.Xml.Element("TruckData")?.Element(socket)).Where(element => element is not null).ToArray();
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index c2cd887..03c9f74 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -42,6 +42,8 @@ The table excludes visual (`_tuning`) parts from both addon columns. The remaini
+ 
+ The bottom details pane is resizable using the horizontal divider above it. It lists internal equipment by slot and name, visual addons by name with their game category in parentheses, vehicle properties and tire/wheel details. AWD/transfer-box and differential-lock components appear only under internal equipment, even when stored in a `_tuning` folder; the folder distinction remains in the underlying metadata. Placement, availability evidence, truck/map headings and frame/other addon lists are omitted from this pane. Vehicle property labels omit the TruckData/GameData prefixes and use spaces around =. Map overrides take precedence over vehicle socket defaults. Component names resolve through workspace definitions, including parent variant files; unresolved names fall back to their IDs. Definition properties are separate from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
+ 
++Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** when focused) that opens the replacement comparison popup. Its candidates use the same enabled base-game/owned-DLC catalog as Tier list, regardless of Tier list groups or filters. Class and default-tire filters combine; column headers sort the list. The popup uses the shared double-Shift search with a three-character minimum to search all displayed strings and attached metadata. Selecting a candidate updates the resizable lower comparison table: current map equipment versus candidate defaults, internal components and explicit settings, installed addons, vehicle properties, compatible wheel families/tires and addon socket options. Changed values are highlighted, with a **Differences only** checkbox. Socket matches alone do not validate addon conflicts or other restrictions; explicit definition values do not fully resolve templates. This is a preparation/preview popup: it does not yet apply a replacement or modify map archives or workspace files.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Classification evidence, map coordinates and source metadata remain available internally for search. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 9421795..cc9e2e1 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -7,6 +7,9 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckCatalogService.cs" Link="RegionTruckCatalogService.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs" Link="TruckEquipmentCatalog.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/TruckDetailsFormatter.cs" Link="TruckDetailsFormatter.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckPlacementOverrides.cs" Link="RegionTruckPlacementOverrides.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs" Link="RegionTruckAvailabilityStore.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 2974680..cf1ddb5 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -71,6 +71,15 @@ internal static class Program
+         var separated = new TruckEquipmentCatalog(fixture, new Dictionary<string, string>(), []).Resolve("test_truck", new(true, ["test_frame_bed", "test_visual_frame"], "", "", ""));
+         Check(separated.FrameAddons == "test_frame_bed" && separated.Addons == "test_stock", "Frame addons separated from other addons with tuning parts hidden first");
+         Check(!separated.FrameAddonDetails.Contains("test_visual_frame") && !separated.AddonDetails.Contains("test_visual_frame") && separated.InstalledAddons!.Any(addon => addon.Id == "test_visual_frame" && addon.IsVisual), "Hidden visual frame equipment retains its source metadata");
++        var replacementCatalog = new TruckEquipmentCatalog(fixture, new Dictionary<string, string>(), []);
++        var replacementDefaults = new ReplacementTruck(new CustomTruck("test_truck", "Test truck", "Scout"),
++            replacementCatalog.Resolve("test_truck", new(true, [], "", "", "")), replacementCatalog.ComparisonProperties("test_truck"));
++        var replacementRows = TruckReplacementComparison.Build(sample.Entries.Single(entry => entry.PlacementId == "AWARD"), replacementDefaults, replacementDefaults);
++        Check(replacementRows.Any(row => row.Property == "Internal / Engine" && row.Current == "engine_override" && row.Replacement == "engine_default")
++            && replacementRows.Any(row => row.Property == "Wheels / Installed category" && row.Current == "Ice" && row.Replacement == "Highway")
++            && replacementRows.Any(row => row.Property.StartsWith("Installed addons") && row.Current.Contains("test_upgrade") && row.Replacement.Contains("test_stock"))
++            && replacementRows.Any(row => row.Property.StartsWith("Addon socket options") && row.Property.Contains("test_upgrade")),
++            "Replacement compares actual map components, tires and addons to defaults, and includes socket-compatible options");
+ 
+         var catalog = RegionTruckCatalogService.Load(workspace, maps, WorkspaceDataCache.GetLocalizedNames(workspace), new Dictionary<string, string>(), availabilityStore);
+         Check(catalog.MapsRead > 50 && catalog.Entries.Count > 100, "Installed map coverage");
+@@ -101,6 +110,7 @@ internal static class Program
+                 .All(addon => visualSection.Contains(addon.Name + " (" + addon.Category.Replace('_', ' ') + ")")),
+             "Visual addon names include categories and exclude drivetrain components");
+         File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "gmc-details-preview.txt"), detailText);
++        ReplacementPopupRegression(workspace, gmc);
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "gmc_9500_diff_lock_default") is { IsVisual: true, Category: "diff_lock" }, "User's visual group follows tuning folders even for functional diff locks");
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "frame_addon_sideboard_2") is { IsVisual: false, Category: "frame_addons" }, "Shared bed is outside the tuning group");
+         Check(gmc.Addons == "None" && gmc.FrameAddons == "Sideboard Bed" && !gmc.AddonDetails.Contains("gmc_9500_diff_lock_default")
+@@ -155,6 +165,24 @@ internal static class Program
+         var first = selected.Single();
+         var second = tiles.Keys.First(key => key != first);
+         var grid = Field<DataGridView>(tab, "_trucks");
++        Check(grid.Rows.Cast<DataGridViewRow>().All(row => row.Cells["Truck"] is TruckReplacementCell), "Every Truck cell includes a replacement action");
++        var invokedRow = -1;
++        var action = new TruckReplacementCell { Open = row => invokedRow = row };
++        var cloned = (TruckReplacementCell)action.Clone();
++        var key = new KeyEventArgs(Keys.F4);
++        typeof(TruckReplacementCell).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(cloned, [key, 7]);
++        Check(invokedRow == 7 && key.Handled, "Cloned replacement cell retains its keyboard action and row identity");
++        var firstTruckCell = (TruckReplacementCell)grid.Rows[0].Cells["Truck"];
++        var previousAction = firstTruckCell.Open; firstTruckCell.Open = row => invokedRow = row;
++        var mouseClick = typeof(TruckReplacementCell).GetMethod("OnMouseClick", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        invokedRow = -1;
++        mouseClick.Invoke(firstTruckCell, [new DataGridViewCellMouseEventArgs(firstTruckCell.ColumnIndex, 0, 5, 10, new MouseEventArgs(MouseButtons.Left, 1, 5, 10, 0))]);
++        Check(invokedRow == -1, "Clicking a truck name leaves the replacement popup closed");
++        var buttonX = firstTruckCell.Size.Width - 15;
++        mouseClick.Invoke(firstTruckCell, [new DataGridViewCellMouseEventArgs(firstTruckCell.ColumnIndex, 0, buttonX, 10, new MouseEventArgs(MouseButtons.Left, 1, buttonX, 10, 0))]);
++        Check(invokedRow == 0, "Right-edge replacement button opens the correct row"); firstTruckCell.Open = previousAction;
++        using (var gridPreview = new Bitmap(grid.Width, grid.Height))
++        { grid.DrawToBitmap(gridPreview, grid.ClientRectangle); gridPreview.Save(Path.Combine(AppContext.BaseDirectory, "replacement-cell-preview.png")); }
+         Check(Field<TextBox>(tab, "_details").Parent?.Parent is SplitContainer, "Details pane is resizable against the truck table");
+         host.Controls.Remove(tab);
+         tab.BindingContext = new BindingContext();
+@@ -214,6 +242,37 @@ internal static class Program
+         Console.WriteLine("PASS: map equipment, confirmed exceptions, checkbox filters, overlay search, tile counts, editable unknowns and persistent availability choices.");
+     }
+ 
++    private static void ReplacementPopupRegression(string workspace, RegionTruckEntry source)
++    {
++        var enabled = new[] { new CustomTruck(source.TruckCode, source.Truck, source.Class),
++            new CustomTruck("chevrolet_ck1500", "Chevrolet CK1500", "Scout"), new CustomTruck("tayga_6436", "Tayga 6436", "Offroad") };
++        using var dialog = new TruckReplacementDialog(workspace, source, () => enabled);
++        dialog.Show();
++        var list = Field<DataGridView>(dialog, "_list");
++        var clock = System.Diagnostics.Stopwatch.StartNew();
++        while (list.Rows.Count == 0 && clock.Elapsed < TimeSpan.FromSeconds(45)) { Application.DoEvents(); Thread.Sleep(10); }
++        Check(list.Rows.Count == enabled.Length, "Popup uses exactly the enabled truck source");
++        var comparison = Field<DataGridView>(dialog, "_comparison");
++        Check(comparison.Rows.Count > 10 && comparison.Columns[1].HeaderText.Contains("map equipment")
++            && comparison.Columns[2].HeaderText.Contains("defaults"), "Selection fills side-by-side equipment comparison with explicit origins");
++        list.Sort(list.Columns["Truck"]!, System.ComponentModel.ListSortDirection.Descending);
++        Check(list.Rows[0].Cells["Truck"].Value?.ToString() == "Tayga 6436", "Candidate list sorts by column headers");
++        var classes = Field<ComboBox>(dialog, "_class"); classes.SelectedItem = "Scout";
++        Check(list.Rows.Count == 1 && list.Rows[0].Cells["Truck ID"].Value?.ToString() == "chevrolet_ck1500", "Class filter restricts replacement candidates");
++        Check(comparison.Columns[2].HeaderText.Contains("Chevrolet CK1500"), "Comparison follows the filtered selection");
++        var tires = Field<ComboBox>(dialog, "_tires");
++        tires.SelectedItem = Field<IReadOnlyList<ReplacementTruck>>(dialog, "_trucks").Single(item => item.Truck.Code == "chevrolet_ck1500").Equipment.Tires;
++        Check(list.Rows.Count == 1, "Tire filter combines with class filter");
++        Field<CheckBox>(dialog, "_differences").Checked = true;
++        Check(comparison.Rows.Count > 0 && comparison.Rows.Cast<DataGridViewRow>().All(row => !Equals(row.Cells[1].Value, row.Cells[2].Value)), "Differences-only comparison hides equal properties");
++        using var search = new CurrentTabSearch(() => dialog);
++        Check(search.Search("chevrolet") > 0 && search.Search("ch") == 0, "Popup shares the app search and three-character minimum"); search.Clear();
++        using var preview = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(preview, new Rectangle(0, 0, dialog.Width, dialog.Height));
++        preview.Save(Path.Combine(AppContext.BaseDirectory, "replacement-popup-preview.png"));
++        dialog.Close();
++        Console.WriteLine("PASS: replacement popup enabled candidates, sorting, combined filters, live comparison, difference mode and shared search.");
++    }
++
+     private static byte[] BuildMap(params string[] ids)
+     {
+         using var memory = new MemoryStream(); using var writer = new BinaryWriter(memory);
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementCell.cs b/src/SnowPakTool.Desktop/TruckReplacementCell.cs
+new file mode 100644
+index 0000000..13a2d1a
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckReplacementCell.cs
+@@ -0,0 +1,44 @@
++using System.Windows.Forms.VisualStyles;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>A truck name with a separate replacement action at the right edge.</summary>
++internal sealed class TruckReplacementCell : DataGridViewTextBoxCell
++{
++    public Action<int>? Open { get; set; }
++    public override object Clone()
++    {
++        var clone = (TruckReplacementCell)base.Clone();
++        clone.Open = Open;
++        return clone;
++    }
++    private static Rectangle ButtonBounds(Rectangle cell) => new(cell.Right - 29, cell.Top + 2, 26, Math.Max(18, cell.Height - 4));
++
++    protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
++        DataGridViewElementStates cellState, object? value, object? formattedValue, string? errorText,
++        DataGridViewCellStyle cellStyle, DataGridViewAdvancedBorderStyle advancedBorderStyle, DataGridViewPaintParts paintParts)
++    {
++        var style = cellStyle.Clone();
++        style.Padding = new Padding(style.Padding.Left, style.Padding.Top, style.Padding.Right + 30, style.Padding.Bottom);
++        base.Paint(graphics, clipBounds, cellBounds, rowIndex, cellState, value, formattedValue, errorText, style, advancedBorderStyle, paintParts);
++        if (rowIndex < 0 || !paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
++        var button = ButtonBounds(cellBounds);
++        var state = DataGridView?.Enabled == false ? PushButtonState.Disabled : PushButtonState.Normal;
++        ButtonRenderer.DrawButton(graphics, button, state);
++        TextRenderer.DrawText(graphics, "⇄", cellStyle.Font, button, SystemColors.ControlText,
++            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
++    }
++
++    protected override void OnMouseClick(DataGridViewCellMouseEventArgs e)
++    {
++        base.OnMouseClick(e);
++        if (e.Button == MouseButtons.Left && e.RowIndex >= 0 && ButtonBounds(new Rectangle(Point.Empty, Size)).Contains(e.Location)) Open?.Invoke(e.RowIndex);
++    }
++
++    protected override void OnKeyDown(KeyEventArgs e, int rowIndex)
++    {
++        if (e.KeyCode == Keys.F4 || (e.Alt && e.KeyCode == Keys.Down))
++        { e.Handled = e.SuppressKeyPress = true; Open?.Invoke(rowIndex); }
++        else base.OnKeyDown(e, rowIndex);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+new file mode 100644
+index 0000000..1f3a610
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -0,0 +1,172 @@
++using System.Data;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record ReplacementTruck(CustomTruck Truck, TruckEquipmentSummary Equipment, IReadOnlyDictionary<string, string> Properties);
++internal sealed record TruckComparisonRow(string Property, string Current, string Replacement);
++
++internal static class TruckReplacementComparison
++{
++    public static IReadOnlyList<TruckComparisonRow> Build(RegionTruckEntry current, ReplacementTruck original, ReplacementTruck candidate)
++    {
++        var left = Values(original.Truck, new TruckEquipmentSummary(current.Tires, current.TireDetails, current.Addons, current.AddonDetails,
++            current.InstalledAddons, current.FrameAddons, current.FrameAddonDetails, current.InternalEquipment), original.Properties);
++        var right = Values(candidate.Truck, candidate.Equipment, candidate.Properties);
++        return left.Keys.Concat(right.Keys).Distinct(StringComparer.OrdinalIgnoreCase)
++            .Select(key => new TruckComparisonRow(key, left.GetValueOrDefault(key, "Not specified"), right.GetValueOrDefault(key, "Not specified"))).ToArray();
++    }
++
++    private static Dictionary<string, string> Values(CustomTruck truck, TruckEquipmentSummary equipment, IReadOnlyDictionary<string, string> properties)
++    {
++        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
++        { ["Truck"] = truck.Name, ["Class"] = truck.Class, ["Truck ID"] = truck.Code, ["Wheels / Installed category"] = equipment.Tires,
++            ["Wheels / Installed tire, rim and scale"] = equipment.TireDetails };
++        foreach (var item in equipment.InternalEquipment ?? [])
++        {
++            if (item.Slot == "Vehicle definition") continue;
++            values["Internal / " + item.Slot] = item.Name;
++            foreach (var line in item.DefinitionDetails.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
++            {
++                var separator = line.IndexOf('=');
++                if (separator < 0) continue;
++                var key = Regex.Replace(line[..separator], @"^(Engine|Gearbox|Winch|SuspensionSet)\[\d+\]\.", "$1.");
++                values["Internal settings / " + item.Slot + " / " + key] = line[(separator + 1)..];
++            }
++            if (item.DefinitionDetails.Contains("no matching definition", StringComparison.OrdinalIgnoreCase))
++                values["Internal resolution / " + item.Slot] = "Selected ID has no matching workspace definition";
++        }
++        if (equipment.InstalledAddons is null) values["Installed addons"] = "Unknown — map equipment could not be read";
++        else foreach (var group in equipment.InstalledAddons.GroupBy(addon => addon.Category.Length == 0 ? "Uncategorized" : addon.Category))
++            values["Installed addons / " + group.Key.Replace('_', ' ')] = string.Join("\r\n", group.Select(addon => addon.Name).Order(StringComparer.CurrentCultureIgnoreCase));
++        foreach (var (key, value) in properties) values[key] = value.Length == 0 ? "None specified" : value;
++        return values;
++    }
++}
++
++/// <summary>Read-only preparation of a replacement; candidate equipment uses vehicle defaults.</summary>
++internal sealed class TruckReplacementDialog : Form
++{
++    private readonly RegionTruckEntry _current;
++    private readonly Func<IReadOnlyList<CustomTruck>> _getEnabled;
++    private readonly string _workspace;
++    private readonly ComboBox _class = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
++    private readonly ComboBox _tires = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150 };
++    private readonly CheckBox _differences = new() { Text = "Differences only", AutoSize = true, Margin = new Padding(12, 7, 4, 4) };
++    private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 6) };
++    private readonly DataGridView _list = Grid();
++    private readonly DataGridView _comparison = Grid();
++    private readonly CurrentTabSearch _search;
++    private IReadOnlyList<ReplacementTruck> _trucks = [];
++    private ReplacementTruck? _original;
++    private bool _updating;
++
++    public TruckReplacementDialog(string workspace, RegionTruckEntry current, Func<IReadOnlyList<CustomTruck>> getEnabled)
++    {
++        _workspace = workspace; _current = current; _getEnabled = getEnabled;
++        Text = "Replace truck — " + current.Truck;
++        StartPosition = FormStartPosition.CenterParent; Size = new Size(1150, 850); MinimumSize = new Size(800, 600);
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        filters.Controls.Add(new Label { Text = "Class", AutoSize = true, Padding = new Padding(0, 7, 0, 0) }); filters.Controls.Add(_class);
++        filters.Controls.Add(new Label { Text = "Default tires", AutoSize = true, Padding = new Padding(12, 7, 0, 0) }); filters.Controls.Add(_tires);
++        filters.Controls.Add(_differences);
++        layout.Controls.Add(filters, 0, 0); layout.Controls.Add(_status, 0, 1);
++        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(1100, 650), SplitterDistance = 270, Panel1MinSize = 100, Panel2MinSize = 100, SplitterWidth = 6 };
++        split.Panel1.Controls.Add(_list); split.Panel2.Controls.Add(_comparison); layout.Controls.Add(split, 0, 2);
++        var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
++        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel }; footer.Controls.Add(close);
++        footer.Controls.Add(new Label { Text = "Defaults preview • socket matches may have extra constraints • no files changed", AutoSize = true, Padding = new Padding(4, 7, 12, 0) });
++        layout.Controls.Add(footer, 0, 3); Controls.Add(layout); CancelButton = close;
++        _comparison.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
++        _comparison.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
++        _comparison.SelectionMode = DataGridViewSelectionMode.CellSelect;
++        _class.SelectedIndexChanged += (_, _) => ApplyFilter(); _tires.SelectedIndexChanged += (_, _) => ApplyFilter();
++        _differences.CheckedChanged += (_, _) => Compare();
++        _list.SelectionChanged += (_, _) => Compare();
++        _search = new CurrentTabSearch(() => layout); _search.Attach(this);
++        Shown += async (_, _) => await LoadTrucksAsync();
++        AppColors.Changed += PaletteChanged; Disposed += (_, _) => { _search.Dispose(); AppColors.Changed -= PaletteChanged; };
++        PaletteChanged(this, EventArgs.Empty);
++    }
++
++    private async Task LoadTrucksAsync()
++    {
++        _status.Text = "Loading enabled trucks and equipment…";
++        try
++        {
++            var enabled = _getEnabled().DistinctBy(truck => truck.Code, StringComparer.OrdinalIgnoreCase).ToArray();
++            var names = WorkspaceDataCache.GetLocalizedNames(_workspace);
++            var loaded = await Task.Run(() =>
++            {
++                var catalog = new TruckEquipmentCatalog(_workspace, names, []);
++                ReplacementTruck Profile(CustomTruck truck) => new(truck, catalog.Resolve(truck.Code, new MapTruckEquipment(true, [], "", "", "")), catalog.ComparisonProperties(truck.Code));
++                var trucks = enabled.Select(Profile).OrderBy(item => item.Truck.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
++                var original = trucks.FirstOrDefault(item => item.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase))
++                    ?? Profile(new CustomTruck(_current.TruckCode, _current.Truck, _current.Class));
++                return (trucks, original);
++            });
++            if (IsDisposed) return;
++            _trucks = loaded.trucks; _original = loaded.original;
++            _updating = true;
++            _class.Items.Add("All classes"); _class.Items.AddRange(_trucks.Select(item => item.Truck.Class).Distinct().Order().Cast<object>().ToArray());
++            _tires.Items.Add("All tires"); _tires.Items.AddRange(_trucks.Select(item => item.Equipment.Tires).Distinct().Order().Cast<object>().ToArray());
++            _class.SelectedIndex = _tires.SelectedIndex = 0; _updating = false; ApplyFilter();
++        }
++        catch (Exception ex) { if (!IsDisposed) _status.Text = "Could not load replacement trucks: " + ex.Message; }
++    }
++
++    private void ApplyFilter()
++    {
++        if (_updating) return;
++        var previous = Selected()?.Truck.Code;
++        var table = new DataTable();
++        foreach (var column in new[] { "Truck", "Class", "Default tires", "Default frame addons", "Truck ID" }) table.Columns.Add(column);
++        table.Columns.Add("Profile", typeof(ReplacementTruck));
++        foreach (var truck in _trucks.Where(item => (_class.SelectedIndex <= 0 || item.Truck.Class == (string)_class.SelectedItem!)
++                     && (_tires.SelectedIndex <= 0 || item.Equipment.Tires == (string)_tires.SelectedItem!)))
++            table.Rows.Add(truck.Truck.Name, truck.Truck.Class, truck.Equipment.Tires, truck.Equipment.FrameAddons, truck.Truck.Code, truck);
++        var sort = (_list.DataSource as DataTable)?.DefaultView.Sort;
++        if (!string.IsNullOrEmpty(sort)) table.DefaultView.Sort = sort;
++        _list.DataSource = table; _list.Columns["Profile"]!.Visible = false;
++        foreach (DataGridViewRow row in _list.Rows)
++            if (row.DataBoundItem is DataRowView view && ((ReplacementTruck)view["Profile"]).Truck.Code == previous)
++            { _list.CurrentCell = row.Cells[0]; break; }
++        _status.Text = $"{table.Rows.Count} of {_trucks.Count} enabled trucks • Double-tap Shift to search any text (3+ characters) • Click a column header to sort";
++        Compare();
++    }
++
++    private ReplacementTruck? Selected() => _list.CurrentRow?.DataBoundItem is DataRowView row ? row["Profile"] as ReplacementTruck : null;
++
++    private void Compare()
++    {
++        var table = new DataTable(); table.Columns.Add("Property");
++        table.Columns.Add("Current — " + _current.Truck + " (map equipment)");
++        table.Columns.Add("Replacement — " + (Selected()?.Truck.Name ?? "select a truck") + " (defaults)");
++        if (_original is not null && Selected() is { } selected)
++            foreach (var item in TruckReplacementComparison.Build(_current, _original, selected))
++                if (!_differences.Checked || item.Current != item.Replacement) table.Rows.Add(item.Property, item.Current, item.Replacement);
++        _comparison.DataSource = table;
++        foreach (DataGridViewRow row in _comparison.Rows)
++            if (!Equals(row.Cells[1].Value, row.Cells[2].Value)) row.Cells[2].Style.BackColor = AppColors.Get("EngineMatch");
++        _comparison.Columns[0].FillWeight = 60;
++    }
++
++    private static DataGridView Grid() => new()
++    {
++        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false,
++        MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
++        DefaultCellStyle = { SelectionBackColor = AppColors.Get("SelectionBlue"), SelectionForeColor = SystemColors.ControlText },
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold) }, RowTemplate = { Height = 26 }
++    };
++
++    private void PaletteChanged(object? sender, EventArgs e)
++    {
++        foreach (var grid in new[] { _list, _comparison })
++        { grid.BackgroundColor = grid.DefaultCellStyle.BackColor = AppColors.Get("Surface"); grid.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow"); }
++        Compare();
++    }
++}

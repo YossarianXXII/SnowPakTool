@@ -1,0 +1,80 @@
+diff --git "a/.checks\\TruckResetBaseline\\README.md" b/README.md
+index 16403bb..29d9c3e 100644
+--- "a/.checks\\TruckResetBaseline\\README.md"
++++ b/README.md
+@@ -117,3 +117,5 @@ snowpaktool pak pack --mixed-cache-block "initial-pak" "%client%\initial.pak"
+ ```
+ 
+ **Randomizer > Map upgrades > Apply staged upgrades** applies only the saved upgrade snapshot: pickup replacements in level settings plus their exploration flags. It leaves other staged PAK edits and later unstaged upgrade drafts intact. This writes the workspace overlay; pack a new initial.pak from Start and install it for the game to use the changes. Input archives and installed files remain untouched.
++
++Truck properties: Reset to original values previews a restoration against the values currently in files. Stage changes persists that restoration for Start > Apply pending changes. Reset and Stage explicitly report when the files already contain those values and there is nothing to apply; an empty staged list clears any previous staged truck-property edits.
+diff --git "a/.checks\\TruckResetBaseline\\TruckPropertiesTab.cs" b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 6c3425e..c38d954 100644
+--- "a/.checks\\TruckResetBaseline\\TruckPropertiesTab.cs"
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -69,6 +69,10 @@ internal sealed class TruckPropertiesTab : UserControl
+                 foreach (var spec in TruckPropertiesStore.Specs)
+                     if (row.Draft.ContainsKey(spec.Attribute) && row.Original.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = value;
+             ShowRows();
++            var changes = DraftValues(true).Count;
++            _status.Text = changes == 0
++                ? "Truck properties already match the original values in the files. Nothing to stage."
++                : $"Original values restored in preview: {changes} property changes. Stage changes, then Apply pending changes from Start.";
+         });
+         AddButton(toolbar, "Save preset…", SavePreset);
+         AddButton(toolbar, "Load preset…", LoadPreset);
+@@ -459,10 +463,13 @@ internal sealed class TruckPropertiesTab : UserControl
+ 
+     private void Stage()
+     {
+-        if (!_grid.EndEdit() || !Ready()) return;
++        if (!_grid.EndEdit()) return;
++        if (!Ready()) { _status.Text = "Reload truck properties before staging changes."; return; }
+         var edits = DraftValues(true);
+         TruckPropertiesStore.SavePending(_loadedWorkspace!, edits);
+-        _status.Text = $"Staged {edits.Count} truck property changes. Apply pending changes from Start.";
++        _status.Text = edits.Count == 0
++            ? "No truck property changes to stage: the preview already matches the files. The staged truck-property list is empty."
++            : $"Staged {edits.Count} truck property changes. Apply pending changes from Start.";
+     }
+ 
+     internal void ExportPreview(string destination)
+diff --git "a/.checks\\TruckResetBaseline\\Program.cs" b/.checks/truck-properties/Program.cs
+index c331253..e20d31c 100644
+--- "a/.checks\\TruckResetBaseline\\Program.cs"
++++ b/.checks/truck-properties/Program.cs
+@@ -137,8 +137,24 @@ internal static class Program
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+         Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 80 && File.ReadAllText(updated).Contains("FuelCapacity=\"100\""), "reset to preserved baseline is preview only");
+         Call(tab, "Stage");
++        Check(((IList)Store("LoadPending", workspace)!).Count == 1, "reset to original values can be staged after prior Apply");
++        using (var main = (Form)Activator.CreateInstance(T("MainForm"))!)
++        {
++            ((TextBox)Field(main, "_workspacePath")).Text = workspace;
++            var startPending = ((IEnumerable)Call(main, "PendingPakChanges", workspace)!).Cast<object>().ToArray();
++            Check(startPending.Length == 1, "Start receives the staged original-value restoration");
++        }
+         All(tab).OfType<Button>().Single(button => button.Text == "Revert staged changes").PerformClick();
+         Check(((IList)Store("LoadPending", workspace)!).Count == 0, "revert staged changes clears persistent intent");
++        All(tab).OfType<Button>().Single(button => button.Text == "Reset to original values").PerformClick();
++        Call(tab, "Stage");
++        Call(tab, "SavePendingChanges");
++        Check(File.ReadAllText(updated).Contains("FuelCapacity=\"80\""), "staged reset applies original fuel value to the updated file");
++        Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        All(tab).OfType<Button>().Single(button => button.Text == "Reset to original values").PerformClick();
++        Check(((Label)Field(tab, "_status")).Text.Contains("Nothing to stage"), "reset explains when original values are already in files");
++        Call(tab, "Stage");
++        Check(((IList)Store("LoadPending", workspace)!).Count == 0 && ((Label)Field(tab, "_status")).Text.Contains("already matches the files"), "no-op staging explains why Start has no pending changes");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+         row.Cells["FuelCapacity"].Value = 160m;
+         if (!args.Contains("--no-visual")) {
+diff --git "a/.checks\\TruckResetBaseline\\TruckProperties.csproj" b/.checks/truck-properties/TruckProperties.csproj
+index 70ca305..82a29a7 100644
+--- "a/.checks\\TruckResetBaseline\\TruckProperties.csproj"
++++ b/.checks/truck-properties/TruckProperties.csproj
+@@ -1,4 +1,4 @@
+ <Project Sdk="Microsoft.NET.Sdk">
+   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
+-  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
+ </Project>

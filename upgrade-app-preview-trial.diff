@@ -1,0 +1,892 @@
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\README.md" b/README.md
+index d1d3df1..4b16f4f 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\README.md"
++++ b/README.md
+@@ -14,11 +14,11 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
+-A compiled **slot-based upgrade selection draft** is available as `UpgradeDistributionPlanner.Generate(input, seed, options)`. It selects new rewards from the supplied eligible full catalog while retaining each pickup's original type and fixed metal detectors. Truck-specific slots prefer unused upgrades compatible with local obtainable trucks; shared slots draw from all eligible shared parts of that type, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. There is no locality quota or whole-plan optimizer, and original reward IDs/counts need not be retained. It performs no file writes and is not connected to the Upgrades UI yet; verified compatibility/composite tire IDs and effective truck/contract-reward homes must be supplied by a future catalog adapter. See [the planner draft and input contract](upgrade-distribution-draft.md).
++A **slot-based upgrade preview trial** is available in **Randomizer → Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a preview under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+ **Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+-**Randomizer → Upgrades** prepares the upgrade workflow with one full-width rule pane, matching Truck randomization's add/edit/remove glyphs, automatically saved notes, Randomize / Stage changes buttons, detailed-log toggle and message area. Rules start empty and save separately from truck rules; an intentionally empty list remains empty. **Randomizer → Map upgrades** matches Map trucks' region tiles, map-folder Browse / Reload controls, region selection buttons, reset/staging controls, sortable/filterable table and resizable details split. Region tiles load from workspace metadata. Upgrade placement reading, replacement, randomization, reset and staging are not implemented yet; their action buttons remain disabled. Browse selects a folder and Reload refreshes workspace region metadata; neither scans upgrade placements or writes game files. Redistribution rules will be defined separately.
++**Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows original/preview names, types, compatible truck IDs, source zone and change state. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions remove preview assignments only. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Upgrade Stage/Apply is disabled in this trial.** No XML, SSO, map archive or installed game file is changed by randomizing/resetting upgrades; trial previews are not added to Start's staged changes.
+ 
+ **Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\upgrade-distribution-draft.md" b/upgrade-distribution-draft.md
+index 7066395..0fdc7dc 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\upgrade-distribution-draft.md"
++++ b/upgrade-distribution-draft.md
+@@ -51,7 +51,7 @@ Reward IDs and their original occurrence counts are **not** conserved. The full
+ 
+ Purchase-only models have no regional home unless randomization places them on a map. Their parts can enter the ordinary same-type fallback pools. Tayga 6455B still needs its direct Maine contract-award home supplied. The confirmed Kirovets tire must use its composite reward ID `wheels_extend_kirovets_k7m_tire_1`.
+ 
+-This is a pure in-memory draft function. It performs no file reads/writes, staging or saved-state mutation. The Upgrades button is not connected yet. A catalog adapter must supply verified compatibility and composite tire IDs; the Addons table's raw rows alone are insufficient. A later writer must maintain exploration locks for added/removed rewards and perform source conflict checks before applying SSO changes through the PAK/cache-block workflow. “Unused” is measured within this plan; selection restrictions outside the supplied scope must be prepared by the caller.
++The planner remains a pure in-memory function. The app now connects it through `UpgradeTrialService` and the compatibility reader in `TruckUpgradeCatalog.cs`. **Randomizer → Upgrades** reads current obtainable truck previews, enabled content and original pickup settings, then persists the resulting preview as app metadata under `workspace/upgrade-randomization/draft.json`. Direct garage rewards are included and the Kirovets composite tire ID is resolved. The reader excludes declared unowned tire packs, stock/default-only parts and objective-locked candidates conservatively. **Map upgrades** reviews, reloads and resets that preview. Input changes are stamped so a stale saved plan is identified. Stage/Apply remains disabled: no upgrade game-file writer has been connected. A later writer must maintain exploration locks and perform source conflict checks before applying SSO changes. “Unused” is measured within the supplied plan scope.
+ 
+ The returned report contains original slot roles, local choices for specific slots, fallback/reuse counts, fixed/retained outcomes, first-region shared outcomes and original/planned type totals. Per-slot results retain the original pickup identity, selected ID, compatibility relation and selection/fallback path.
+ 
+@@ -68,3 +68,5 @@ dotnet run --project .checks/UpgradePlannerRegression/UpgradePlannerRegression.c
+ ```
+ 
+ Examples are written only under `.checks/UpgradePlannerRegression/results/slot-*.json`.
++
++The separate `.checks/UpgradeAppTrial` integration check uses the real workspace and isolates its saved/reset draft under an analysis workspace. It verifies full-catalog candidates beyond the old reward pool, all 166 original slots, ownership-limited generation, composite tires, direct rewards, effective model overrides, preview persistence, review-grid binding and unchanged original SSO hashes. With the ownership snapshot tested on 5 November 2026 it resolved 2,585 component IDs, exposed 448 eligible replacements (362 absent from the original reward pool), and generated 60 changed rewards across 68 owned-region slots; five selected reward IDs were new to maps.
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\MainForm.cs" b/src/SnowPakTool.Desktop/MainForm.cs
+index 142142e..7a820f7 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\MainForm.cs"
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -22,6 +22,8 @@ internal sealed class MainForm : Form
+     private readonly TruckRandomizationTab _truckRandomizationTab;
+     private readonly UpgradeRandomizationTab _upgradeRandomizationTab;
+     private readonly MapUpgradesTab _mapUpgradesTab;
++    private UpgradeTrialCatalog? _upgradeTrialCatalog;
++    private string? _upgradeTrialStamp;
+     private StartChangesPanel? _startChanges;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+@@ -66,8 +68,8 @@ internal sealed class MainForm : Form
+             return _ownedContentTab.GetAvailableCustomGroupingTrucks();
+         });
+         _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync, RandomizeMissionsAsync);
+-        _upgradeRandomizationTab = new UpgradeRandomizationTab();
+-        _mapUpgradesTab = new MapUpgradesTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim());
++        _upgradeRandomizationTab = new UpgradeRandomizationTab(RandomizeUpgradesAsync);
++        _mapUpgradesTab = new MapUpgradesTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim(), GetUpgradeTrialCatalogAsync);
+         _truckRandomizationTab.ConfigureMapStaging(_regionsTrucksTab.StageChangesAsync, () =>
+             Directory.Exists(_workspacePath.Text.Trim()) && PendingTruckReplacements.HasUnstagedChanges(_workspacePath.Text.Trim()));
+         _regionsTrucksTab.ChangesStaged += async () =>
+@@ -455,6 +457,42 @@ internal sealed class MainForm : Form
+         await _regionsTrucksTab.RefreshChangesAsync();
+     }
+ 
++    private async Task<UpgradeTrialCatalog> GetUpgradeTrialCatalogAsync(bool force)
++    {
++        var workspace = _workspacePath.Text.Trim();
++        if (!Directory.Exists(workspace)) throw new InvalidOperationException("Choose an extracted workspace on Start first.");
++        if (force) await WorkspaceDataCache.PreloadAsync(workspace, forceReload: true);
++        await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++        _ownedContentTab.EnsureLoaded();
++        var enabled = _ownedContentTab.GetAvailableCustomGroupingTrucks().Select(t => t.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var ownedRegions = WorkspaceDataCache.GetRegionMetadata(workspace).Where(p => p.Value.IsBaseGame || _ownedRegionState.IsOwned(p.Key))
++            .Select(p => p.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var ownedDlc = _ownedContentTab.GetOwnedDlcCodes();
++        var progression = new RegionProgressionStore().Load();
++        var trucks = await _regionsTrucksTab.GetRandomizationCatalogAsync();
++        var stamp = workspace + "|" + WorkspaceDataCache.ContentVersion + "|" + string.Join('|', progression.Order)
++            + string.Join('|', enabled.Order(StringComparer.Ordinal)) + string.Join('|', ownedRegions.Order(StringComparer.Ordinal))
++            + string.Join('|', ownedDlc.Order(StringComparer.Ordinal))
++            + string.Join('|', trucks.Entries.Select(t => t.StablePlacementKey + ":" + t.TruckCode + ":" + t.Availability));
++        if (!force && _upgradeTrialCatalog is not null && _upgradeTrialStamp == stamp) return _upgradeTrialCatalog;
++        var catalog = await Task.Run(() => UpgradeTrialService.Prepare(workspace, trucks, enabled, ownedRegions, ownedDlc, progression.Order));
++        _upgradeTrialCatalog = catalog; _upgradeTrialStamp = stamp;
++        return catalog;
++    }
++
++    private async Task RandomizeUpgradesAsync(IProgress<RandomizationLogEntry> progress)
++    {
++        if (!new RegionProgressionStore().Load().IsFinalized)
++            throw new InvalidOperationException("Finalize Region progression before randomizing upgrades.");
++        var catalog = await GetUpgradeTrialCatalogAsync(false);
++        progress.Report(new("Using current obtainable truck assignments and direct contract rewards; mission-only trucks are excluded."));
++        var trucks = await _regionsTrucksTab.GetRandomizationCatalogAsync();
++        var obtainable = trucks.Entries.Where(t => t.Availability.StartsWith("Obtainable", StringComparison.Ordinal)).ToArray();
++        progress.Report(new($"Current map-truck preview: {obtainable.Length} obtainable placements; {obtainable.Count(t => t.TruckChanged)} differ from the preserved original."));
++        await Task.Run(() => UpgradeTrialService.Generate(catalog, progress));
++        await _mapUpgradesTab.RefreshDraftAsync();
++    }
++
+     private async Task RandomizeMissionsAsync(MissionTruckDifficulty difficulty, IProgress<RandomizationLogEntry> progress)
+     {
+         var workspace = _workspacePath.Text.Trim();
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\MapUpgradesTab.cs" b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+index 7593a41..a288a92 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\MapUpgradesTab.cs"
++++ b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+@@ -2,20 +2,16 @@ using System.Data;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-// Review surface for the upgrade workflow. Placement parsing and editing will be added
+-// with the upgrade plan; never route these controls through truck replacement state.
+ internal sealed class MapUpgradesTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+-    private readonly Func<string> _getPakPath;
+-    private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+-    private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+-    private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+-    private readonly FlowLayoutPanel _regions = new()
+-    {
+-        Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+-        AutoScroll = true, Padding = new Padding(2), Margin = Padding.Empty
+-    };
++    private readonly Func<bool, Task<UpgradeTrialCatalog>>? _getCatalog;
++    private readonly TextBox _source = new() { Dock = DockStyle.Fill, ReadOnly = true };
++    private readonly Button _reload = new() { Text = "Reload upgrades", AutoSize = true };
++    private readonly Button _resetSelected = new() { Text = "Reset selected to original", AutoSize = true };
++    private readonly Button _resetRegions = new() { Text = "Reset selected regions to original", AutoSize = true };
++    private readonly Button _resetAll = new() { Text = "Reset all to original", AutoSize = true };
++    private readonly FlowLayoutPanel _regions = new() { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true, Padding = new Padding(2), Margin = Padding.Empty };
+     private readonly HashSet<string> _selectedRegions = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Dictionary<string, RegionTileButton> _tiles = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 5, 4, 5) };
+@@ -23,168 +19,169 @@ internal sealed class MapUpgradesTab : UserControl
+     private readonly DataGridView _upgrades = new()
+     {
+         Dock = DockStyle.Fill, ReadOnly = true, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+-        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
+-        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
+-        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
+-        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
+-        RowTemplate = { Height = 26 }
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f), RowTemplate = { Height = 26 },
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) }
+     };
+     private readonly ToolTip _tips = new();
+-    private string? _loadedWorkspace;
++    private UpgradeTrialCatalog? _catalog;
++    private UpgradeTrialDraft? _draft;
++    private string? _selectionWorkspace;
+     private bool _loading;
+ 
+-    public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath)
++    public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath,
++        Func<bool, Task<UpgradeTrialCatalog>>? getCatalog = null)
+     {
+-        _getWorkspacePath = getWorkspacePath;
+-        _getPakPath = getPakPath;
++        _getWorkspacePath = getWorkspacePath; _getCatalog = getCatalog;
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
+-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         layout.Controls.Add(_regions, 0, 0);
+-        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4 };
+-        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+-        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+-        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+-        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+-        folderRow.Controls.Add(new Label { Text = "Map folder", AutoSize = true, Padding = new Padding(0, 5, 8, 0) }, 0, 0);
+-        folderRow.Controls.Add(_mapFolder, 1, 0);
+-        folderRow.Controls.Add(_browse, 2, 0);
+-        folderRow.Controls.Add(_reload, 3, 0);
+-        layout.Controls.Add(folderRow, 0, 1);
++        var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3 };
++        sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        sourceRow.Controls.Add(new Label { Text = "Upgrade settings", AutoSize = true, Padding = new Padding(0, 5, 8, 0) }, 0, 0);
++        sourceRow.Controls.Add(_source, 1, 0); sourceRow.Controls.Add(_reload, 2, 0); layout.Controls.Add(sourceRow, 0, 1);
+         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+         var all = new Button { Text = "Select all regions", AutoSize = true };
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+-        actions.Controls.Add(all);
+-        actions.Controls.Add(clear);
+-        foreach (var text in new[] { "Reset selected to original", "Reset selected regions to original", "Reset all to original", "Stage changes" })
+-        {
+-            var button = new Button { Text = text, AutoSize = true, Enabled = false };
+-            button.AccessibleDescription = "Available after upgrade placement reading and editing are implemented.";
+-            _tips.SetToolTip(button, button.AccessibleDescription);
+-            actions.Controls.Add(button);
+-        }
+-        layout.Controls.Add(actions, 0, 2);
++        var stage = new Button { Text = "Stage changes", AutoSize = true, Enabled = false };
++        _tips.SetToolTip(stage, "Preview trial: staging and applying upgrade game files are not enabled.");
++        _tips.SetToolTip(_resetSelected, "Reset every preview matching selected regions and current column filters, regardless of highlighted row.");
++        actions.Controls.AddRange([all, clear, _resetSelected, _resetRegions, _resetAll, stage]); layout.Controls.Add(actions, 0, 2);
+         layout.Controls.Add(_status, 0, 3);
+-        var split = new SplitContainer
+-        {
+-            Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500),
+-            SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6
+-        };
+-        TableHeaderBehavior.Attach(_upgrades);
+-        var table = new DataTable();
+-        foreach (var name in new[] { "Region", "Map", "Upgrade", "Type", "Compatible trucks", "Placement ID", "Upgrade ID", "Change state" })
+-        {
+-            table.Columns.Add(name);
+-            _upgrades.Columns.Add(new DataGridViewTextBoxColumn
+-            {
+-                Name = name, HeaderText = name, DataPropertyName = name,
+-                Width = name switch { "Upgrade" => 210, "Compatible trucks" => 250, _ => 160 },
+-                SortMode = DataGridViewColumnSortMode.Automatic
+-            });
+-        }
+-        _upgrades.DataSource = table;
+-        split.Panel1.Controls.Add(_upgrades);
+-        split.Panel2.Controls.Add(_details);
+-        layout.Controls.Add(split, 0, 4);
+-        Controls.Add(layout);
+-        _status.Text = "Choose an extracted workspace on Start. Upgrade placement reading and editing are not implemented yet.";
+-        _details.Text = "Upgrade placements and original/current comparisons will appear here when upgrade map support is implemented.";
+-        all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshSelection(); };
+-        clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshSelection(); };
+-        _reload.Click += async (_, _) => await LoadAsync(force: true);
+-        _browse.Click += async (_, _) =>
+-        {
+-            using var dialog = new FolderBrowserDialog { Description = "Choose the folder containing level_*.pak archives or extracted map folders." };
+-            if (Directory.Exists(_mapFolder.Text)) dialog.SelectedPath = _mapFolder.Text;
+-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+-            _mapFolder.Text = dialog.SelectedPath;
+-            await LoadAsync(force: true);
+-        };
++        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500), SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6 };
++        var headers = TableHeaderBehavior.Attach(_upgrades); headers.Changed += () => { UpdateButtons(); ShowDetails(); };
++        foreach (var name in new[] { "Region", "Map", "Original upgrade", "Upgrade", "Type", "Compatible truck IDs", "Placement ID", "Upgrade ID", "Change state" })
++            _upgrades.Columns.Add(new DataGridViewTextBoxColumn { Name = name, HeaderText = name, DataPropertyName = name,
++                Width = name is "Upgrade" or "Original upgrade" ? 200 : name is "Compatible truck IDs" or "Placement ID" or "Upgrade ID" ? 260 : 145,
++                SortMode = DataGridViewColumnSortMode.Automatic });
++        split.Panel1.Controls.Add(_upgrades); split.Panel2.Controls.Add(_details); layout.Controls.Add(split, 0, 4); Controls.Add(layout);
++        _status.Text = "Open this tab to read upgrade pickups from the original level settings. Preview only; game files stay unchanged.";
++        all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RenderRows(); };
++        clear.Click += (_, _) => { _selectedRegions.Clear(); RenderRows(); };
++        _reload.Click += async (_, _) => await LoadAsync(true);
++        _resetSelected.Click += (_, _) => Reset(VisibleSlots());
++        _resetRegions.Click += (_, _) => Reset(_catalog?.AllSlots.Where(s => _selectedRegions.Contains(s.Region)) ?? []);
++        _resetAll.Click += (_, _) => Reset(_catalog?.AllSlots ?? []);
++        _upgrades.CurrentCellChanged += (_, _) => ShowDetails();
+         AppColors.Changed += PaletteChanged;
+         Disposed += (_, _) => { AppColors.Changed -= PaletteChanged; _tips.Dispose(); };
+-        TextAreaStyle.Mark(_details);
++        TextAreaStyle.Mark(_details); UpdateButtons();
+     }
+ 
+-    public Task EnsureLoadedAsync() => LoadAsync(force: false);
++    public Task EnsureLoadedAsync() => LoadAsync(false);
++    public Task RefreshDraftAsync() => LoadAsync(false);
+ 
+     private async Task LoadAsync(bool force)
+     {
+-        if (_loading) return;
++        if (_loading || _getCatalog is null) return;
+         var workspace = _getWorkspacePath().Trim();
+-        if (_mapFolder.Text.Length == 0) _mapFolder.Text = RegionTruckCatalogService.FindMapDirectory(_getPakPath());
+-        if (!force && workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase)) return;
+-        var sameWorkspace = workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase);
+-        ClearRegions();
+-        if (!sameWorkspace) _selectedRegions.Clear();
+         if (!Directory.Exists(workspace))
+         {
+-            _status.Text = "Choose an extracted workspace on Start. Upgrade placement reading and editing are not implemented yet.";
+-            return;
++            _catalog = null; _draft = null; _upgrades.DataSource = null;
++            ClearTiles(); _details.Clear(); _status.Text = "Choose an extracted workspace on Start."; UpdateButtons(); return;
+         }
+-        _loading = true;
+-        _browse.Enabled = _reload.Enabled = false;
+-        _mapFolder.ReadOnly = true;
+-        _status.Text = "Loading workspace regions…";
++        _loading = true; _reload.Enabled = false; UpdateButtons();
++        _status.Text = "Reading original pickup settings, upgrade compatibility and the current truck preview…";
+         try
+         {
+-            await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++            var catalog = await _getCatalog(force);
+             if (IsDisposed || !workspace.Equals(_getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
+-            var regions = WorkspaceDataCache.GetRegionMetadata(workspace);
+-            foreach (var pair in regions.OrderBy(pair => RegionTileAssets.GetReleaseOrder(pair.Key))
+-                         .ThenBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+-            {
+-                var code = pair.Key;
+-                var tile = new RegionTileButton
+-                {
+-                    Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
+-                    RegionName = pair.Value.Name, ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(),
+-                    Summary = "Upgrades not loaded", Thumbnail = RegionTileAssets.GetThumbnail(code), Text = pair.Value.Name,
+-                    Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+-                    TextAlign = ContentAlignment.MiddleCenter, UseVisualStyleBackColor = false,
+-                    AccessibleName = pair.Value.Name, Tag = code
+-                };
+-                tile.Click += (_, _) => { if (!_selectedRegions.Add(code)) _selectedRegions.Remove(code); RefreshSelection(); };
+-                _tiles.Add(code, tile);
+-                _regions.Controls.Add(tile);
+-            }
+-            _selectedRegions.IntersectWith(_tiles.Keys);
+-            _loadedWorkspace = workspace;
+-            RefreshSelection();
++            _catalog = catalog; _draft = UpgradeTrialStore.Load(workspace);
++            _source.Text = Path.Combine(WorkspaceOriginals.GetOriginalRoot(workspace), "[ps]");
++            if (!workspace.Equals(_selectionWorkspace, StringComparison.OrdinalIgnoreCase))
++            { _selectedRegions.Clear(); _selectedRegions.UnionWith(catalog.AllSlots.Select(s => s.Region)); _selectionWorkspace = workspace; }
++            BuildTiles(); RenderRows();
+         }
+-        catch (Exception ex) { if (!IsDisposed) _status.Text = "Could not load upgrade regions: " + ex.Message; }
+-        finally
++        catch (Exception ex) { if (!IsDisposed) { _catalog = null; _draft = null; _upgrades.DataSource = null; ClearTiles(); _details.Clear(); _status.Text = "Could not load upgrades: " + ex.Message; } }
++        finally { _loading = false; if (!IsDisposed) { _reload.Enabled = true; UpdateButtons(); } }
++    }
++
++    private void ClearTiles() { foreach (var tile in _tiles.Values) tile.Dispose(); _tiles.Clear(); _regions.Controls.Clear(); }
++    private void BuildTiles()
++    {
++        ClearTiles(); if (_catalog is null) return;
++        var names = WorkspaceDataCache.GetRegionMetadata(_catalog.Workspace);
++        foreach (var group in _catalog.AllSlots.GroupBy(s => s.Region).OrderBy(g => RegionTileAssets.GetReleaseOrder(g.Key)))
+         {
+-            _loading = false;
+-            if (!IsDisposed) { _browse.Enabled = _reload.Enabled = true; _mapFolder.ReadOnly = false; }
++            var code = group.Key; var name = names.TryGetValue(code, out var region) ? region.Name : code;
++            var changes = _draft?.Assignments.Count(a => a.Slot.Region.Equals(code, StringComparison.OrdinalIgnoreCase) && a.UpgradeId != a.Slot.OriginalUpgradeId) ?? 0;
++            var tile = new RegionTileButton { Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
++                RegionName = name, ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(), Summary = $"{group.Count()} pickups\n{changes} draft changes",
++                Thumbnail = RegionTileAssets.GetThumbnail(code), Text = name, Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
++                UseVisualStyleBackColor = false, AccessibleName = name, Tag = code };
++            tile.Click += (_, _) => { if (!_selectedRegions.Add(code)) _selectedRegions.Remove(code); RenderRows(); };
++            _tiles.Add(code, tile); _regions.Controls.Add(tile);
+         }
+     }
+ 
+-    private void ClearRegions()
++    private void RenderRows()
+     {
+-        foreach (var tile in _tiles.Values) tile.Dispose();
+-        _tiles.Clear();
+-        _regions.Controls.Clear();
+-        _loadedWorkspace = null;
++        RefreshTiles(); if (_catalog is null) return;
++        var draft = _draft?.Assignments.ToDictionary(a => UpgradeTrialService.Key(a.Slot), StringComparer.OrdinalIgnoreCase) ?? new();
++        var regions = WorkspaceDataCache.GetRegionMetadata(_catalog.Workspace);
++        var table = new DataTable();
++        foreach (DataGridViewColumn column in _upgrades.Columns) table.Columns.Add(column.Name);
++        table.Columns.Add("Slot", typeof(UpgradeDistributionSlot));
++        foreach (var slot in _catalog.AllSlots.Where(s => _selectedRegions.Contains(s.Region)))
++        {
++            draft.TryGetValue(UpgradeTrialService.Key(slot), out var assignment);
++            var id = assignment?.UpgradeId ?? slot.OriginalUpgradeId;
++            _catalog.Parts.TryGetValue(id, out var part); _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
++            var state = assignment is null ? "Original" : assignment.Path == UpgradeSelectionPath.Fixed ? "Fixed"
++                : id == slot.OriginalUpgradeId ? "Unchanged" : _draft?.InputStamp == _catalog.Stamp ? "Draft" : "Draft (inputs changed)";
++            table.Rows.Add(regions.TryGetValue(slot.Region, out var region) ? region.Name : slot.Region, slot.Map, original?.Name ?? slot.OriginalUpgradeId,
++                part?.Name ?? id, part?.Definition.Kind.ToString() ?? "Unresolved", string.Join(", ", part?.Definition.CompatibleTrucks ?? []), slot.Zone, id, state, slot);
++        }
++        _upgrades.DataSource = table;
++        foreach (DataGridViewRow row in _upgrades.Rows)
++            if (row.DataBoundItem is DataRowView data && Convert.ToString(data["Change state"])?.StartsWith("Draft", StringComparison.Ordinal) == true)
++                row.DefaultCellStyle.BackColor = Color.FromArgb(255, 242, 204);
++        _status.Text = $"{table.Rows.Count} pickups in {_selectedRegions.Count} selected regions ({_catalog.Input.Slots.Count} in owned regions) · {_draft?.Assignments.Count(a => a.UpgradeId != a.Slot.OriginalUpgradeId) ?? 0} draft changes"
++            + (_draft is null ? "" : $" · seed {_draft.Seed}") + ". Preview only; Stage/Apply are disabled.";
++        if (_draft is not null && _draft.InputStamp != _catalog.Stamp) _status.Text += " Inputs changed; randomize again to refresh the preview.";
++        UpdateButtons(); ShowDetails();
+     }
+ 
+-    private void PaletteChanged(object? sender, EventArgs e) => RefreshSelection();
+-
+-    private void RefreshSelection()
++    private IEnumerable<UpgradeDistributionSlot> VisibleSlots() => _upgrades.Rows.Cast<DataGridViewRow>().Where(r => r.Visible)
++        .Select(r => (r.DataBoundItem as DataRowView)?["Slot"]).OfType<UpgradeDistributionSlot>();
++    private void Reset(IEnumerable<UpgradeDistributionSlot> slots)
++    {
++        if (_catalog is null || _loading) return;
++        try { UpgradeTrialStore.Reset(_catalog.Workspace, slots.ToArray()); _draft = UpgradeTrialStore.Load(_catalog.Workspace); BuildTiles(); RenderRows(); }
++        catch (Exception ex) { _status.Text = "Could not reset upgrade preview: " + ex.Message; }
++    }
++    private void UpdateButtons()
++    {
++        var keys = _draft?.Assignments.Select(a => UpgradeTrialService.Key(a.Slot)).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
++        _resetSelected.Enabled = !_loading && VisibleSlots().Any(s => keys.Contains(UpgradeTrialService.Key(s)));
++        _resetRegions.Enabled = !_loading && _catalog?.AllSlots.Any(s => _selectedRegions.Contains(s.Region) && keys.Contains(UpgradeTrialService.Key(s))) == true;
++        _resetAll.Enabled = !_loading && keys.Count > 0;
++    }
++    private void ShowDetails()
++    {
++        _details.Clear();
++        if (_catalog is null || _upgrades.CurrentRow?.DataBoundItem is not DataRowView row || row["Slot"] is not UpgradeDistributionSlot slot) return;
++        var assignment = _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot).Equals(UpgradeTrialService.Key(slot), StringComparison.OrdinalIgnoreCase));
++        var id = assignment?.UpgradeId ?? slot.OriginalUpgradeId;
++        _catalog.Parts.TryGetValue(id, out var part);
++        _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nPreview ID: {id}\r\nDefinition: {part?.Source}\r\nCompatible trucks: {string.Join(", ", part?.Definition.CompatibleTrucks ?? [])}"
++            + (assignment is null ? "" : $"\r\nSelection: {assignment.Path}; {assignment.Relation}; fallback={assignment.Fallback}; reused={assignment.Reused}")
++            + "\r\nPreview only. No game files have been changed."
++            + (_catalog.Warnings.Count == 0 ? "" : "\r\nSource warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
++    }
++    private void PaletteChanged(object? sender, EventArgs e) => RefreshTiles();
++    private void RefreshTiles()
+     {
+         foreach (var (code, tile) in _tiles)
+         {
+             var selected = _selectedRegions.Contains(code);
+             tile.BackColor = selected ? AppColors.Get("SelectionBlue") : Color.FromArgb(32, 38, 45);
+-            tile.ForeColor = tile.BackColor.GetBrightness() < 0.55f ? Color.White : Color.Black;
++            tile.ForeColor = tile.BackColor.GetBrightness() < .55f ? Color.White : Color.Black;
+             tile.FlatAppearance.BorderSize = selected ? 3 : 1;
+             tile.FlatAppearance.BorderColor = selected ? SystemColors.Highlight : Color.FromArgb(70, 80, 90);
+-            tile.AccessibleDescription = selected ? "Selected region. Activate to deselect." : "Activate to select this region.";
+         }
+-        if (_loadedWorkspace is not null)
+-            _status.Text = $"{_selectedRegions.Count} of {_tiles.Count} workspace regions selected. Upgrade placement reading and editing are not implemented yet.";
+     }
+ }
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\OwnedContentTab.cs" b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index 280f0bc..a61b4fd 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\OwnedContentTab.cs"
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -472,6 +472,9 @@ internal sealed class OwnedContentTab : UserControl
+ 
+     public IReadOnlyList<OwnedTruck> GetOwnedTrucks() => TruckCatalogService.GetOwned(GetTruckCatalogEntries());
+ 
++    public IReadOnlySet<string> GetOwnedDlcCodes() => ((PreparedWorkspaceData)WorkspaceDataCache.GetOwnedData(_getWorkspacePath().Trim()))
++        .DlcEntries.Where(entry => IsDlcOwned(entry.Code, entry.Name)).Select(entry => entry.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++
+     public IReadOnlyList<CustomTruck> GetAvailableCustomGroupingTrucks() =>
+         TruckCatalogService.GetAvailableForGrouping(GetTruckCatalogEntries());
+ 
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\UpgradeRandomizationRuleStore.cs" b/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+index e8c97e8..9f53510 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\UpgradeRandomizationRuleStore.cs"
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+@@ -4,7 +4,15 @@ namespace SnowPakTool.Desktop;
+ 
+ internal sealed class UpgradeRandomizationRules
+ {
+-    public List<string> Rules { get; set; } = [];
++    public List<string> Rules { get; set; } =
++    [
++        "Keep every pickup's original upgrade type. Keep metal detectors at their original locations.",
++        "For truck-specific slots, prefer unused upgrades compatible with currently obtainable trucks in that region, including direct garage rewards.",
++        "For shared slots, choose from all eligible shared upgrades of the same type. There is no purchase-only restriction and no locality percentage roll.",
++        "Try unused shared and other same-type upgrades before reusing a compatible choice. Stock/default parts, unavailable content and objective-locked replacement parts are excluded.",
++        "In the first progression region, shared slots get an extra preference for upgrades with no compatible obtainable truck in that region.",
++        "Randomize owned regions using enabled content. Review the saved preview in Map upgrades; game-file staging and applying are disabled for this trial."
++    ];
+ }
+ 
+ internal sealed class UpgradeRandomizationRuleStore
+diff --git "a/.checks\\UpgradeAppTrialBaseline\\UpgradeRandomizationTab.cs" b/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+index dad8849..d5bbf37 100644
+--- "a/.checks\\UpgradeAppTrialBaseline\\UpgradeRandomizationTab.cs"
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+@@ -18,6 +18,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 8) };
+ 
+     public UpgradeRandomizationTab() : this(null, new UpgradeRandomizationRuleStore()) { }
++    public UpgradeRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task> run) : this(run, new UpgradeRandomizationRuleStore()) { }
+ 
+     internal UpgradeRandomizationTab(Func<IProgress<RandomizationLogEntry>, Task>? run,
+         UpgradeRandomizationRuleStore store)
+@@ -25,8 +26,8 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         _store = store;
+         _run = run;
+         _randomize.Enabled = run is not null;
+-        _actionTips.SetToolTip(_randomize, "Available after upgrade randomization is implemented.");
+-        _actionTips.SetToolTip(_stageChanges, "Available when upgrade map drafts can be staged.");
++        _actionTips.SetToolTip(_randomize, "Generate and save an upgrade preview from the current obtainable truck assignments.");
++        _actionTips.SetToolTip(_stageChanges, "Preview trial: staging and applying upgrade game files are not enabled.");
+         _randomize.Click += async (_, _) => await RandomizeAsync();
+         _showDetails.CheckedChanged += (_, _) => RenderMessages();
+         VisibleChanged += (_, _) => RefreshStagingState();
+@@ -49,7 +50,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         panes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         panes.Controls.Add(CreatePane("Upgrades", _rules.Rules, Padding.Empty), 0, 0);
+-        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Upgrade randomization and map staging are not implemented yet.";
++        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Trial saves a preview only; upgrade Stage/Apply is unavailable.";
+         root.Controls.Add(panes, 0, 0);
+         root.Controls.Add(_status, 0, 1);
+         Controls.Add(root);
+@@ -143,7 +144,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+         actions.Controls.Add(_showDetails);
+         actions.Controls.Add(new Label
+         {
+-            Text = "Review/reset in Randomizer → Map upgrades; stage here or there, then apply from Start.",
++            Text = "Review/reset the saved preview in Randomizer → Map upgrades. This trial does not write game files.",
+             AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(600, 0)
+         });
+         layout.Controls.Add(actions, 0, 2);
+@@ -221,7 +222,7 @@ internal sealed class UpgradeRandomizationTab : UserControl
+             {
+                 if (!_messages.IsDisposed) AddMessage(message);
+             }));
+-            AddMessage(new("Finished. Review the draft, stage changes here or in Map upgrades, then apply from Start."));
++            AddMessage(new("Finished. Review the saved preview in Map upgrades. Upgrade staging/applying is disabled in this trial."));
+         }
+         catch (InvalidOperationException ex) { AddMessage(new("Error: " + ex.Message)); }
+         catch (Exception) { AddMessage(new("Error: could not read or save the upgrade plan. Check the workspace and reload map data.")); }
+diff --git a/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs b/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs
+new file mode 100644
+index 0000000..b86a736
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs
+@@ -0,0 +1,116 @@
++using System.Globalization;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record UpgradeTrialPart(UpgradeDistributionDefinition Definition, string Name, string Source);
++
++internal sealed partial class TruckEquipmentCatalog
++{
++    public IReadOnlyList<string> UpgradeCatalogWarnings() { lock (_gate) return _warnings.Distinct().ToArray(); }
++    private sealed class UpgradeBuilder(string id, UpgradeKind kind, string name, string source, bool allowed)
++    {
++        public readonly string Id = id, Name = name, Source = source;
++        public readonly UpgradeKind Kind = kind;
++        public bool Allowed = allowed;
++        public readonly HashSet<string> Trucks = new(StringComparer.OrdinalIgnoreCase);
++        public readonly HashSet<string> Defaults = new(StringComparer.OrdinalIgnoreCase);
++    }
++
++    public IReadOnlyDictionary<string, UpgradeTrialPart> BuildUpgradeSelectionCatalog(
++        IReadOnlySet<string> enabledTrucks, IReadOnlySet<string> ownedDlc, IReadOnlySet<string> originalRewardIds)
++    {
++        lock (_gate)
++        {
++            var parts = new Dictionary<string, UpgradeBuilder>(StringComparer.OrdinalIgnoreCase);
++            var tireLicenses = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
++            var library = WorkspaceOriginals.GetCurrentPath(_workspace, Path.Combine("[ps]", "dlc_library.sso"));
++            if (File.Exists(library))
++            {
++                var root = SsoDataReader.Parse(WorkspaceDataCache.ReadAllText(library));
++                if (root.Members.TryGetValue("dlcInfos", out var infos))
++                    foreach (var (code, info) in infos.Members)
++                        if (info.Members.TryGetValue("tires", out var tires))
++                            foreach (var tire in tires.Items)
++                            {
++                                if (!tireLicenses.TryGetValue(tire.Text, out var licenses)) tireLicenses[tire.Text] = licenses = new(StringComparer.OrdinalIgnoreCase);
++                                licenses.Add(code);
++                            }
++            }
++            bool Allowed(XElement? game) => game is not null
++                && !string.Equals((string?)game.Attribute("LockedUnconditionally"), "true", StringComparison.OrdinalIgnoreCase)
++                && string.IsNullOrEmpty((string?)game.Attribute("UnlockByObjective"))
++                && !string.Equals((string?)game.Attribute("AddonUnlockByObjective"), "true", StringComparison.OrdinalIgnoreCase)
++                && decimal.TryParse((string?)game.Attribute("Price"), NumberStyles.Float, CultureInfo.InvariantCulture, out var price) && price > 0;
++            void Add(string id, UpgradeKind kind, string truck, Definition definition, XElement element, bool isDefault, bool licensed = true)
++            {
++                var game = element.Element("GameData");
++                var key = (string?)game?.Element("UiDesc")?.Attribute("UiName") ?? id;
++                if (!parts.TryGetValue(id, out var part))
++                    parts[id] = part = new(id, kind, _names.GetValueOrDefault(key, key), WorkspaceOriginals.GetRelativePath(_workspace, definition.Path), Allowed(game) && licensed);
++                if (part.Kind != kind) throw new InvalidDataException($"Upgrade ID '{id}' is ambiguous across component types.");
++                part.Allowed &= Allowed(game) && licensed;
++                part.Trucks.Add(truck);
++                if (isDefault) part.Defaults.Add(truck);
++            }
++            var trucks = _files.Where(pair => string.Equals(Path.GetFileName(Path.GetDirectoryName(pair.Value)), "trucks", StringComparison.OrdinalIgnoreCase))
++                .Where(pair => FileChain(pair.Key).Any(d => d.Xml.Name.LocalName == "Truck")).Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray();
++            foreach (var truck in trucks)
++            {
++                var chain = FileChain(truck).ToArray();
++                foreach (var (socket, elementName, kind) in new[] { ("EngineSocket", "Engine", UpgradeKind.Engine),
++                             ("GearboxSocket", "Gearbox", UpgradeKind.Gearbox), ("SuspensionSocket", "SuspensionSet", UpgradeKind.Suspension) })
++                {
++                    var sockets = chain.Select(d => d.Xml.Element("TruckData")?.Element(socket)).Where(e => e is not null).ToArray();
++                    var type = sockets.Select(e => (string?)e!.Attribute("Type")).FirstOrDefault(v => v is not null);
++                    var defaultId = sockets.Select(e => (string?)e!.Attribute("Default")).FirstOrDefault(v => v is not null);
++                    foreach (var family in Split(type))
++                    {
++                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++                        foreach (var definition in FileChain(family))
++                            foreach (var element in definition.Xml.Elements(elementName))
++                                if ((string?)element.Attribute("Name") is { Length: > 0 } id && seen.Add(id))
++                                    Add(id, kind, truck, definition, element, id.Equals(defaultId, StringComparison.OrdinalIgnoreCase));
++                    }
++                }
++                var defaultFamily = DefaultWheel(chain, "DefaultWheelType");
++                var defaultTire = DefaultWheel(chain, "DefaultTire");
++                foreach (var wheel in chain.SelectMany(d => d.Xml.Element("TruckData")?.Elements("CompatibleWheels") ?? []))
++                {
++                    var family = (string?)wheel.Attribute("Type") ?? "";
++                    if (!decimal.TryParse((string?)wheel.Attribute("Scale"), NumberStyles.Float, CultureInfo.InvariantCulture, out var scale) || scale <= 0) continue;
++                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++                    foreach (var definition in FileChain(family))
++                        foreach (var element in definition.Xml.Element("TruckTires")?.Elements("TruckTire") ?? [])
++                            if ((string?)element.Attribute("Name") is { Length: > 0 } name && seen.Add(name))
++                            {
++                                var id = family + "_" + name + "_" + scale.ToString("G29", CultureInfo.InvariantCulture);
++                                var licensed = !tireLicenses.TryGetValue(name, out var licenses) || licenses.Any(ownedDlc.Contains);
++                                Add(id, UpgradeKind.Tire, truck, definition, element,
++                                    family.Equals(defaultFamily, StringComparison.OrdinalIgnoreCase) && name.Equals(defaultTire, StringComparison.OrdinalIgnoreCase), licensed);
++                            }
++                }
++            }
++            foreach (var (id, _) in _files.OrderBy(p => p.Key, StringComparer.Ordinal))
++            {
++                var chain = FileChain(id).ToArray();
++                if (chain.FirstOrDefault()?.Xml.Name.LocalName != "TruckAddon") continue;
++                var game = chain.Select(d => d.Xml.Element("GameData")).FirstOrDefault(g => g is not null);
++                var category = (string?)game?.Attribute("Category");
++                var kind = id.Equals("frame_addon_metal_detector", StringComparison.OrdinalIgnoreCase) ? UpgradeKind.MetalDetector
++                    : category == "awd" ? UpgradeKind.Awd : category == "diff_lock" ? UpgradeKind.DifferentialLock : (UpgradeKind?)null;
++                if (kind is null) continue;
++                foreach (var truck in trucks)
++                {
++                    if (!CanInstallAddons(truck, [id])) continue;
++                    Add(id, kind.Value, truck, chain[0], chain[0].Xml, DefaultAddons(FileChain(truck).ToArray()).Contains(id, StringComparer.OrdinalIgnoreCase));
++                }
++            }
++            return parts.Values.ToDictionary(p => p.Id, p => new UpgradeTrialPart(
++                new(p.Id, p.Kind, p.Trucks.Order(StringComparer.Ordinal).ToArray(),
++                    KeepInPlace: p.Kind == UpgradeKind.MetalDetector,
++                    Eligible: p.Allowed && p.Trucks.Any(enabledTrucks.Contains)
++                        && (p.Defaults.Count == 0 || originalRewardIds.Contains(p.Id))), p.Name, p.Source), StringComparer.OrdinalIgnoreCase);
++        }
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/UpgradeTrialService.cs b/src/SnowPakTool.Desktop/UpgradeTrialService.cs
+new file mode 100644
+index 0000000..7f485f4
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/UpgradeTrialService.cs
+@@ -0,0 +1,138 @@
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record UpgradeTrialCatalog(string Workspace, UpgradeDistributionInput Input,
++    IReadOnlyList<UpgradeDistributionSlot> AllSlots, IReadOnlyDictionary<string, UpgradeTrialPart> Parts,
++    string Stamp, IReadOnlyList<string> Warnings);
++internal sealed record UpgradeTrialDraft(int Seed, DateTimeOffset CreatedAt, string InputStamp,
++    IReadOnlyList<UpgradeDistributionAssignment> Assignments, UpgradeDistributionReport? Report);
++
++internal static class UpgradeTrialService
++{
++    private static readonly StringComparer Codes = StringComparer.OrdinalIgnoreCase;
++    public static string Region(string map) => Regex.Match(map, @"^level_((?:us|ru)_\d{2})_", RegexOptions.IgnoreCase).Groups[1].Value.ToLowerInvariant();
++    public static string Key(UpgradeDistributionSlot slot) => string.Join('|', slot.Source.Replace('\\', '/'), slot.Map, slot.Zone, slot.RewardIndex);
++
++    public static UpgradeTrialCatalog Prepare(string workspace, RegionTruckCatalog trucks, IReadOnlySet<string> enabled,
++        IReadOnlySet<string> ownedRegions, IReadOnlySet<string> ownedDlc, IReadOnlyList<string> progression)
++    {
++        var slots = new List<UpgradeDistributionSlot>();
++        var warnings = new List<string>();
++        var sourceHashes = new List<string>();
++        var originals = Path.Combine(WorkspaceOriginals.GetOriginalRoot(workspace), "[ps]");
++        if (!Directory.Exists(originals)) throw new InvalidOperationException("Original level settings are unavailable in this workspace.");
++        foreach (var path in Directory.EnumerateFiles(originals, "level_*.sso", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
++        {
++            var map = Path.GetFileNameWithoutExtension(path); var region = Region(map);
++            if (region.Length == 0) continue;
++            var bytes = File.ReadAllBytes(path);
++            sourceHashes.Add(map + ":" + Convert.ToHexString(SHA256.HashData(bytes)));
++            var root = SsoDataReader.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'));
++            if (!root.Members.TryGetValue("zoneDesc", out var zones)) continue;
++            foreach (var (zone, settings) in zones.Members)
++                if (settings.Members.TryGetValue("props", out var props)
++                    && props.Members.TryGetValue("ZonePropertyUpgradesGiver", out var giver)
++                    && giver.Members.TryGetValue("upgrades", out var upgrades))
++                    for (var index = 0; index < upgrades.Items.Count; index++)
++                    {
++                        var id = upgrades.Items[index].Text;
++                        if (string.IsNullOrWhiteSpace(id)) throw new InvalidDataException($"{map}/{zone}: unreadable original upgrade ID.");
++                        slots.Add(new(Path.GetRelativePath(WorkspaceOriginals.GetOriginalRoot(workspace), path), map, region, zone, index, id));
++                    }
++        }
++        if (slots.Count == 0) throw new InvalidOperationException("No upgrade pickups were found in the original level settings.");
++        var equipment = trucks.EquipmentCatalog ?? throw new InvalidOperationException("Reload Map trucks to read vehicle compatibility.");
++        var parts = equipment.BuildUpgradeSelectionCatalog(enabled, ownedDlc, slots.Select(s => s.OriginalUpgradeId).ToHashSet(Codes));
++        warnings.AddRange(equipment.UpgradeCatalogWarnings());
++        var homes = trucks.Entries.Where(t => t.Availability.StartsWith("Obtainable", StringComparison.Ordinal) && enabled.Contains(t.TruckCode))
++            .Select(t => new UpgradeTruckHome(t.TruckCode, t.RegionCode)).ToList();
++        // Direct garage rewards have no physical map placement to find in scenes.
++        foreach (var path in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[ps]", "*.sso"))
++        {
++            var text = WorkspaceDataCache.ReadAllText(path);
++            if (!text.Contains("ObjectiveRewardItem", StringComparison.Ordinal)) continue;
++            var root = SsoDataReader.Parse(text);
++            foreach (var task in root.DescendantsAndSelf().Where(n => n.Get("__type") is "TaskSettings" or "ContractSettings" or "ContestSettings"))
++            {
++                var region = task.Get("region");
++                if (region.Length == 0) region = Region("level_" + Path.GetFileNameWithoutExtension(path));
++                if (region.Length == 0 || !task.Members.TryGetValue("rewards", out var rewards)) continue;
++                foreach (var item in rewards.DescendantsAndSelf().Where(n => n.Key == "ObjectiveRewardItem"))
++                    if (enabled.Contains(item.Get("itemName"))) homes.Add(new(item.Get("itemName"), region));
++            }
++        }
++        var selected = slots.Where(s => ownedRegions.Contains(s.Region)).ToArray();
++        var unknown = selected.Where(s => !parts.ContainsKey(s.OriginalUpgradeId)).Select(s => s.OriginalUpgradeId).Distinct().ToArray();
++        if (unknown.Length > 0) throw new InvalidOperationException("Unresolved original upgrade IDs: " + string.Join(", ", unknown));
++        var order = progression.Concat(selected.Select(s => s.Region).Order(StringComparer.Ordinal)).Distinct(Codes).ToArray();
++        var normalizedHomes = homes.DistinctBy(h => h.Truck + "|" + h.Region, Codes).OrderBy(h => h.Truck, StringComparer.Ordinal).ThenBy(h => h.Region, StringComparer.Ordinal).ToArray();
++        var input = new UpgradeDistributionInput(selected, parts.Values.Select(p => p.Definition).ToArray(), normalizedHomes, order);
++        var stampText = string.Join('\n', sourceHashes) + string.Join('\n', normalizedHomes.Select(h => h.Truck + "|" + h.Region))
++            + string.Join('\n', input.Definitions.OrderBy(d => d.Id, StringComparer.Ordinal).Select(d => d.Id + "|" + d.Kind + "|" + d.Eligible + "|" + string.Join(',', d.CompatibleTrucks)))
++            + string.Join('|', order) + string.Join('|', selected.Select(Key));
++        var stamp = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(stampText)));
++        return new(workspace, input, slots, parts, stamp, warnings.Distinct().ToArray());
++    }
++
++    public static UpgradeTrialDraft Generate(UpgradeTrialCatalog catalog, IProgress<RandomizationLogEntry> progress, int? seed = null)
++    {
++        if (catalog.Input.Slots.Count == 0) throw new InvalidOperationException("No upgrade pickups belong to owned regions.");
++        progress.Report(new($"Reading {catalog.Parts.Count} resolved upgrade definitions; {catalog.Input.Definitions.Count(d => d.Eligible && !d.KeepInPlace)} eligible replacement IDs."));
++        var plan = UpgradeDistributionPlanner.Generate(catalog.Input, seed ?? Random.Shared.Next());
++        foreach (var group in plan.Assignments.GroupBy(a => a.Slot.Region))
++        {
++            progress.Report(new($"{group.Key.ToUpperInvariant()}: {group.Count()} pickups planned · {group.Count(a => a.Fallback)} fallbacks · {group.Count(a => a.Reused)} reused choices."));
++            progress.Report(new($"{group.Key.ToUpperInvariant()}: {group.Count(a => a.Path == UpgradeSelectionPath.LocalTruck)} local-compatible primary choices; {group.Count(a => a.Path == UpgradeSelectionPath.Fixed)} fixed pickups.", true));
++        }
++        foreach (var note in plan.Report.Notes) progress.Report(new(note, true));
++        if (catalog.Warnings.Count > 0) progress.Report(new($"{catalog.Warnings.Count} source-read warnings were retained in Map upgrades details.", true));
++        var keys = catalog.Input.Slots.Select(Key).ToHashSet(Codes);
++        var retained = UpgradeTrialStore.Load(catalog.Workspace)?.Assignments.Where(a => !keys.Contains(Key(a.Slot))) ?? [];
++        var draft = new UpgradeTrialDraft(plan.Seed, DateTimeOffset.UtcNow, catalog.Stamp, retained.Concat(plan.Assignments).ToArray(), plan.Report);
++        UpgradeTrialStore.Save(catalog.Workspace, draft);
++        progress.Report(new($"Seed {plan.Seed}. Preview saved: {plan.Assignments.Count(a => !Codes.Equals(a.UpgradeId, a.Slot.OriginalUpgradeId))} changed rewards. No game files were written."));
++        return draft;
++    }
++}
++
++internal static class UpgradeTrialStore
++{
++    private static readonly object Gate = new();
++    private static string PathFor(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "upgrade-randomization", "draft.json");
++    public static UpgradeTrialDraft? Load(string workspace)
++    {
++        lock (Gate)
++        {
++            var path = PathFor(workspace);
++            if (!File.Exists(path)) return null;
++            var draft = JsonSerializer.Deserialize<UpgradeTrialDraft>(File.ReadAllText(path));
++            if (draft?.Assignments is null || draft.Assignments.Any(a => a?.Slot is null || string.IsNullOrWhiteSpace(a.UpgradeId))
++                || draft.Assignments.Select(a => UpgradeTrialService.Key(a.Slot)).Distinct(StringComparer.OrdinalIgnoreCase).Count() != draft.Assignments.Count)
++                throw new InvalidDataException("The saved upgrade preview is invalid; it was not overwritten.");
++            return draft;
++        }
++    }
++    public static void Save(string workspace, UpgradeTrialDraft draft)
++    {
++        lock (Gate)
++        {
++            var path = PathFor(workspace); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++            var temporary = path + ".tmp";
++            File.WriteAllText(temporary, JsonSerializer.Serialize(draft, new JsonSerializerOptions { WriteIndented = true }));
++            File.Move(temporary, path, overwrite: true);
++        }
++    }
++    public static void Reset(string workspace, IEnumerable<UpgradeDistributionSlot> slots)
++    {
++        lock (Gate)
++        {
++            var draft = Load(workspace); if (draft is null) return;
++            var keys = slots.Select(UpgradeTrialService.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            Save(workspace, draft with { Assignments = draft.Assignments.Where(a => !keys.Contains(UpgradeTrialService.Key(a.Slot))).ToArray(), Report = null });
++        }
++    }
++}
+diff --git a/.checks/UpgradeAppTrial/Program.cs b/.checks/UpgradeAppTrial/Program.cs
+new file mode 100644
+index 0000000..5768716
+--- /dev/null
++++ b/.checks/UpgradeAppTrial/Program.cs
+@@ -0,0 +1,99 @@
++using System.Collections;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++static class Program
++{
++    static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    static object? Prepared;
++    static Type T(string n) => App.GetType("SnowPakTool.Desktop." + n)!;
++    static object P(object o,string n) => o.GetType().GetProperty(n)!.GetValue(o)!;
++    static object F(object o,string n) => o.GetType().GetField(n,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(o)!;
++    static object? Call(object o,string n,params object?[] a) => o.GetType().GetMethod(n,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(o,a);
++    static object? Static(string t,string n,params object?[] a) => T(t).GetMethod(n,BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,a);
++    static object[] Items(object o) => ((IEnumerable)o).Cast<object>().ToArray();
++    static void Check(bool b,string n) { if(!b)throw new Exception(n); }
++    static void Pump(Task task) { var until=DateTime.UtcNow.AddMinutes(3);while(!task.IsCompleted&&DateTime.UtcNow<until){Application.DoEvents();Thread.Sleep(5);}Check(task.IsCompleted,"async work completed");task.GetAwaiter().GetResult(); }
++    public static Task<TCatalog> Load<TCatalog>(bool force) => Task.FromResult((TCatalog)Prepared!);
++    public static void Log<TEntry>(TEntry entry) => Console.WriteLine(P(entry!,"Message"));
++    static IEnumerable<Control> All(Control c) {yield return c;foreach(Control child in c.Controls)foreach(var x in All(child))yield return x;}
++
++    [STAThread] static void Main()
++    {
++        Application.SetHighDpiMode(HighDpiMode.SystemAware);
++        var project=Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,"../../../../.."));
++        var workspace=@"S:\snowrunner_Shenanigans\AI\workspace";
++        var original=Path.Combine(workspace,"initial.pak","original_files","[ps]");
++        var before=Directory.GetFiles(original,"level_*.sso").ToDictionary(p=>p,p=>Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p))));
++        using var main=(Form)Activator.CreateInstance(T("MainForm"))!;
++        ((TextBox)F(main,"_workspacePath")).Text=workspace;
++        var task=(Task)Call(main,"GetUpgradeTrialCatalogAsync",false)!;
++        Pump(task);var catalog=P(task,"Result");
++        var allSlots=Items(P(catalog,"AllSlots"));var input=P(catalog,"Input");
++        var parts=(IDictionary)P(catalog,"Parts");
++        Console.WriteLine($"Catalog: {allSlots.Length} original slots, {Items(P(input,"Slots")).Length} owned-region slots, {parts.Count} resolved definitions.");
++        Check(allSlots.Length==166,"all original slots loaded");
++        Check(parts.Contains("wheels_extend_kirovets_k7m_tire_1"),"composite tire resolved");
++        var tire=parts["wheels_extend_kirovets_k7m_tire_1"]!;
++        Check((string)P(tire,"Name")=="MSH II","tire localized display name");
++        var definitions=Items(P(input,"Definitions"));
++        var extras=definitions.Where(d=>(bool)P(d,"Eligible")&&!allSlots.Any(s=>(string)P(s,"OriginalUpgradeId")== (string)P(d,"Id"))).ToArray();
++        Check(extras.Length>10,"full replacement catalog extends beyond old map rewards");
++        var trucks=(Task)Call(F(main,"_regionsTrucksTab"),"GetRandomizationCatalogAsync")!;Pump(trucks);
++        var enabled=Items(Call(F(main,"_ownedContentTab"),"GetAvailableCustomGroupingTrucks")!).Select(t=>(string)P(t,"Code")).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        if(enabled.Contains("tayga_6455b")) Check(Items(P(input,"TruckHomes")).Any(h=>(string)P(h,"Truck")=="tayga_6455b"&&(string)P(h,"Region")=="us_06"),"owned direct Maine garage reward included");
++        var names=(IReadOnlyDictionary<string,string>)Static("WorkspaceDataCache","GetLocalizedNames",workspace)!;
++        var allTrucks=(Dictionary<string,(string,string)>)Static("RegionTruckCatalogService","LoadTrucks",workspace,names,new List<string>())!;
++        var allEnabled=allTrucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var allRegions=allSlots.Select(s=>(string)P(s,"Region")).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var expanded=Static("UpgradeTrialService","Prepare",workspace,P(trucks,"Result"),allEnabled,allRegions,new HashSet<string>(),P(input,"RegionOrder"))!;
++        Check(Items(P(P(expanded,"Input"),"TruckHomes")).Any(h=>(string)P(h,"Truck")=="tayga_6455b"&&(string)P(h,"Region")=="us_06"),"direct garage reward resolves independently of the user's current ownership choices");
++        var entries=Items(P(P(trucks,"Result"),"Entries"));
++        var changed=entries.Where(e=>(bool)P(e,"TruckChanged")&&enabled.Contains((string)P(e,"TruckCode"))&&((string)P(e,"Availability")).StartsWith("Obtainable")).ToArray();
++        Console.WriteLine($"Current obtainable placements differing from baseline and enabled: {changed.Length}.");
++        foreach(var entry in changed)
++            Check(Items(P(input,"TruckHomes")).Any(h=>(string)P(h,"Truck")== (string)P(entry,"TruckCode")&&(string)P(h,"Region")== (string)P(entry,"RegionCode")),"adapter uses effective randomized model instead of original model");
++        var obtainable=entries.First(e=>((string)P(e,"Availability")).StartsWith("Obtainable"));
++        var newModel=allEnabled.First(code=>code!=(string)P(obtainable,"TruckCode"));
++        var payload=System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(obtainable))!;
++        payload["TruckCode"]=newModel;
++        var edited=JsonSerializer.Deserialize(payload.ToJsonString(),T("RegionTruckEntry"))!;
++        var syntheticEntries=Array.CreateInstance(T("RegionTruckEntry"),1);syntheticEntries.SetValue(edited,0);
++        var syntheticTrucks=Activator.CreateInstance(T("RegionTruckCatalog"),new object[]{syntheticEntries,P(P(trucks,"Result"),"Warnings"),P(P(trucks,"Result"),"MapsRead"),P(P(trucks,"Result"),"EquipmentCatalog")})!;
++        var simulated=Static("UpgradeTrialService","Prepare",workspace,syntheticTrucks,allEnabled,allRegions,new HashSet<string>(),P(input,"RegionOrder"))!;
++        Check(Items(P(P(simulated,"Input"),"TruckHomes")).Any(h=>(string)P(h,"Truck")==newModel&&(string)P(h,"Region")== (string)P(obtainable,"RegionCode")),"a changed obtainable model controls the new home snapshot");
++        var fixture=Path.Combine(project,".checks","UpgradeRegionAnalysis","source-workspace");
++        var isolated=Activator.CreateInstance(T("UpgradeTrialCatalog"),new object[]{fixture,input,P(catalog,"AllSlots"),P(catalog,"Parts"),P(catalog,"Stamp"),P(catalog,"Warnings")})!;
++        var entryType=T("RandomizationLogEntry");
++        var logger=typeof(Program).GetMethod(nameof(Log))!.MakeGenericMethod(entryType).CreateDelegate(typeof(Action<>).MakeGenericType(entryType));
++        var progress=Activator.CreateInstance(typeof(Progress<>).MakeGenericType(entryType),logger)!;
++        var draft=Static("UpgradeTrialService","Generate",isolated,progress,20261105)!;
++        Application.DoEvents();
++        var assignments=Items(P(draft,"Assignments"));
++        Check(assignments.Length==Items(P(input,"Slots")).Length,"owned pickup count preserved");
++        Check(assignments.All(a=>P(a,"Kind").Equals(P(P(parts[(string)P(P(a,"Slot"),"OriginalUpgradeId")]!,"Definition"),"Kind"))),"each original pickup type preserved");
++        Check(assignments.Where(a=>P(a,"Kind").ToString()=="MetalDetector").All(a=>(string)P(a,"UpgradeId")== (string)P(P(a,"Slot"),"OriginalUpgradeId")),"detector pinned");
++        var newRewards=assignments.Count(a=>!allSlots.Any(s=>(string)P(s,"OriginalUpgradeId")== (string)P(a,"UpgradeId")));
++        Check(newRewards>0,"new catalog rewards actually selected");
++        Check(Items(P(Static("UpgradeTrialStore","Load",fixture)!,"Assignments")).Length==assignments.Length,"draft survives reload");
++
++        Prepared=isolated;
++        var loader=typeof(Program).GetMethod(nameof(Load))!.MakeGenericMethod(T("UpgradeTrialCatalog"))
++            .CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(bool),typeof(Task<>).MakeGenericType(T("UpgradeTrialCatalog"))));
++        using var canvas=new Panel{Size=new Size(1100,850)};
++        using var tab=(Control)Activator.CreateInstance(T("MapUpgradesTab"),new object[]{new Func<string>(()=>fixture),new Func<string>(()=>""),loader})!;
++        tab.Dock=DockStyle.Fill;canvas.Controls.Add(tab);canvas.CreateControl();tab.CreateControl();
++        Pump((Task)Call(tab,"EnsureLoadedAsync")!);Application.DoEvents();
++        var grid=(DataGridView)F(tab,"_upgrades");
++        Check(grid.Rows.Count==166,"review table contains original/current rows");
++        Check(grid.Rows.Cast<DataGridViewRow>().Any(r=>Convert.ToString(r.Cells["Change state"].Value)=="Draft"),"review table shows changed draft rows");
++        Check(!All(tab).OfType<Button>().Single(b=>b.Text=="Stage changes").Enabled,"Stage remains unavailable for draft-only trial");
++        using(var bitmap=new Bitmap(canvas.Width,canvas.Height)){canvas.DrawToBitmap(bitmap,new Rectangle(Point.Empty,canvas.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"map-upgrades.png"));}
++        All(tab).OfType<Button>().Single(b=>b.Text=="Reset all to original").PerformClick();
++        Check(Items(P(Static("UpgradeTrialStore","Load",fixture)!,"Assignments")).Length==0,"reset clears isolated draft");
++        Check(before.All(p=>Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(p.Key)))==p.Value),"all original level scripts unchanged");
++        File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"summary.json"),JsonSerializer.Serialize(new {OriginalSlots=allSlots.Length,OwnedSlots=assignments.Length,Definitions=parts.Count,ExtraEligible=extras.Length,NewRewardChoices=newRewards,RandomizedTruckPlacements=changed.Length},new JsonSerializerOptions{WriteIndented=true}));
++        Console.WriteLine($"PASS trial adapter, actual randomized homes, {extras.Length} additional eligible IDs, {newRewards} new reward choices, composite tire, saved/reset draft, review UI and unchanged original game settings.");
++    }
++}
+diff --git a/.checks/UpgradeAppTrial/UpgradeAppTrial.csproj b/.checks/UpgradeAppTrial/UpgradeAppTrial.csproj
+new file mode 100644
+index 0000000..2a97ebe
+--- /dev/null
++++ b/.checks/UpgradeAppTrial/UpgradeAppTrial.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++ <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++ <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

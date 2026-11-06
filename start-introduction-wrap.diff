@@ -1,0 +1,47 @@
+diff --git a/investigation/start-introduction-wrap/before/MainForm.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/MainForm.cs
+index c475a64..50eade6 100644
+--- a/investigation/start-introduction-wrap/before/MainForm.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/MainForm.cs
+@@ -105,6 +105,7 @@ internal sealed class MainForm : Form
+     private void BuildLayout()
+     {
+         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
++        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+@@ -122,6 +123,14 @@ internal sealed class MainForm : Form
+             Padding = new Padding(0, 0, 0, 8)
+         };
+         root.Controls.Add(title, 0, 0);
++        void WrapIntroduction()
++        {
++            var availableWidth = Math.Max(1, root.ClientSize.Width - root.Padding.Horizontal - title.Margin.Horizontal);
++            var wrapWidth = Math.Max(1, availableWidth / 2);
++            if (title.MaximumSize.Width != wrapWidth) title.MaximumSize = new Size(wrapWidth, 0);
++        }
++        root.SizeChanged += (_, _) => WrapIntroduction();
++        WrapIntroduction();
+ 
+         var paths = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, RowCount = 2, AutoSize = true };
+         paths.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+diff --git a/investigation/start-introduction-wrap/before/SMALL_CHANGE_QUEUE.md b/SnowRunnerTools-master/SMALL_CHANGE_QUEUE.md
+index caf3613..4ea92e4 100644
+--- a/investigation/start-introduction-wrap/before/SMALL_CHANGE_QUEUE.md
++++ b/SnowRunnerTools-master/SMALL_CHANGE_QUEUE.md
+@@ -1,11 +1,13 @@
+ # Small change queue
+ 
+-Queued requests (1 of 10):
++Queued requests (0 of 10):
+ 
+-- On Start, wrap the introductory “Find your game installation…” label at approximately half the available view width, adapting when the window is resized.
++None.
+ 
+ Completed requests:
+ 
++- On Start, wrap the introductory “Find your game installation…” label at approximately half the available view width, adapting when the window is resized.
++
+ - In Start → PAK, summarize winch changes per winch, using the same brief summary style as per-truck changes.
+ 
+ - Move Truck properties and Cargo to Editors, and move Map trucks to Randomizer. Remove the empty Game data tab.

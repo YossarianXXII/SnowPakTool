@@ -1,0 +1,844 @@
+--- a/README.md
++++ b/README.md
+@@ -14,11 +14,13 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-A **slot-based upgrade preview trial** is available in **Randomizer → Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a preview under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
++A **slot-based upgrade randomizer** is available in **Randomizer → Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+ **Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+-**Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions remove preview assignments only. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Upgrade Stage/Apply is disabled in this trial.** No XML, SSO, map archive or installed game file is changed by randomizing/resetting upgrades; trial previews are not added to Start's staged changes.
++**Randomizer → Upgrades** uses one rule pane with matching add/edit/remove glyphs, automatically saved notes, a run button, default-hidden detailed logs and region completion messages. Fresh rule files receive the implemented rule notes; existing custom notes and intentional empty lists remain intact. Editing rule prose does not change the algorithm. Logs report seed/counts without revealing replacement identities. **Randomizer → Map upgrades** reads original level-SSO pickup settings and shows compatible truck names first, one upgrade column in new (original) format, types, source zone and change state. Hover Compatible trucks for a two-column comparison of the new and original upgrades and their compatible truck names. Region tiles, column sorting/filtering and details match Map trucks. Reset selected covers all visible filtered rows, reset regions covers selected regions independently of column filters, and reset all covers the loaded catalog. These actions queue original pickup restoration, including after Apply. Reload refreshes sources; changed truck/ownership/progression inputs mark saved previews stale for explicit rerandomization. The source row identifies initial-PAK level settings; map-folder selection stays in Map trucks. **Stage changes** in either upgrade tab snapshots all pickup changes together with exploration flags. Upgrades found on any resulting map are exploration-locked; upgrades absent from all maps are unlocked. Unrandomized maps retain their current pickups and count toward these flags. Tire sizes sharing a definition share one flag: any discoverable size locks that variant. The full current pickup inventory is scanned; unreadable settings or unresolved pickup definitions block staging rather than guessing absence. Source catalog warnings remain visible.
++
++**Start → Apply pending PAK edits** writes the staged level-SSO reward strings and component XML exploration flags to the sparse updated overlay. Upgrade edits appear in Start even after restarting; later draft/reset changes do not alter the staged snapshot until staged again. Every target is checked before any upgrade file is written. Changed pickup sets, conflicting reward IDs or conflicting flag values reject Apply and retain the staged snapshot; unrelated XML/SSO edits are preserved. Only the exact source + zone + reward index and named component variant are patched. Original files, zone IDs, map scenes, rank/objective locks and installed archives are preserved. Pack to a new PAK using the existing workflow after applying. Runtime collection and already-collected zones in existing saves still require in-game verification.
+ 
+ **Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+ 
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -70,6 +70,10 @@
+         _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync, RandomizeMissionsAsync);
+         _upgradeRandomizationTab = new UpgradeRandomizationTab(RandomizeUpgradesAsync);
+         _mapUpgradesTab = new MapUpgradesTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim(), GetUpgradeTrialCatalogAsync);
++        _upgradeRandomizationTab.ConfigureMapStaging(StageUpgradeChangesAsync, () => Directory.Exists(_workspacePath.Text.Trim())
++            && _upgradeTrialCatalog is not null && _upgradeTrialCatalog.Workspace.Equals(_workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)
++            && UpgradeChanges.HasDraft(_upgradeTrialCatalog));
++        _mapUpgradesTab.ConfigureStaging(StageUpgradeChangesAsync);
+         _truckRandomizationTab.ConfigureMapStaging(_regionsTrucksTab.StageChangesAsync, () =>
+             Directory.Exists(_workspacePath.Text.Trim()) && PendingTruckReplacements.HasUnstagedChanges(_workspacePath.Text.Trim()));
+         _regionsTrucksTab.ChangesStaged += async () =>
+@@ -396,13 +400,18 @@
+             MessageBox.Show(this, "Apply staged rank XP using Start → Apply pending PAK edits before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+             return;
+         }
++        if (UpgradeChanges.Pending(workspace).Any())
++        {
++            MessageBox.Show(this, "Apply staged upgrade changes using Start → Apply pending PAK edits before packing.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
++            return;
++        }
+         try { SavePendingPakChanges(); }
+         catch (Exception ex) { AppendLog(ex.Message); return; }
+         await RunBusyAsync("Building cache block and PAK…", () => PackWorkspace(workspace, output));
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -411,6 +420,7 @@
+         if (_experienceTab.PendingChanges(workspace).Any()) _experienceTab.SavePendingChanges();
+         if (_truckEditTab.PendingChanges(workspace).Any()) _truckEditTab.SavePendingChanges();
+         if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
++        if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+ 
+@@ -493,6 +503,15 @@
+         await _mapUpgradesTab.RefreshDraftAsync();
+     }
+ 
++    private async Task StageUpgradeChangesAsync()
++    {
++        var catalog = await GetUpgradeTrialCatalogAsync(true);
++        await Task.Run(() => UpgradeChanges.Stage(catalog));
++        await _mapUpgradesTab.RefreshDraftAsync();
++        _upgradeRandomizationTab.RefreshStagingState();
++        if (_startChanges is not null) await _startChanges.RefreshAsync();
++    }
++
+     private async Task RandomizeMissionsAsync(MissionTruckDifficulty difficulty, IProgress<RandomizationLogEntry> progress)
+     {
+         var workspace = _workspacePath.Text.Trim();
+--- a/src/SnowPakTool.Desktop/MapUpgradesTab.cs
++++ b/src/SnowPakTool.Desktop/MapUpgradesTab.cs
+@@ -28,6 +28,8 @@
+     private UpgradeTrialDraft? _draft;
+     private string? _selectionWorkspace;
+     private bool _loading;
++    private Func<Task>? _stageChanges;
++    private readonly Button _stage = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
+     private IReadOnlyDictionary<string, string> _truckNames = new Dictionary<string, string>();
+ 
+     public MapUpgradesTab(Func<string> getWorkspacePath, Func<string> getPakPath,
+@@ -47,10 +49,9 @@
+         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+         var all = new Button { Text = "Select all regions", AutoSize = true };
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+-        var stage = new Button { Text = "Stage changes", AutoSize = true, Enabled = false };
+-        _tips.SetToolTip(stage, "Preview trial: staging and applying upgrade game files are not enabled.");
+-        _tips.SetToolTip(_resetSelected, "Reset every preview matching selected regions and current column filters, regardless of highlighted row.");
+-        actions.Controls.AddRange([all, clear, _resetSelected, _resetRegions, _resetAll, stage]); layout.Controls.Add(actions, 0, 2);
++        _tips.SetToolTip(_stage, "Stage all upgrade drafts and exploration flags; apply from Start → PAK.");
++        _tips.SetToolTip(_resetSelected, "Reset every pickup matching selected regions and current column filters, regardless of highlighted row.");
++        actions.Controls.AddRange([all, clear, _resetSelected, _resetRegions, _resetAll, _stage]); layout.Controls.Add(actions, 0, 2);
+         layout.Controls.Add(_status, 0, 3);
+         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new Size(900, 500), SplitterDistance = 285, Panel1MinSize = 60, Panel2MinSize = 60, SplitterWidth = 6 };
+         var headers = TableHeaderBehavior.Attach(_upgrades); headers.Changed += () => { UpdateButtons(); ShowDetails(); };
+@@ -59,7 +60,17 @@
+                 Width = name == "Compatible trucks" ? 420 : name == "Upgrade" ? 280 : name is "Placement ID" or "Upgrade ID" ? 260 : 145,
+                 SortMode = DataGridViewColumnSortMode.Automatic });
+         split.Panel1.Controls.Add(_upgrades); split.Panel2.Controls.Add(_details); layout.Controls.Add(split, 0, 4); Controls.Add(layout);
+-        _status.Text = "Open this tab to read upgrade pickups from the original level settings. Preview only; game files stay unchanged.";
++        _status.Text = "Review upgrade pickups, stage changes, then Apply pending PAK edits from Start.";
++        _stage.Click += async (_, _) =>
++        {
++            if (_stageChanges is null || _loading) return;
++            _loading = true; UpdateButtons();
++            string message;
++            try { await _stageChanges(); message = "Upgrades and exploration flags staged. Apply pending PAK edits from Start."; }
++            catch (Exception ex) { message = "Could not stage upgrades: " + ex.Message; }
++            finally { _loading = false; await LoadAsync(false); UpdateButtons(); }
++            _status.Text = message;
++        };
+         all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RenderRows(); };
+         clear.Click += (_, _) => { _selectedRegions.Clear(); RenderRows(); };
+         _reload.Click += async (_, _) => await LoadAsync(true);
+@@ -74,6 +85,7 @@
+     }
+ 
+     public Task EnsureLoadedAsync() => LoadAsync(false);
++    public void ConfigureStaging(Func<Task> stage) { _stageChanges = stage; UpdateButtons(); }
+     public Task RefreshDraftAsync() => LoadAsync(false);
+ 
+     private async Task LoadAsync(bool force)
+@@ -112,9 +124,9 @@
+         foreach (var group in _catalog.AllSlots.GroupBy(s => s.Region).OrderBy(g => RegionTileAssets.GetReleaseOrder(g.Key)))
+         {
+             var code = group.Key; var name = names.TryGetValue(code, out var region) ? region.Name : code;
+-            var changes = _draft?.Assignments.Count(a => a.Slot.Region.Equals(code, StringComparison.OrdinalIgnoreCase) && a.UpgradeId != a.Slot.OriginalUpgradeId) ?? 0;
++            var changes = group.Count(slot => DesiredId(slot, _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot) == UpgradeTrialService.Key(slot))) != slot.OriginalUpgradeId);
+             var tile = new RegionTileButton { Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
+-                RegionName = name, ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(), Summary = $"{group.Count()} pickups\n{changes} draft changes",
++                RegionName = name, ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(), Summary = $"{group.Count()} pickups\n{changes} changed pickups",
+                 Thumbnail = RegionTileAssets.GetThumbnail(code), Text = name, Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+                 UseVisualStyleBackColor = false, AccessibleName = name, Tag = code };
+             tile.Click += (_, _) => { if (!_selectedRegions.Add(code)) _selectedRegions.Remove(code); RenderRows(); };
+@@ -133,35 +145,45 @@
+         foreach (var slot in _catalog.AllSlots.Where(s => _selectedRegions.Contains(s.Region)))
+         {
+             draft.TryGetValue(UpgradeTrialService.Key(slot), out var assignment);
+-            var id = assignment?.UpgradeId ?? slot.OriginalUpgradeId;
++            var id = DesiredId(slot, assignment);
+             _catalog.Parts.TryGetValue(id, out var part); _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
+-            var state = assignment is null ? "Original" : assignment.Path == UpgradeSelectionPath.Fixed ? "Fixed"
+-                : id == slot.OriginalUpgradeId ? "Unchanged" : _draft?.InputStamp == _catalog.Stamp ? "Draft" : "Draft (inputs changed)";
++            var state = UpgradeChanges.State(_catalog.Workspace, slot, id);
++            if (state == "Draft" && _draft?.InputStamp != _catalog.Stamp) state = "Draft (inputs changed)";
+             table.Rows.Add(regions.TryGetValue(slot.Region, out var region) ? region.Name : slot.Region, slot.Map,
+                 string.Join(", ", TruckNames(part)), $"{part?.Name ?? id} ({original?.Name ?? slot.OriginalUpgradeId})",
+                 part?.Definition.Kind.ToString() ?? "Unresolved", slot.Zone, id, state, slot);
+         }
+         _upgrades.DataSource = table;
+         foreach (DataGridViewRow row in _upgrades.Rows)
+-            if (row.DataBoundItem is DataRowView data && Convert.ToString(data["Change state"])?.StartsWith("Draft", StringComparison.Ordinal) == true)
+-                row.DefaultCellStyle.BackColor = Color.FromArgb(255, 242, 204);
+-        _status.Text = $"{table.Rows.Count} pickups in {_selectedRegions.Count} selected regions ({_catalog.Input.Slots.Count} in owned regions) · {_draft?.Assignments.Count(a => a.UpgradeId != a.Slot.OriginalUpgradeId) ?? 0} draft changes"
+-            + (_draft is null ? "" : $" · seed {_draft.Seed}") + ". Preview only; Stage/Apply are disabled.";
+-        if (_draft is not null && _draft.InputStamp != _catalog.Stamp) _status.Text += " Inputs changed; randomize again to refresh the preview.";
++            if (row.DataBoundItem is DataRowView data)
++            {
++                var state = Convert.ToString(data["Change state"]);
++                if (state?.StartsWith("Draft", StringComparison.Ordinal) == true || state == "Staged") row.DefaultCellStyle.BackColor = AppColors.Get("EngineMatch");
++                else if (state == "In files") row.DefaultCellStyle.BackColor = AppColors.Get("DAF8E0");
++            }
++        _status.Text = $"{table.Rows.Count} pickups in {_selectedRegions.Count} selected regions ({_catalog.Input.Slots.Count} in owned regions)"
++            + (_draft is null ? "" : $" · seed {_draft.Seed}") + ". Stage here, then Apply pending PAK edits from Start.";
++        if (_draft is not null && _draft.Assignments.Count > 0 && _draft.InputStamp != _catalog.Stamp) _status.Text += " Inputs changed; randomize again before staging.";
+         UpdateButtons(); ShowDetails();
+     }
+ 
+-    private IEnumerable<UpgradeDistributionSlot> VisibleSlots() => _upgrades.Rows.Cast<DataGridViewRow>().Where(r => r.Visible)
+-        .Select(r => (r.DataBoundItem as DataRowView)?["Slot"]).OfType<UpgradeDistributionSlot>();
++    private IEnumerable<UpgradeDistributionSlot> VisibleSlots() => _upgrades.DataSource switch
++    {
++        DataTable table => table.DefaultView.Cast<DataRowView>().Select(r => r["Slot"]).OfType<UpgradeDistributionSlot>(),
++        DataView view => view.Cast<DataRowView>().Select(r => r["Slot"]).OfType<UpgradeDistributionSlot>(),
++        _ => []
++    };
+     private void Reset(IEnumerable<UpgradeDistributionSlot> slots)
+     {
+         if (_catalog is null || _loading) return;
+         try { UpgradeTrialStore.Reset(_catalog.Workspace, slots.ToArray()); _draft = UpgradeTrialStore.Load(_catalog.Workspace); BuildTiles(); RenderRows(); }
+-        catch (Exception ex) { _status.Text = "Could not reset upgrade preview: " + ex.Message; }
++        catch (Exception ex) { _status.Text = "Could not reset upgrades: " + ex.Message; }
+     }
+     private void UpdateButtons()
+     {
++        _stage.Enabled = !_loading && _stageChanges is not null && _catalog is not null && _draft is not null;
+         var keys = _draft?.Assignments.Select(a => UpgradeTrialService.Key(a.Slot)).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
++        if (_catalog is not null) keys.UnionWith(_catalog.AllSlots.Where(s => UpgradeChanges.CurrentId(_catalog.Workspace, s) != s.OriginalUpgradeId).Select(UpgradeTrialService.Key));
+         _resetSelected.Enabled = !_loading && VisibleSlots().Any(s => keys.Contains(UpgradeTrialService.Key(s)));
+         _resetRegions.Enabled = !_loading && _catalog?.AllSlots.Any(s => _selectedRegions.Contains(s.Region) && keys.Contains(UpgradeTrialService.Key(s))) == true;
+         _resetAll.Enabled = !_loading && keys.Count > 0;
+@@ -169,19 +191,23 @@
+     private void ShowDetails()
+     {
+         _details.Clear();
+-        if (_catalog is null || _upgrades.CurrentRow?.DataBoundItem is not DataRowView row || row["Slot"] is not UpgradeDistributionSlot slot) return;
++        var index = _upgrades.CurrentRow?.Index ?? -1;
++        if (_catalog is null || index < 0 || VisibleSlots().ElementAtOrDefault(index) is not UpgradeDistributionSlot slot) return;
+         var assignment = _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot).Equals(UpgradeTrialService.Key(slot), StringComparison.OrdinalIgnoreCase));
+-        var id = assignment?.UpgradeId ?? slot.OriginalUpgradeId;
++        var id = DesiredId(slot, assignment);
+         _catalog.Parts.TryGetValue(id, out var part);
+         _catalog.Parts.TryGetValue(slot.OriginalUpgradeId, out var original);
+-        _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nPreview ID: {id}\r\nDefinition: {part?.Source}\r\nNew compatible trucks: {string.Join(", ", TruckNames(part))}\r\nOriginal compatible trucks: {string.Join(", ", TruckNames(original))}"
++        _details.Text = $"Source: {slot.Source}\r\nZone: {slot.Zone} / upgrades[{slot.RewardIndex}]\r\nOriginal ID: {slot.OriginalUpgradeId}\r\nSelected ID: {id}\r\nDefinition: {part?.Source}\r\nNew compatible trucks: {string.Join(", ", TruckNames(part))}\r\nOriginal compatible trucks: {string.Join(", ", TruckNames(original))}"
+             + (assignment is null ? "" : $"\r\nSelection: {assignment.Path}; {assignment.Relation}; fallback={assignment.Fallback}; reused={assignment.Reused}")
+-            + "\r\nPreview only. No game files have been changed."
++            + "\r\nStage changes, then Apply pending PAK edits from Start. Exploration locks follow the resulting map pickups."
+             + (_catalog.Warnings.Count == 0 ? "" : "\r\nSource warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+     private string[] TruckNames(UpgradeTrialPart? part) => (part?.Definition.CompatibleTrucks ?? [])
+         .Select(code => _truckNames.GetValueOrDefault(code, code)).Distinct(StringComparer.OrdinalIgnoreCase)
+         .Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
++    private string DesiredId(UpgradeDistributionSlot slot, UpgradeDistributionAssignment? assignment) => assignment?.UpgradeId
++        ?? (_draft?.ResetKeys?.Contains(UpgradeTrialService.Key(slot), StringComparer.OrdinalIgnoreCase) == true
++            ? slot.OriginalUpgradeId : UpgradeChanges.CurrentId(_catalog!.Workspace, slot));
+     private void PaletteChanged(object? sender, EventArgs e) => RefreshTiles();
+     private void RefreshTiles()
+     {
+--- a/src/SnowPakTool.Desktop/MapUpgradesHover.cs
++++ b/src/SnowPakTool.Desktop/MapUpgradesHover.cs
+@@ -53,9 +53,10 @@
+         { HideCompatibilityHover(); return; }
+         if (_compatibilityPreview is not null) return;
+         var assignment = _draft?.Assignments.FirstOrDefault(a => UpgradeTrialService.Key(a.Slot) == UpgradeTrialService.Key(_hoverSlot));
+-        _catalog.Parts.TryGetValue(assignment?.UpgradeId ?? _hoverSlot.OriginalUpgradeId, out var current);
++        var currentId = DesiredId(_hoverSlot, assignment);
++        _catalog.Parts.TryGetValue(currentId, out var current);
+         _catalog.Parts.TryGetValue(_hoverSlot.OriginalUpgradeId, out var original);
+-        _compatibilityPreview = new UpgradeCompatibilityPreview(current?.Name ?? assignment?.UpgradeId ?? _hoverSlot.OriginalUpgradeId,
++        _compatibilityPreview = new UpgradeCompatibilityPreview(current?.Name ?? currentId,
+             TruckNames(current), original?.Name ?? _hoverSlot.OriginalUpgradeId, TruckNames(original));
+         _compatibilityPreview.PlaceNear(Cursor.Position);
+         _compatibilityPreview.Show(owner);
+--- a/src/SnowPakTool.Desktop/SsoDataReader.cs
++++ b/src/SnowPakTool.Desktop/SsoDataReader.cs
+@@ -8,6 +8,8 @@
+ {
+     public string Key { get; set; } = "";
+     public string Text { get; init; } = "";
++    public int ValueStart { get; set; }
++    public int ValueLength { get; set; }
+     public Dictionary<string, SsoValue> Members { get; } = new(StringComparer.OrdinalIgnoreCase);
+     public List<SsoValue> Items { get; } = [];
+     public string Get(string key) => Members.TryGetValue(key, out var value) ? value.Text : "";
+@@ -25,7 +27,8 @@
+ 
+     public static SsoValue Parse(string text)
+     {
+-        var tokens = Tokens.Matches(text).Select(match => match.Value).Where(token => !token.StartsWith("//")).ToArray();
++        var matches = Tokens.Matches(text).Where(match => !match.Value.StartsWith("//")).ToArray();
++        var tokens = matches.Select(match => match.Value).ToArray();
+         var position = 0;
+         var root = new SsoValue();
+         ReadMembers(root, null, 0);
+@@ -49,6 +52,7 @@
+         SsoValue ReadValue(int depth)
+         {
+             if (position >= tokens.Length) throw new FormatException("Missing game setting value.");
++            var start = matches[position].Index;
+             var token = tokens[position++];
+             var value = new SsoValue();
+             if (token == "{") ReadMembers(value, "}", depth);
+@@ -63,6 +67,8 @@
+                 Require("]");
+             }
+             else value = new SsoValue { Text = Decode(token) };
++            value.ValueStart = start;
++            value.ValueLength = matches[position - 1].Index + matches[position - 1].Length - start;
+             return value;
+         }
+ 
+--- a/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs
+@@ -3,14 +3,16 @@
+ 
+ namespace SnowPakTool.Desktop;
+ 
+-internal sealed record UpgradeTrialPart(UpgradeDistributionDefinition Definition, string Name, string Source);
++internal sealed record UpgradeTrialPart(UpgradeDistributionDefinition Definition, string Name, string Source,
++    string Element = "", string Variant = "");
+ 
+ internal sealed partial class TruckEquipmentCatalog
+ {
+     public IReadOnlyList<string> UpgradeCatalogWarnings() { lock (_gate) return _warnings.Distinct().ToArray(); }
+-    private sealed class UpgradeBuilder(string id, UpgradeKind kind, string name, string source, bool allowed)
++    private sealed class UpgradeBuilder(string id, UpgradeKind kind, string name, string source, bool allowed, string element, string variant)
+     {
+         public readonly string Id = id, Name = name, Source = source;
++        public readonly string Element = element, Variant = variant;
+         public readonly UpgradeKind Kind = kind;
+         public bool Allowed = allowed;
+         public readonly HashSet<string> Trucks = new(StringComparer.OrdinalIgnoreCase);
+@@ -47,7 +49,8 @@
+                 var game = element.Element("GameData");
+                 var key = (string?)game?.Element("UiDesc")?.Attribute("UiName") ?? id;
+                 if (!parts.TryGetValue(id, out var part))
+-                    parts[id] = part = new(id, kind, _names.GetValueOrDefault(key, key), WorkspaceOriginals.GetRelativePath(_workspace, definition.Path), Allowed(game) && licensed);
++                    parts[id] = part = new(id, kind, _names.GetValueOrDefault(key, key), WorkspaceOriginals.GetRelativePath(_workspace, definition.Path), Allowed(game) && licensed,
++                        element.Name.LocalName, (string?)element.Attribute("Name") ?? "");
+                 if (part.Kind != kind) throw new InvalidDataException($"Upgrade ID '{id}' is ambiguous across component types.");
+                 part.Allowed &= Allowed(game) && licensed;
+                 part.Trucks.Add(truck);
+@@ -110,7 +113,7 @@
+                 new(p.Id, p.Kind, p.Trucks.Order(StringComparer.Ordinal).ToArray(),
+                     KeepInPlace: p.Kind == UpgradeKind.MetalDetector,
+                     Eligible: p.Allowed && p.Trucks.Any(enabledTrucks.Contains)
+-                        && (p.Defaults.Count == 0 || originalRewardIds.Contains(p.Id))), p.Name, p.Source), StringComparer.OrdinalIgnoreCase);
++                        && (p.Defaults.Count == 0 || originalRewardIds.Contains(p.Id))), p.Name, p.Source, p.Element, p.Variant), StringComparer.OrdinalIgnoreCase);
+         }
+     }
+ }
+--- a/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+@@ -11,7 +11,7 @@
+         "For shared slots, choose from all eligible shared upgrades of the same type. There is no purchase-only restriction and no locality percentage roll.",
+         "Try unused shared and other same-type upgrades before reusing a compatible choice. Stock/default parts, unavailable content and objective-locked replacement parts are excluded.",
+         "In the first progression region, shared slots get an extra preference for upgrades with no compatible obtainable truck in that region.",
+-        "Randomize owned regions using enabled content. Review the saved preview in Map upgrades; game-file staging and applying are disabled for this trial."
++        "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → PAK. Upgrades found on any resulting map require exploration; upgrades absent from maps do not."
+     ];
+ }
+ 
+@@ -29,6 +29,8 @@
+         var rules = JsonSerializer.Deserialize<UpgradeRandomizationRules>(File.ReadAllText(_path))
+             ?? throw new JsonException("The saved rule list is empty.");
+         Validate(rules);
++        for (var i = 0; i < rules.Rules.Count; i++)
++            if (rules.Rules[i] == "Randomize owned regions using enabled content. Review the saved preview in Map upgrades; game-file staging and applying are disabled for this trial.") rules.Rules[i] = "Randomize owned regions using enabled content. Stage pickups and exploration flags, then apply from Start → PAK. Upgrades found on any resulting map require exploration; upgrades absent from maps do not.";
+         return rules;
+     }
+ 
+--- a/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+@@ -26,8 +26,8 @@
+         _store = store;
+         _run = run;
+         _randomize.Enabled = run is not null;
+-        _actionTips.SetToolTip(_randomize, "Generate and save an upgrade preview from the current obtainable truck assignments.");
+-        _actionTips.SetToolTip(_stageChanges, "Preview trial: staging and applying upgrade game files are not enabled.");
++        _actionTips.SetToolTip(_randomize, "Generate and save an upgrade draft from the current obtainable truck assignments.");
++        _actionTips.SetToolTip(_stageChanges, "Stage all upgrade drafts and exploration flags; apply from Start → PAK.");
+         _randomize.Click += async (_, _) => await RandomizeAsync();
+         _showDetails.CheckedChanged += (_, _) => RenderMessages();
+         VisibleChanged += (_, _) => RefreshStagingState();
+@@ -50,7 +50,7 @@
+         panes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         panes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         panes.Controls.Add(CreatePane("Upgrades", _rules.Rules, Padding.Empty), 0, 0);
+-        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Trial saves a preview only; upgrade Stage/Apply is unavailable.";
++        if (_status.Text.Length == 0) _status.Text = "Rule text is editable notes. Stage upgrades and exploration locks, then apply from Start → PAK.";
+         root.Controls.Add(panes, 0, 0);
+         root.Controls.Add(_status, 0, 1);
+         Controls.Add(root);
+@@ -144,7 +144,7 @@
+         actions.Controls.Add(_showDetails);
+         actions.Controls.Add(new Label
+         {
+-            Text = "Review/reset the saved preview in Randomizer → Map upgrades. This trial does not write game files.",
++            Text = "Review/reset in Randomizer → Map upgrades. Stage changes, then Apply pending PAK edits from Start.",
+             AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(600, 0)
+         });
+         layout.Controls.Add(actions, 0, 2);
+@@ -202,8 +202,8 @@
+         if (_stageMapChanges is null || _running) return;
+         _running = true; RefreshStagingState();
+         void Message(string text) => AddMessage(new(text));
+-        try { await _stageMapChanges(); Message("Map changes staged. Apply them from Start → Map files."); }
+-        catch (Exception ex) { Message("Could not stage map changes: " + ex.Message); }
++        try { await _stageMapChanges(); Message("Upgrades and exploration flags staged. Apply pending PAK edits from Start."); }
++        catch (Exception ex) { Message("Could not stage upgrades: " + ex.Message); }
+         finally { _running = false; RefreshStagingState(); }
+     }
+ 
+@@ -222,7 +222,7 @@
+             {
+                 if (!_messages.IsDisposed) AddMessage(message);
+             }));
+-            AddMessage(new("Finished. Review the saved preview in Map upgrades. Upgrade staging/applying is disabled in this trial."));
++            AddMessage(new("Finished. Review in Map upgrades, stage changes, then Apply pending PAK edits from Start."));
+         }
+         catch (InvalidOperationException ex) { AddMessage(new("Error: " + ex.Message)); }
+         catch (Exception) { AddMessage(new("Error: could not read or save the upgrade plan. Check the workspace and reload map data.")); }
+--- a/src/SnowPakTool.Desktop/UpgradeTrialService.cs
++++ b/src/SnowPakTool.Desktop/UpgradeTrialService.cs
+@@ -9,7 +9,8 @@
+     IReadOnlyList<UpgradeDistributionSlot> AllSlots, IReadOnlyDictionary<string, UpgradeTrialPart> Parts,
+     string Stamp, IReadOnlyList<string> Warnings);
+ internal sealed record UpgradeTrialDraft(int Seed, DateTimeOffset CreatedAt, string InputStamp,
+-    IReadOnlyList<UpgradeDistributionAssignment> Assignments, UpgradeDistributionReport? Report);
++    IReadOnlyList<UpgradeDistributionAssignment> Assignments, UpgradeDistributionReport? Report,
++    IReadOnlyList<string>? ResetKeys = null);
+ 
+ internal static class UpgradeTrialService
+ {
+@@ -91,10 +92,12 @@
+         foreach (var note in plan.Report.Notes) progress.Report(new(note, true));
+         if (catalog.Warnings.Count > 0) progress.Report(new($"{catalog.Warnings.Count} source-read warnings were retained in Map upgrades details.", true));
+         var keys = catalog.Input.Slots.Select(Key).ToHashSet(Codes);
+-        var retained = UpgradeTrialStore.Load(catalog.Workspace)?.Assignments.Where(a => !keys.Contains(Key(a.Slot))) ?? [];
+-        var draft = new UpgradeTrialDraft(plan.Seed, DateTimeOffset.UtcNow, catalog.Stamp, retained.Concat(plan.Assignments).ToArray(), plan.Report);
++        var previous = UpgradeTrialStore.Load(catalog.Workspace);
++        var retained = previous?.Assignments.Where(a => !keys.Contains(Key(a.Slot))) ?? [];
++        var draft = new UpgradeTrialDraft(plan.Seed, DateTimeOffset.UtcNow, catalog.Stamp, retained.Concat(plan.Assignments).ToArray(), plan.Report,
++            previous?.ResetKeys?.Where(k => !keys.Contains(k)).ToArray());
+         UpgradeTrialStore.Save(catalog.Workspace, draft);
+-        progress.Report(new($"Seed {plan.Seed}. Preview saved: {plan.Assignments.Count(a => !Codes.Equals(a.UpgradeId, a.Slot.OriginalUpgradeId))} changed rewards. No game files were written."));
++        progress.Report(new($"Seed {plan.Seed}. Draft saved: {plan.Assignments.Count(a => !Codes.Equals(a.UpgradeId, a.Slot.OriginalUpgradeId))} changed rewards. Stage changes, then Apply pending PAK edits from Start."));
+         return draft;
+     }
+ }
+@@ -130,9 +133,10 @@
+     {
+         lock (Gate)
+         {
+-            var draft = Load(workspace); if (draft is null) return;
++            var draft = Load(workspace) ?? new UpgradeTrialDraft(0, DateTimeOffset.UtcNow, "", [], null);
+             var keys = slots.Select(UpgradeTrialService.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+-            Save(workspace, draft with { Assignments = draft.Assignments.Where(a => !keys.Contains(UpgradeTrialService.Key(a.Slot))).ToArray(), Report = null });
++            Save(workspace, draft with { Assignments = draft.Assignments.Where(a => !keys.Contains(UpgradeTrialService.Key(a.Slot))).ToArray(),
++                ResetKeys = (draft.ResetKeys ?? []).Concat(keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), Report = null });
+         }
+     }
+ }
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/UpgradeChanges.cs
+@@ -0,0 +1,259 @@
++using System.Text.Json;
++using System.Text.RegularExpressions;
++using System.Xml;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record UpgradeFileEdit(string Source, string Zone, int RewardIndex,
++    string Element, string Variant, string? Before, string After);
++internal sealed record UpgradeChangeSnapshot(IReadOnlyList<UpgradeFileEdit> Edits,
++    IReadOnlyList<UpgradeFileEdit> Pickups);
++
++/// <summary>Stages exact pickup/flag edits independently of the mutable randomizer draft.</summary>
++internal static class UpgradeChanges
++{
++    private static readonly object Gate = new();
++    private static readonly StringComparer Codes = StringComparer.OrdinalIgnoreCase;
++    private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "upgrade-randomization", "staged.json");
++    private static UpgradeChangeSnapshot Load(string workspace) => File.Exists(PendingPath(workspace))
++        ? JsonSerializer.Deserialize<UpgradeChangeSnapshot>(File.ReadAllText(PendingPath(workspace)))
++            ?? throw new InvalidDataException("Invalid staged upgrade changes.") : new([], []);
++
++    internal static SsoValue Pickup(string text, string zone, int index)
++    {
++        var root = SsoDataReader.Parse(text);
++        if (!root.Members.TryGetValue("zoneDesc", out var zones) || !zones.Members.TryGetValue(zone, out var settings)
++            || !settings.Members.TryGetValue("props", out var props)
++            || !props.Members.TryGetValue("ZonePropertyUpgradesGiver", out var giver)
++            || !giver.Members.TryGetValue("upgrades", out var list) || index < 0 || index >= list.Items.Count)
++            throw new InvalidDataException($"Upgrade pickup no longer exists: {zone}/{index}.");
++        return list.Items[index];
++    }
++
++    // Parse for identity, retain line positions to edit only the original attribute text.
++    private static (XElement Part, XElement? Game, int Offset) XmlPart(string text, string element, string variant)
++    {
++        var clean = Regex.Replace(text, @"<\?xml[\s\S]*?\?>", m => Regex.Replace(m.Value, @"[^\r\n]", " "));
++        clean = Regex.Replace(clean, @"(?<=[\w]):(?=[\w])", "_");
++        var document = XDocument.Parse("<Root>\n" + clean + "\n</Root>", LoadOptions.SetLineInfo | LoadOptions.PreserveWhitespace);
++        var parts = document.Descendants(element).Where(e => !e.Ancestors().Any(a => a.Name.LocalName == "_templates")
++            && (variant.Length == 0 || Codes.Equals((string?)e.Attribute("Name"), variant))).ToArray();
++        if (parts.Length != 1) throw new InvalidDataException($"Cannot uniquely locate {element}/{variant}.");
++        var part = parts[0]; var game = part.Element("GameData");
++        var info = (IXmlLineInfo)(game ?? part);
++        var offset = 0;
++        for (var line = 1; line < info.LineNumber - 1; line++)
++        {
++            offset = text.IndexOf('\n', offset) + 1;
++            if (offset == 0) throw new InvalidDataException("Invalid upgrade XML location.");
++        }
++        offset += info.LinePosition - 2; // XmlReader positions the name immediately after '<'.
++        return (part, game, offset);
++    }
++
++    private static string? Read(string text, UpgradeFileEdit edit) => edit.Zone.Length > 0
++        ? Pickup(text, edit.Zone, edit.RewardIndex).Text
++        : (string?)XmlPart(text, edit.Element, edit.Variant).Game?.Attribute("UnlockByExploration");
++
++    internal static string Patch(string text, UpgradeFileEdit edit)
++    {
++        var current = Read(text, edit);
++        if (current == edit.After) return text;
++        if (current != edit.Before) throw new InvalidDataException($"{edit.Source}: an upgrade changed since staging. Reload and stage again.");
++        if (edit.Zone.Length > 0)
++        {
++            var value = Pickup(text, edit.Zone, edit.RewardIndex);
++            text = text.Remove(value.ValueStart, value.ValueLength).Insert(value.ValueStart, JsonSerializer.Serialize(edit.After));
++        }
++        else
++        {
++            var (part, game, offset) = XmlPart(text, edit.Element, edit.Variant);
++            var tag = Regex.Match(text[offset..], @"^<[^>]+>").Value;
++            if (tag.Length == 0) throw new InvalidDataException("Cannot locate upgrade opening tag.");
++            if (game is null)
++            {
++                var addition = $"<GameData UnlockByExploration=\"{edit.After}\" />";
++                text = part.IsEmpty ? text.Remove(offset, tag.Length).Insert(offset, tag[..^2] + ">" + addition + $"</{part.Name.LocalName}>")
++                    : text.Insert(offset + tag.Length, addition);
++            }
++            else
++            {
++                var attr = Regex.Match(tag, "\\bUnlockByExploration\\s*=\\s*([\"'])(?<value>.*?)\\1");
++                if (attr.Success)
++                {
++                    var value = attr.Groups["value"];
++                    text = text.Remove(offset + value.Index, value.Length).Insert(offset + value.Index, edit.After);
++                }
++                else text = text.Insert(offset + tag.Length - (tag.EndsWith("/>") ? 2 : 1), $" UnlockByExploration=\"{edit.After}\"");
++            }
++        }
++        if (Read(text, edit) != edit.After) throw new InvalidDataException("Upgrade patch verification failed.");
++        return text;
++    }
++
++    private static (string Element, string Variant) Selector(UpgradeTrialPart part)
++    {
++        if (part.Element.Length > 0) return (part.Element, part.Variant);
++        var id = part.Definition.Id;
++        return part.Definition.Kind switch
++        {
++            UpgradeKind.Engine => ("Engine", id), UpgradeKind.Gearbox => ("Gearbox", id),
++            UpgradeKind.Suspension => ("SuspensionSet", id),
++            UpgradeKind.Tire => ("TruckTire", id[(Path.GetFileNameWithoutExtension(part.Source).Length + 1)..id.LastIndexOf('_')]),
++            _ => ("TruckAddon", "")
++        };
++    }
++
++    private static string Identity(UpgradeFileEdit edit) => string.Join('|', edit.Source.Replace('\\', '/'), edit.Zone, edit.RewardIndex);
++
++    private static UpgradeFileEdit[] CurrentPickups(string workspace)
++    {
++        var pickups = new List<UpgradeFileEdit>();
++        var sources = new[] { WorkspaceOriginals.GetUpdatedRoot(workspace), WorkspaceOriginals.GetOriginalRoot(workspace) }
++            .Select(root => Path.Combine(root, "[ps]")).Where(Directory.Exists)
++            .SelectMany(root => Directory.EnumerateFiles(root, "level_*.sso", SearchOption.AllDirectories))
++            .Select(path => WorkspaceOriginals.GetRelativePath(workspace, path)).Distinct(Codes).Order(StringComparer.Ordinal);
++        foreach (var source in sources)
++        {
++            var path = WorkspaceOriginals.GetCurrentPath(workspace, source);
++            if (UpgradeTrialService.Region(Path.GetFileNameWithoutExtension(path)).Length == 0) continue;
++            var root = SsoDataReader.Parse(File.ReadAllText(path));
++            if (!root.Members.TryGetValue("zoneDesc", out var zones)) continue;
++            foreach (var (zone, settings) in zones.Members)
++                if (settings.Members.TryGetValue("props", out var props)
++                    && props.Members.TryGetValue("ZonePropertyUpgradesGiver", out var giver)
++                    && giver.Members.TryGetValue("upgrades", out var upgrades))
++                    for (var i = 0; i < upgrades.Items.Count; i++)
++                    {
++                        var id = upgrades.Items[i].Text;
++                        if (string.IsNullOrWhiteSpace(id)) throw new InvalidDataException("An upgrade pickup is unreadable. Reload level settings.");
++                        pickups.Add(new(WorkspaceOriginals.GetRelativePath(workspace, path), zone, i, "", "", id, id));
++                    }
++        }
++        if (pickups.Count == 0) throw new InvalidDataException("No current upgrade pickups were read; exploration locks were not changed.");
++        return pickups.ToArray();
++    }
++
++    internal static UpgradeChangeSnapshot Build(UpgradeTrialCatalog catalog)
++    {
++        var draft = UpgradeTrialStore.Load(catalog.Workspace);
++        if (draft is not null && draft.Assignments.Count > 0 && draft.InputStamp != catalog.Stamp)
++            throw new InvalidOperationException("Upgrade inputs changed. Randomize again before staging.");
++        var assignments = draft?.Assignments.ToDictionary(a => UpgradeTrialService.Key(a.Slot), Codes) ?? new();
++        var resets = draft?.ResetKeys?.ToHashSet(Codes) ?? [];
++        var allKeys = catalog.AllSlots.Select(UpgradeTrialService.Key).ToHashSet(Codes);
++        if (assignments.Keys.Any(k => !allKeys.Contains(k))) throw new InvalidDataException("A saved pickup no longer exists. Reload upgrades.");
++        var texts = new Dictionary<string, string>(Codes);
++        string Text(string source) => texts.TryGetValue(source, out var text) ? text
++            : texts[source] = File.ReadAllText(WorkspaceOriginals.GetCurrentPath(catalog.Workspace, source));
++        var pickupsByKey = CurrentPickups(catalog.Workspace).ToDictionary(Identity, Codes);
++        var ownedKeys = catalog.Input.Slots.Select(UpgradeTrialService.Key).ToHashSet(Codes);
++        foreach (var slot in catalog.AllSlots)
++        {
++            var key = string.Join('|', slot.Source.Replace('\\', '/'), slot.Zone, slot.RewardIndex);
++            if (!pickupsByKey.TryGetValue(key, out var current)) throw new InvalidDataException("An original pickup no longer exists. Reload level settings.");
++            if (assignments.TryGetValue(UpgradeTrialService.Key(slot), out var pending) && pending.UpgradeId != current.After)
++            {
++                if (!ownedKeys.Contains(UpgradeTrialService.Key(slot))) throw new InvalidOperationException("A draft pickup belongs to a region that is no longer owned. Reset it before staging.");
++                if (!catalog.Parts.TryGetValue(pending.UpgradeId, out var part) || !part.Definition.Eligible && pending.UpgradeId != slot.OriginalUpgradeId)
++                    throw new InvalidOperationException("A replacement upgrade is no longer eligible. Randomize again or reset it before staging.");
++            }
++            pickupsByKey[key] = current with { After = assignments.TryGetValue(UpgradeTrialService.Key(slot), out var assignment) ? assignment.UpgradeId
++                : resets.Contains(UpgradeTrialService.Key(slot)) ? slot.OriginalUpgradeId : current.After };
++        }
++        var pickups = pickupsByKey.Values.ToArray();
++        var edits = pickups.Where(e => e.Before != e.After).ToList();
++        var found = pickups.Select(e => e.After).ToHashSet(Codes);
++        if (found.Any(id => !catalog.Parts.ContainsKey(id))) throw new InvalidDataException("A resulting pickup has an unresolved upgrade definition. Exploration locks cannot be safely staged.");
++        // A tire pickup encodes family + variant + scale; exploration is stored on the
++        // shared family/variant definition, so any discoverable scale locks that variant.
++        foreach (var group in catalog.Parts.Values.GroupBy(p => { var s = Selector(p); return p.Source + "|" + s.Element + "|" + s.Variant; }, Codes))
++        {
++            var part = group.First(); var (element, variant) = Selector(part);
++            var edit = new UpgradeFileEdit(part.Source, "", -1, element, variant, null, group.Any(p => found.Contains(p.Definition.Id)) ? "true" : "false");
++            var before = Read(Text(part.Source), edit);
++            if (before != edit.After) edits.Add(edit with { Before = before });
++        }
++        return new(edits, pickups);
++    }
++
++    public static void Stage(UpgradeTrialCatalog catalog)
++    {
++        lock (Gate)
++        {
++            // Prepare reads every level setting and fails on unreadable pickup lists;
++            // unrelated component-catalog warnings do not invalidate that complete scan.
++            var snapshot = Build(catalog);
++            Validate(catalog.Workspace, snapshot);
++            TruckPropertiesStore.WriteAtomic(PendingPath(catalog.Workspace), JsonSerializer.Serialize(snapshot));
++        }
++    }
++
++    public static IReadOnlyList<WorkspaceChange> Pending(string workspace)
++    {
++        lock (Gate) return Load(workspace).Edits.GroupBy(e => e.Source, Codes).Select(g =>
++            new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, g.Key),
++                $"Upgrade randomization: {g.Count(e => e.Zone.Length > 0)} pickups; {g.Count(e => e.Zone.Length == 0)} exploration flags",
++                "Current settings", "Staged — details in Map upgrades")).ToArray();
++    }
++
++    public static bool HasDraft(UpgradeTrialCatalog catalog)
++    {
++        lock (Gate)
++        {
++            if (UpgradeTrialStore.Load(catalog.Workspace) is null) return false;
++            var desired = Build(catalog);
++            var staged = Load(catalog.Workspace);
++            return (desired.Edits.Count > 0 || staged.Edits.Count > 0) && JsonSerializer.Serialize(desired) != JsonSerializer.Serialize(staged);
++        }
++    }
++
++    public static string State(string workspace, UpgradeDistributionSlot slot, string desired)
++    {
++        var current = Pickup(File.ReadAllText(WorkspaceOriginals.GetCurrentPath(workspace, slot.Source)), slot.Zone, slot.RewardIndex).Text;
++        if (current == desired) return current == slot.OriginalUpgradeId ? "Original" : "In files";
++        return Load(workspace).Pickups.Any(e => Codes.Equals(e.Source.Replace('\\', '/'), slot.Source.Replace('\\', '/')) && Codes.Equals(e.Zone, slot.Zone)
++            && e.RewardIndex == slot.RewardIndex && e.After == desired) ? "Staged" : "Draft";
++    }
++
++    public static string CurrentId(string workspace, UpgradeDistributionSlot slot) =>
++        Pickup(File.ReadAllText(WorkspaceOriginals.GetCurrentPath(workspace, slot.Source)), slot.Zone, slot.RewardIndex).Text;
++
++    private static Dictionary<string, string> Validate(string workspace, UpgradeChangeSnapshot snapshot)
++    {
++        var outputs = new Dictionary<string, string>(Codes);
++        if (snapshot.Pickups.Count == 0 && snapshot.Edits.Count == 0) return outputs;
++        var currentPickups = CurrentPickups(workspace).ToDictionary(Identity, Codes);
++        if (!currentPickups.Keys.ToHashSet(Codes).SetEquals(snapshot.Pickups.Select(Identity)))
++            throw new InvalidDataException("The set of map upgrade pickups changed since staging. Reload and stage again.");
++        foreach (var pickup in snapshot.Pickups)
++        {
++            var value = currentPickups[Identity(pickup)].After;
++            if (value != pickup.Before && value != pickup.After) throw new InvalidDataException("Map upgrades changed since staging. Reload and stage again.");
++        }
++        foreach (var group in snapshot.Edits.GroupBy(e => e.Source, Codes))
++        {
++            var text = File.ReadAllText(WorkspaceOriginals.GetCurrentPath(workspace, group.Key));
++            foreach (var edit in group) text = Patch(text, edit);
++            outputs[group.Key] = text;
++        }
++        return outputs;
++    }
++
++    public static void Apply(string workspace)
++    {
++        lock (Gate)
++        {
++            var snapshot = Load(workspace);
++            var outputs = Validate(workspace, snapshot); // Validate every file before any write.
++            foreach (var (relative, text) in outputs)
++            {
++                var path = WorkspaceOriginals.PrepareForEdit(workspace, WorkspaceOriginals.GetCurrentPath(workspace, relative));
++                TruckPropertiesStore.WriteAtomic(path, text);
++                WorkspaceDataCache.InvalidateFile(path);
++            }
++            TruckPropertiesStore.WriteAtomic(PendingPath(workspace), JsonSerializer.Serialize(new UpgradeChangeSnapshot([], [])));
++        }
++    }
++}
+--- /dev/null
++++ b/.checks/UpgradeApply/Program.cs
+@@ -0,0 +1,143 @@
++using System.Collections;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++static class Program
++{
++    static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    static Type T(string n) => App.GetType("SnowPakTool.Desktop." + n)!;
++    static object P(object o, string n) => o.GetType().GetProperty(n)!.GetValue(o)!;
++    static object? S(string t, string n, params object?[] args)
++    {
++        try { return T(t).GetMethod(n, BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,args); }
++        catch(TargetInvocationException e) { throw e.InnerException!; }
++    }
++    static object Obj(string t, object data) => JsonSerializer.Deserialize(JsonSerializer.Serialize(data), T(t))!;
++    static object[] Items(object o) => ((IEnumerable)o).Cast<object>().ToArray();
++    static void Check(bool value, string name) { if(!value)throw new Exception(name); Console.WriteLine("PASS " + name); }
++    static void Fails(Action action, string name) { try { action(); } catch (InvalidDataException) { Check(true,name);return; } throw new Exception(name); }
++    static void Write(string root, string path, string text) { var p=Path.Combine(root,path);Directory.CreateDirectory(Path.GetDirectoryName(p)!);File.WriteAllText(p,text); }
++    static object? Prepared;
++    public static Task<TCatalog> ReturnCatalog<TCatalog>(bool force) => Task.FromResult((TCatalog)Prepared!);
++    static void Pump(Task task) { var until=DateTime.UtcNow.AddMinutes(2);while(!task.IsCompleted&&DateTime.UtcNow<until){Application.DoEvents();Thread.Sleep(5);}task.GetAwaiter().GetResult(); }
++    static object Field(object o,string name) => o.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(o)!;
++    static object? Call(object o,string name,params object?[] args) => o.GetType().GetMethod(name,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(o,args);
++    static string Slot(string zone,int index=0) => JsonSerializer.Serialize(new{Source="[ps]/level_us_01_01.sso",Map="level_us_01_01",Region="us_01",Zone=zone,RewardIndex=index,OriginalUpgradeId="old"});
++    static object Catalog(string workspace) => Obj("UpgradeTrialCatalog",new {
++        Workspace=workspace, Input=new{Slots=new[]{JsonSerializer.Deserialize<object>(Slot("zone"))},Definitions=Array.Empty<object>(),TruckHomes=Array.Empty<object>(),RegionOrder=new[]{"us_01"}},
++        AllSlots=new object[]{JsonSerializer.Deserialize<object>(Slot("zone"))!,new{Source="[ps]/level_us_02_01.sso",Map="level_us_02_01",Region="us_02",Zone="unowned",RewardIndex=0,OriginalUpgradeId="old"}},
++        Parts=new Dictionary<string,object>{
++            ["old"]=new{Definition=new{Id="old",Kind=0,CompatibleTrucks=new[]{"a"}},Name="Old",Source="[media]/classes/engines/test.xml"},
++            ["new"]=new{Definition=new{Id="new",Kind=0,CompatibleTrucks=new[]{"a"}},Name="New",Source="[media]/classes/engines/test.xml"},
++            ["absent"]=new{Definition=new{Id="absent",Kind=0,CompatibleTrucks=new[]{"a"}},Name="Absent",Source="[media]/classes/engines/test.xml"},
++            ["wheel_tire_1"]=new{Definition=new{Id="wheel_tire_1",Kind=5,CompatibleTrucks=new[]{"a"}},Name="Tire1",Source="[media]/classes/wheels/wheel.xml"},
++            ["wheel_tire_2"]=new{Definition=new{Id="wheel_tire_2",Kind=5,CompatibleTrucks=new[]{"b"}},Name="Tire2",Source="[media]/classes/wheels/wheel.xml"}},
++        Stamp="test",Warnings=Array.Empty<string>()});
++    static object Draft(string id) => Obj("UpgradeTrialDraft",new{Seed=1,CreatedAt=DateTimeOffset.UtcNow,InputStamp="test",Assignments=new[]{new{
++        Slot=JsonSerializer.Deserialize<object>(Slot("zone")),UpgradeId=id,Kind=0,Relation=0,Path=1,Fallback=false,Reused=false}},Report=(object?)null});
++    [STAThread] static void Main(string[] args)
++    {
++        if (args.Contains("--real-readonly"))
++        {
++            using var form=(Form)Activator.CreateInstance(T("MainForm"))!;
++            var field=T("MainForm").GetField("_workspacePath",BindingFlags.Instance|BindingFlags.NonPublic)!;
++            ((TextBox)field.GetValue(form)!).Text=@"S:\snowrunner_Shenanigans\AI\workspace";
++            var task=(Task)T("MainForm").GetMethod("GetUpgradeTrialCatalogAsync",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(form,new object[]{true})!;
++            while(!task.IsCompleted){Application.DoEvents();Thread.Sleep(5);}task.GetAwaiter().GetResult();
++            var real=P(task,"Result");
++            var isolated=Path.Combine(AppContext.BaseDirectory,"real-copy-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(Path.Combine(isolated,"updated"));
++            var sources=Items(P(real,"AllSlots")).Select(s=>(string)P(s,"Source")).Concat(((IDictionary)P(real,"Parts")).Values.Cast<object>().Select(p=>(string)P(p,"Source"))).Distinct(StringComparer.OrdinalIgnoreCase);
++            foreach(var source in sources){var src=(string)S("WorkspaceOriginals","GetCurrentPath",P(real,"Workspace"),source)!;var dst=Path.Combine(isolated,"original_files",source);Directory.CreateDirectory(Path.GetDirectoryName(dst)!);File.Copy(src,dst);}
++            var json=System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(real))!;json["Workspace"]=isolated;
++            var copy=JsonSerializer.Deserialize(json.ToJsonString(),T("UpgradeTrialCatalog"))!;
++            var entryType=T("RandomizationLogEntry");
++            var progress=Activator.CreateInstance(typeof(Progress<>).MakeGenericType(entryType))!;
++            S("UpgradeTrialService","Generate",copy,progress,20261105);
++            var copiedOriginal=Path.Combine(isolated,"original_files");
++            var copyHashes=Directory.GetFiles(copiedOriginal,"*",SearchOption.AllDirectories).ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
++            var snapshot=S("UpgradeChanges","Build",copy)!;
++            var outputs=(IDictionary)S("UpgradeChanges","Validate",isolated,snapshot)!;
++            S("UpgradeChanges","Stage",copy); S("UpgradeChanges","Apply",isolated);
++            Check(Items(P(S("UpgradeChanges","Build",copy)!,"Edits")).Length==0,"real-data randomization applies cleanly and is idempotent in isolated copy");
++            Check(copyHashes.All(pair=>pair.Value.SequenceEqual(SHA256.HashData(File.ReadAllBytes(pair.Key)))),"real-data copied originals preserved byte for byte");
++            Console.WriteLine($"PASS real-data isolated Stage/Apply: {Items(P(real,"AllSlots")).Length} pickups, {((IDictionary)P(real,"Parts")).Count} resolved IDs, {Items(P(snapshot,"Edits")).Length} edits across {outputs.Count} files; real workspace read only.");
++            return;
++        }
++        var workspace=Path.Combine(AppContext.BaseDirectory,"fixture-"+Guid.NewGuid().ToString("N"));
++        var original=Path.Combine(workspace,"original_files");var updated=Path.Combine(workspace,"updated");Directory.CreateDirectory(updated);
++        const string sso="// old stays here\r\nzoneDesc = { zone = { props = { Other = { id = \"old\" }, ZonePropertyUpgradesGiver = { upgrades = [ \"old\" ] } } }, other = { props = { ZonePropertyUpgradesGiver = { upgrades = [ \"wheel_tire_2\" ] } } } }\r\n";
++        Write(original,"[ps]/level_us_01_01.sso",sso);
++        Write(original,"[ps]/level_us_02_01.sso","zoneDesc = { unowned = { props = { ZonePropertyUpgradesGiver = { upgrades = [ \"old\" ] } } } }");
++        // Unowned current override must survive; it also makes one tire scale discoverable.
++        Write(updated,"[ps]/level_us_02_01.sso","zoneDesc = { unowned = { props = { ZonePropertyUpgradesGiver = { upgrades = [ \"wheel_tire_2\" ] } } } }");
++        const string xml="<?xml version=\"1.0\"?>\r\n<_templates><Engine><Template Name=\"old\" /></Engine></_templates>\r\n<EngineVariants>\r\n<Engine Name=\"old\"><GameData Price=\"500\" UnlockByExploration=\"true\" /></Engine>\r\n<Engine Name=\"new\"><GameData Price=\"700\" UnlockByExploration=\"false\" /></Engine>\r\n<Engine Name=\"absent\"><GameData UnlockByExploration=\"true\" /></Engine>\r\n</EngineVariants>";
++        Write(original,"[media]/classes/engines/test.xml",xml);
++        Write(original,"[media]/classes/wheels/wheel.xml","<TruckWheels><TruckTires><TruckTire Name=\"tire\"><GameData UnlockByExploration=\"false\" /></TruckTire></TruckTires></TruckWheels>");
++        Write(original,"[strings]/strings_english.str","");
++        var hashes=Directory.GetFiles(original,"*",SearchOption.AllDirectories).ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
++        var catalog=Catalog(workspace); S("UpgradeTrialStore","Save",workspace,Draft("new"));
++        Check(Items(S("UpgradeChanges","Pending",workspace)!).Length==0,"randomization alone does not stage or write");
++        S("UpgradeChanges","Stage",catalog);
++        var pending=Items(S("UpgradeChanges","Pending",workspace)!);
++        Check(pending.Length==3,"stages pickup and engine/tire exploration flags together");
++        Check(S("UpgradeChanges","State",workspace,JsonSerializer.Deserialize(Slot("zone"),T("UpgradeDistributionSlot"))!,"new")!.ToString()=="Staged","staged state visible");
++        Check(!File.Exists(Path.Combine(updated,"[ps]/level_us_01_01.sso")),"staging never writes game settings");
++        Prepared=catalog;
++        var loader=typeof(Program).GetMethod(nameof(ReturnCatalog))!.MakeGenericMethod(T("UpgradeTrialCatalog")).CreateDelegate(typeof(Func<,>).MakeGenericType(typeof(bool),typeof(Task<>).MakeGenericType(T("UpgradeTrialCatalog"))));
++        using(var host=new Panel{Size=new Size(1100,850)})
++        using(var tab=(Control)Activator.CreateInstance(T("MapUpgradesTab"),new object[]{new Func<string>(()=>workspace),new Func<string>(()=>""),loader})!)
++        {
++            tab.Dock=DockStyle.Fill;host.Controls.Add(tab);host.CreateControl();tab.CreateControl();
++            Call(tab,"ConfigureStaging",new Func<Task>(()=>{S("UpgradeChanges","Stage",catalog);return Task.CompletedTask;}));
++            Pump((Task)Call(tab,"EnsureLoadedAsync")!);
++            var grid=(DataGridView)Field(tab,"_upgrades");
++            Check(grid.Rows.Count==2,"map-upgrade review loads staged rows");
++            Check(grid.Rows.Cast<DataGridViewRow>().Any(r=>Convert.ToString(r.Cells["Change state"].Value)=="Staged"),"map-upgrade review labels staged pickups");
++            Check(((Button)Field(tab,"_stage")).Enabled,"map-upgrade staging button enabled");
++            Call(tab,"ConfigureStaging",new Func<Task>(()=>throw new InvalidOperationException("test conflict")));
++            ((Button)Field(tab,"_stage")).PerformClick();
++            var until=DateTime.UtcNow.AddSeconds(15);while(!((Label)Field(tab,"_status")).Text.Contains("test conflict")&&DateTime.UtcNow<until){Application.DoEvents();Thread.Sleep(5);}
++            Check(((Label)Field(tab,"_status")).Text.Contains("test conflict"),"staging errors remain visible after reloading rows");
++            using var bitmap=new Bitmap(host.Width,host.Height);host.DrawToBitmap(bitmap,new Rectangle(Point.Empty,host.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"upgrade-staging.png"));
++        }
++        using(var main=(Form)Activator.CreateInstance(T("MainForm"))!)
++        {
++            ((TextBox)Field(main,"_workspacePath")).Text=workspace;
++            Check(Items(Call(main,"PendingPakChanges",workspace)!).Length==3,"Start aggregates persisted upgrade edits without opening upgrade tabs");
++        }
++        // Frozen snapshot: changing the draft after staging must not change what Apply writes.
++        S("UpgradeTrialStore","Save",workspace,Draft("old"));
++        Write(updated,"[media]/classes/engines/test.xml",xml.Replace("Price=\"500\"","Price=\"600\""));
++        S("UpgradeChanges","Apply",workspace);
++        var saved=File.ReadAllText(Path.Combine(updated,"[ps]/level_us_01_01.sso"));
++        Check(saved==sso.Replace("upgrades = [ \"old\" ]", "upgrades = [ \"new\" ]"),"only exact source/zone/index changes; comments and other zone stay intact");
++        var engines=File.ReadAllText(Path.Combine(updated,"[media]/classes/engines/test.xml"));
++        Check(engines.Contains("Price=\"600\" UnlockByExploration=\"false\"")&&engines.Contains("Price=\"700\" UnlockByExploration=\"true\""),"resulting pickups lock new upgrade, unlock removed one, preserve unrelated price");
++        Check(engines.Contains("Name=\"absent\"><GameData UnlockByExploration=\"false\""),"absent upgrade is unlocked");
++        Check(File.ReadAllText(Path.Combine(updated,"[media]/classes/wheels/wheel.xml")).Contains("UnlockByExploration=\"true\""),"any tire scale pickup locks the common variant");
++        Check(S("UpgradeChanges","CurrentId",workspace,JsonSerializer.Deserialize("{\"Source\":\"[ps]/level_us_02_01.sso\",\"Zone\":\"unowned\",\"RewardIndex\":0}",T("UpgradeDistributionSlot"))!)!.ToString()=="wheel_tire_2","unowned-region current pickup preserved");
++        Check(Items(S("UpgradeChanges","Pending",workspace)!).Length==0,"successful Apply clears staged snapshot");
++        // Reset must restore applied pickup even after removing the assignment.
++        var slots=Array.CreateInstance(T("UpgradeDistributionSlot"),1);slots.SetValue(JsonSerializer.Deserialize(Slot("zone"),T("UpgradeDistributionSlot")),0);
++        S("UpgradeTrialStore","Reset",workspace,slots);S("UpgradeChanges","Stage",catalog);S("UpgradeChanges","Apply",workspace);
++        Check(File.ReadAllText(Path.Combine(updated,"[ps]/level_us_01_01.sso"))==sso,"reset after Apply restores exact original pickup");
++        S("UpgradeTrialStore","Save",workspace,Draft("new")); S("UpgradeChanges","Stage",catalog);
++        Write(updated,"[ps]/level_us_01_01.sso",sso.Replace("[ \"old\" ]","[ \"external\" ]"));
++        var before=File.ReadAllText(Path.Combine(updated,"[media]/classes/engines/test.xml"));
++        Fails(()=>S("UpgradeChanges","Apply",workspace),"external pickup conflict rejects Apply");
++        Check(before==File.ReadAllText(Path.Combine(updated,"[media]/classes/engines/test.xml")),"conflict validates all files before any write");
++        Check(Items(S("UpgradeChanges","Pending",workspace)!).Length>0,"failed Apply retains staged snapshot");
++        Write(updated,"[ps]/level_us_01_01.sso",sso.Replace("other =", "extra = { props = { ZonePropertyUpgradesGiver = { upgrades = [ \"new\" ] } } }, other ="));
++        Fails(()=>S("UpgradeChanges","Apply",workspace),"new pickup after staging rejects inconsistent exploration flags");
++        Write(updated,"[ps]/level_us_01_01.sso",sso);
++        Write(updated,"[media]/classes/engines/test.xml",before.Replace("Price=\"700\" UnlockByExploration=\"false\"", "Price=\"700\""));
++        Fails(()=>S("UpgradeChanges","Apply",workspace),"exploration flag conflict rejects Apply");
++        Check(hashes.All(pair=>pair.Value.SequenceEqual(SHA256.HashData(File.ReadAllBytes(pair.Key)))),"all original files remain byte identical");
++        // XMLs with inherited or self-closing variants can get explicit flags without serializing siblings.
++        var edit=Obj("UpgradeFileEdit",new{Source="x",Zone="",RewardIndex=-1,Element="Engine",Variant="inherit",Before=(string?)null,After="true"});
++        var patched=(string)S("UpgradeChanges","Patch","<EngineVariants><Engine Name=\"inherit\" _template=\"base\" /></EngineVariants>",edit)!;
++        Check(patched.Contains("<GameData UnlockByExploration=\"true\" />"),"self-closing inherited variants supported");
++        Console.WriteLine("Fixture: "+workspace);
++    }
++}
+--- /dev/null
++++ b/.checks/UpgradeApply/UpgradeApply.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++ <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++ <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

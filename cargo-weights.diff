@@ -1,0 +1,178 @@
+diff --git a/investigation/cargo-weights/CargoCatalogService.before.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoCatalogService.cs
+index dc90f2b..ee7a5e1 100644
+--- a/investigation/cargo-weights/CargoCatalogService.before.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoCatalogService.cs
+@@ -6,7 +6,7 @@ namespace SnowPakTool.Desktop;
+ 
+ internal sealed record CargoProperty(string Source, string Property, string Value);
+ internal sealed record CargoEntry(string Name, string Type, string Variant, string Content,
+-    decimal? Slots, decimal? MassKg, decimal? LoadValue, string Description,
++    decimal? Slots, decimal? LooseMassKg, decimal? PackedMassKg, decimal? LoadValue, string Description,
+     string TypeFile, string AddonFile, IReadOnlyList<CargoProperty> Properties);
+ internal sealed record CargoCatalog(IReadOnlyList<CargoEntry> Entries, IReadOnlyList<string> Warnings);
+ 
+@@ -17,13 +17,16 @@ internal static class CargoCatalogService
+         var warnings = new List<string>();
+         var types = new Dictionary<string, (string Path, XElement Xml)>(StringComparer.OrdinalIgnoreCase);
+         var addons = new List<(string Path, XElement Xml, XElement Slot)>();
++        var units = new List<(string Path, XElement Xml, IReadOnlyDictionary<string, XElement> Templates)>();
+         foreach (var path in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml"))
+         {
+             var relative = WorkspaceOriginals.GetRelativePath(workspace, path).Replace('\\', '/');
+             var isType = relative.Contains("/classes/cargo_types/", StringComparison.OrdinalIgnoreCase);
+             var isAddon = relative.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)
+                 && Path.GetFileName(path).StartsWith("cargo_", StringComparison.OrdinalIgnoreCase);
+-            if (!isType && !isAddon) continue;
++            var isUnit = relative.Contains("/classes/models/", StringComparison.OrdinalIgnoreCase)
++                && Path.GetFileName(path).StartsWith("cargo_unit_", StringComparison.OrdinalIgnoreCase);
++            if (!isType && !isAddon && !isUnit) continue;
+             try
+             {
+                 // Game XML may contain several top-level elements (templates and the definition).
+@@ -38,6 +41,10 @@ internal static class CargoCatalogService
+                     if (isAddon && element.Name.LocalName == "TruckAddon")
+                         foreach (var slot in element.Descendants("InstallSlot").Where(slot => slot.Attribute("CargoType") is not null))
+                             addons.Add((relative, element, slot));
++                    if (isUnit && element.Name.LocalName == "ModelBrand"
++                        && (string?)element.Attribute("DynamicModel") == "true"
++                        && element.Element("GameData")?.Attribute("LoadType") is not null)
++                        units.Add((relative, element, ReadBodyTemplates(path)));
+                 }
+             }
+             catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
+@@ -65,6 +72,26 @@ internal static class CargoCatalogService
+                 var properties = new List<CargoProperty>();
+                 if (definition.Xml is not null) CollectProperties(definition.Path, definition.Xml, "", properties);
+                 if (addonXml is not null) CollectProperties(addonPath!, addonXml, "", properties);
++                var looseUnits = units.Where(unit => string.Equals((string?)unit.Xml.Element("GameData")?.Attribute("LoadType"),
++                    type, StringComparison.OrdinalIgnoreCase)
++                    && (slot is null || Number((string?)unit.Xml.Element("GameData")?.Attribute("PackSlotsNumber"))
++                        == Number((string?)slot.Attribute("CargoLength")))).ToArray();
++                foreach (var unit in looseUnits)
++                {
++                    CollectProperties(unit.Path, unit.Xml, "", properties);
++                    var visitedTemplates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++                    void AddTemplate(string? name)
++                    {
++                        if (name is null || !visitedTemplates.Add(name) || !unit.Templates.TryGetValue(name, out var template)) return;
++                        CollectProperties(template.Annotation<string>()!, template, "_templates/Body/", properties);
++                        AddTemplate((string?)template.Attribute("_template"));
++                    }
++                    foreach (var body in unit.Xml.Descendants("Body")) AddTemplate((string?)body.Attribute("_template"));
++                }
++                var looseMasses = looseUnits.Select(unit => BodyMass(unit.Xml, unit.Templates)).ToArray();
++                // A cargo type can have several loose models. Do not choose an arbitrary weight.
++                decimal? looseMass = looseMasses.Length > 0 && looseMasses.All(value => value.HasValue)
++                    && looseMasses.Distinct().Count() == 1 ? looseMasses[0] : null;
+                 var massAttributes = addonXml?.Element("PhysicsModel")?.Descendants("Body")
+                     .Select(body => (string?)body.Attribute("Mass")).ToArray() ?? [];
+                 var masses = massAttributes.Select(Number).ToArray();
+@@ -76,12 +103,56 @@ internal static class CargoCatalogService
+                 var dlc = Array.FindIndex(parts, part => part.Equals("_dlc", StringComparison.OrdinalIgnoreCase));
+                 entries.Add(new CargoEntry(name, type, addonPath is null ? "—" : Path.GetFileNameWithoutExtension(addonPath),
+                     dlc >= 0 && dlc + 1 < parts.Length ? parts[dlc + 1] : "Base game",
+-                    Number((string?)slot?.Attribute("CargoLength")), mass, Number((string?)slot?.Attribute("CargoValue")),
++                    Number((string?)slot?.Attribute("CargoLength")), looseMass, mass, Number((string?)slot?.Attribute("CargoValue")),
+                     description, definition.Path ?? "", addonPath ?? "", properties));
+             }
+         }
+         return new CargoCatalog(entries.OrderBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase)
+             .ThenBy(entry => entry.Type).ThenBy(entry => entry.Variant).ToArray(), warnings);
++
++        IReadOnlyDictionary<string, XElement> ReadBodyTemplates(string file)
++        {
++            var templates = new Dictionary<string, XElement>(StringComparer.OrdinalIgnoreCase);
++            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++            void Read(string source)
++            {
++                if (!visited.Add(source)) return;
++                using var reader = XmlReader.Create(new StringReader(WorkspaceDataCache.ReadAllText(source)),
++                    new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment, DtdProcessing = DtdProcessing.Prohibit });
++                while (!reader.EOF)
++                {
++                    if (reader.NodeType != XmlNodeType.Element) { reader.Read(); continue; }
++                    var section = (XElement)XNode.ReadFrom(reader);
++                    if (section.Name.LocalName != "_templates") continue;
++                    foreach (var include in ((string?)section.Attribute("Include") ?? "").Split(
++                                 new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
++                        Read(WorkspaceOriginals.GetCurrentPath(workspace, Path.Combine("[media]", "_templates", include + ".xml")));
++                    foreach (var template in section.Element("Body")?.Elements() ?? [])
++                    {
++                        template.AddAnnotation(WorkspaceOriginals.GetRelativePath(workspace, source).Replace('\\', '/'));
++                        templates[template.Name.LocalName] = template;
++                    }
++                }
++            }
++            Read(file);
++            return templates;
++        }
++    }
++
++    private static decimal? BodyMass(XElement definition, IReadOnlyDictionary<string, XElement> templates)
++    {
++        decimal? Resolve(XElement body, HashSet<string> seen)
++        {
++            if (body.Attribute("Mass") is { } mass) return Number(mass.Value);
++            var name = (string?)body.Attribute("_template");
++            // Complex template hierarchies require full XML merging; leave them unresolved.
++            return name is not null && seen.Add(name) && templates.TryGetValue(name, out var template)
++                && !template.Descendants("Body").Any() ? Resolve(template, seen) : null;
++        }
++        var masses = definition.Element("PhysicsModel")?.Descendants("Body")
++            .Select(body => Resolve(body, new(StringComparer.OrdinalIgnoreCase))).ToArray() ?? [];
++        return masses.Length > 0 && masses.All(mass => mass.HasValue && mass >= 0)
++            ? masses.Sum(mass => mass!.Value) : null;
+     }
+ 
+     private static string Resolve(string? key, string fallback, IReadOnlyDictionary<string, string> names) =>
+diff --git a/investigation/cargo-weights/TrucksCargoTab.before.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index ea0d2f0..c05a6c4 100644
+--- a/investigation/cargo-weights/TrucksCargoTab.before.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -92,11 +92,12 @@ internal sealed class TrucksCargoTab : UserControl
+         var visible = _catalog.Entries;
+         var table = new DataTable();
+         foreach (var column in new[] { "Cargo", "Cargo type", "Variant", "Content" }) table.Columns.Add(column);
+-        foreach (var column in new[] { "Cargo length (slots)", "Body mass sum (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
++        foreach (var column in new[] { "Cargo length (slots)", "Loose weight (kg)", "Packed weight (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
+         table.Columns.Add("Entry", typeof(CargoEntry));
+         foreach (var entry in visible)
+             table.Rows.Add(entry.Name, entry.Type, entry.Variant, entry.Content,
+-                (object?)entry.Slots ?? DBNull.Value, (object?)entry.MassKg ?? DBNull.Value, (object?)entry.LoadValue ?? DBNull.Value, entry);
++                (object?)entry.Slots ?? DBNull.Value, (object?)entry.LooseMassKg ?? DBNull.Value,
++                (object?)entry.PackedMassKg ?? DBNull.Value, (object?)entry.LoadValue ?? DBNull.Value, entry);
+         _cargo.DataSource = table;
+         _cargo.Columns["Entry"]!.Visible = false;
+         foreach (DataGridViewColumn column in _cargo.Columns)
+@@ -106,7 +107,7 @@ internal sealed class TrucksCargoTab : UserControl
+         }
+         _cargo.Columns["Cargo value"]!.DefaultCellStyle.Format = "0.###";
+         _status.Text = $"{visible.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
+-            + "Blank = not defined. Log cargo length uses carrier slots.";
++            + "Blank = missing, unresolved or differing loose variants. Log cargo length uses carrier slots.";
+         if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} file(s) could not be read (see details).";
+         ShowProperties();
+     }
+@@ -117,7 +118,8 @@ internal sealed class TrucksCargoTab : UserControl
+         _description.Clear();
+         if (_cargo.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not CargoEntry entry) return;
+         _description.Text = entry.Description + Environment.NewLine
+-            + "Mass is the sum of explicitly defined addon physics bodies; it can include carrier parts."
++            + "Loose weight is per loose cargo unit (one individual log for logs). Packed weight sums the cargo addon's physics bodies for the complete load; it can include carrier parts."
++            + Environment.NewLine + "To increase both, edit Mass on the loose model bodies and on every packed addon body, preserving their proportions. Loose body templates are resolved when supported; differing loose weights remain blank. Sources are listed below."
+             + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
+         TableHeaderBehavior.Refresh(_properties);
+diff --git a/investigation/cargo-weights/README.before.md b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+index f0a97e2..b006f4c 100644
+--- a/investigation/cargo-weights/README.before.md
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+@@ -24,7 +24,7 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+-The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
++The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, loose weight (per cargo unit), packed weight (sum of addon physics body masses), and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and attributes from the cargo type, packed addon, matching loose models and referenced loose body templates. Loose models are matched by cargo type and slot count; static scenery is excluded. For logs, loose weight is one individual log and packed weight is the complete load. Missing or unresolved weights and differing loose-model weights remain blank. Simple loose body mass templates are resolved; full file inheritance and complex body template hierarchies remain unresolved. To increase both weights, multiply every packed body mass and the matching loose model body masses by the same factor; prefer a local Mass override over changing a shared template. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
+ The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: at least three characters highlight matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 

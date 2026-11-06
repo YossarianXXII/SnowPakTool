@@ -1,0 +1,170 @@
+--- a/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
++++ b/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
+@@ -46,6 +46,14 @@
+         var resetKeys = pendingChanges.Where(item => item.ResetOriginal).Select(item => item.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var uses = assignments.Values.GroupBy(item => item.Target.Code, StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
++        // Persist source class for new assignments; older plans can recover it from loaded placements.
++        var sourceClasses = catalog.Entries.Concat(pendingChanges.Select(change => change.Original))
++            .GroupBy(entry => entry.StablePlacementKey, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => SourceClass(group.First()), StringComparer.OrdinalIgnoreCase);
++        var heavyAssignments = assignments.Values.Where(item => SameClass(
++            string.IsNullOrEmpty(item.OriginalClass) ? sourceClasses.GetValueOrDefault(item.PlacementKey, "") : item.OriginalClass, "HEAVY_DUTY")).ToArray();
++        var heavyCount = heavyAssignments.Length;
++        var offroadCount = heavyAssignments.Count(item => SameClass(item.Target.Class, "OFFROAD"));
+         var regions = catalog.Entries.Where(entry => ownedRegions.Contains(entry.RegionCode) && entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal))
+             .GroupBy(entry => entry.RegionCode).OrderBy(group => order.GetValueOrDefault(group.Key, int.MaxValue)).ThenBy(group => group.Key).ToArray();
+         if (regions.Length == 0) throw new InvalidOperationException("No obtainable placements were found in owned regions.");
+@@ -61,6 +69,8 @@
+             var planned = new List<(RegionTruckEntry Entry, CustomTruck Target, MapTruckEquipment Configuration)>();
+             var counts = new Dictionary<string, int>(uses, StringComparer.OrdinalIgnoreCase);
+             var kept = 0; var skipped = 0; var fallbacks = 0;
++            var regionHeavyCount = heavyCount;
++            var regionOffroadCount = offroadCount;
+             var errors = new Dictionary<string, int>();
+             void Skip(string reason) { skipped++; errors[reason] = errors.GetValueOrDefault(reason) + 1; }
+             var work = region.OrderBy(entry => trucks.Count(truck => SameClass(truck.Class, entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class)))
+@@ -85,10 +95,43 @@
+                 var preferred = tier switch { 0 => 0, 1 => 1, 2 or 3 => 2, _ => 3 };
+                 var requested = tier == 3 ? random.NextDouble() < 0.5 ? 2 : 3 : preferred;
+                 if (random.NextDouble() < 0.15) requested = Math.Clamp(requested + (random.Next(2) == 0 ? -1 : 1), 0, 3);
+-                var candidates = trucks.Where(truck => SameClass(truck.Class, entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class)
++                var heavyDuty = SameClass(SourceClass(entry), "HEAVY_DUTY");
++                var targetQuality = position / (double)Math.Max(1, progression.Order.Count - 1) * 6;
++                var candidates = trucks.Where(truck => SameClass(truck.Class, SourceClass(entry))
+                     && !truck.Code.Equals(entry.BaselineTruckCode, StringComparison.OrdinalIgnoreCase)).ToList();
++                var rejected = 0;
++                var configurations = new Dictionary<string, (MapTruckEquipment Equipment, bool Fallback)>(StringComparer.OrdinalIgnoreCase);
++                bool Compatible(CustomTruck truck)
++                {
++                    if (configurations.ContainsKey(truck.Code)) return true;
++                    if (!equipment.TryRandomizationConfiguration(entry, truck.Code, requested, out var configuration, out var fallback))
++                    {
++                        rejected++;
++                        Detail($"{label}: candidate rejected — required addons or compatible tires are unavailable; trying another eligible truck.");
++                        return false;
++                    }
++                    configurations.Add(truck.Code, (configuration, fallback));
++                    return true;
++                }
++                List<CustomTruck>? offroadCandidates = null;
++                if (heavyDuty)
++                {
++                    // Count real choices after addon/tire validation, rather than nominal class members.
++                    candidates = candidates.Where(Compatible).ToList();
++                    var nearby = candidates.Where(truck => Math.Abs(quality[truck.Code] - targetQuality) <= 1).ToList();
++                    var scarce = nearby.Count < 3 || nearby.All(truck => counts.GetValueOrDefault(truck.Code) > 0);
++                    if (scarce && regionOffroadCount < (regionHeavyCount + 1) / 5 && random.NextDouble() < 0.18)
++                    {
++                        offroadCandidates = trucks.Where(truck => SameClass(truck.Class, "OFFROAD")
++                            && !truck.Code.Equals(entry.BaselineTruckCode, StringComparison.OrdinalIgnoreCase)
++                            && Math.Abs(quality[truck.Code] - targetQuality) <= 1 && Compatible(truck)).ToList();
++                    }
++                    // Prefer the normal tier band, widening one tier only when it has no valid choices.
++                    var wider = candidates.Where(truck => Math.Abs(quality[truck.Code] - targetQuality) <= 2).ToList();
++                    candidates = nearby.Count > 0 ? nearby : wider.Count > 0 ? wider : candidates;
++                    if (offroadCandidates is { Count: > 0 }) candidates = offroadCandidates;
++                }
+                 var accepted = false;
+-                var rejected = 0;
+                 while (candidates.Count > 0)
+                 {
+                     double Weight(CustomTruck truck)
+@@ -96,17 +139,22 @@
+                         var expected = quality[truck.Code] / 6d * Math.Max(1, progression.Order.Count - 1);
+                         var distance = expected - position;
+                         var spread = distance > 0 ? 1.6 : Math.Max(2, progression.Order.Count * 0.18);
+-                        return Math.Max(1e-8, Math.Exp(-0.5 * Math.Pow(distance / spread, 2))) / Math.Pow(1 + counts.GetValueOrDefault(truck.Code), 2);
++                        return Math.Max(1e-8, Math.Exp(-0.5 * Math.Pow(distance / spread, 2))) / Math.Pow(1 + counts.GetValueOrDefault(truck.Code), heavyDuty ? 3 : 2);
+                     }
+                     var roll = random.NextDouble() * candidates.Sum(Weight);
+                     var candidate = candidates[^1];
+                     foreach (var truck in candidates) { roll -= Weight(truck); if (roll <= 0) { candidate = truck; break; } }
+                     candidates.Remove(candidate);
+-                    if (!equipment.TryRandomizationConfiguration(entry, candidate.Code, requested, out var configuration, out var fallback))
+-                    {
+-                        rejected++;
+-                        Detail($"{label}: candidate rejected — required addons or compatible tires are unavailable; trying another same-class truck.");
+-                        continue;
++                    if (!Compatible(candidate)) continue;
++                    var (configuration, fallback) = configurations[candidate.Code];
++                    if (heavyDuty)
++                    {
++                        regionHeavyCount++;
++                        if (SameClass(candidate.Class, "OFFROAD"))
++                        {
++                            regionOffroadCount++;
++                            Detail($"{label}: limited HEAVY_DUTY → OFFROAD exception used to improve variety; within one target tier and the one-in-five saved assignment cap.");
++                        }
+                     }
+                     if (preferred != requested)
+                         Detail($"{label}: tire category {TireLabel(preferred)} → {TireLabel(requested)} (difficulty variation).");
+@@ -123,7 +171,7 @@
+                 }
+                 if (!accepted)
+                 {
+-                    Skip("no different owned, ranked truck in the same class supports the required addon configuration and tires");
++                    Skip("no different owned, ranked truck in the permitted classes supports the required addon configuration and tires");
+                     Detail($"{label}: unchanged — no valid candidate remained.");
+                 }
+             }
+@@ -134,12 +182,16 @@
+                 continue;
+             }
+             uses = counts;
++            heavyCount = regionHeavyCount;
++            offroadCount = regionOffroadCount;
+             foreach (var (reason, count) in errors) Summary($"{name}: {count} unchanged — {reason}.");
+             Summary($"{name}: complete — {planned.Count} randomized, {kept} kept, {skipped} unchanged."
+                 + (fallbacks > 0 ? $" Nearest compatible tire category used for {fallbacks} placement(s)." : ""));
+         }
+     }
+ 
++    private static string SourceClass(RegionTruckEntry entry) => entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class;
++
+     private static string TireLabel(int category) => category switch
+     {
+         0 => "Highway", 1 => "All-terrain", 2 => "Offroad", _ => "Mudtires"
+--- a/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
++++ b/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+@@ -5,7 +5,7 @@
+ internal sealed record PendingTruckReplacement(string Key, RegionTruckEntry Original, CustomTruck Target, DateTimeOffset QueuedAt,
+     MapTruckEquipment? Configuration = null, bool ResetOriginal = false, bool Randomized = false);
+ internal sealed record TruckRandomizationAssignment(string PlacementKey, string RegionCode, CustomTruck Target,
+-    MapTruckEquipment Configuration, int Seed, DateTimeOffset CreatedAt);
++    MapTruckEquipment Configuration, int Seed, DateTimeOffset CreatedAt, string OriginalClass = "");
+ 
+ /// <summary>Intent and completed assignments share one atomic file. Only Start applies map writes.</summary>
+ internal static class PendingTruckReplacements
+@@ -85,7 +85,8 @@
+                 // A user-requested reset may be replaced by a fresh roll without an intermediate map write.
+                 state.Pending.RemoveAll(item => existing.Contains(item));
+                 state.Pending.Add(new(Key(entry), entry, target, DateTimeOffset.UtcNow, configuration, Randomized: true));
+-                state.Assignments.Add(new(entry.StablePlacementKey, entry.RegionCode, target, configuration, seed, DateTimeOffset.UtcNow));
++                state.Assignments.Add(new(entry.StablePlacementKey, entry.RegionCode, target, configuration, seed, DateTimeOffset.UtcNow,
++                    entry.OriginalClass.Length > 0 ? entry.OriginalClass : entry.Class));
+             }
+             if (changes.Count > 0) Write(workspace, state);
+         }
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Regions-Trucks. That tab has Reset truck to original and Reset selected regions to original buttons, which clear assignments and queue restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when needed, and use a stronger repetition penalty. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Regions-Trucks. That tab has Reset truck to original and Reset selected regions to original buttons, which clear assignments and queue restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start → Apply pending PAK edits writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -5,7 +5,7 @@
+     internal static readonly string[] DefaultObtainableRules =
+     [
+         "Randomize only owned regions and owned trucks. When another region or truck becomes owned, keep all previously randomized placements unchanged.",
+-        "Replace trucks with trucks from the same class, including the custom Farming tractor class.",
++        "Replace trucks with trucks from the same class, including the custom Farming tractor class. When HEAVY_DUTY variety is limited, allow a rare, similarly ranked OFFROAD replacement (18% chance when eligible, capped at one per five saved HEAVY_DUTY assignments).",
+         "Prefer different replacement trucks and keep duplicate trucks to a minimum.",
+         "Use the truck tier list and player-defined region progression: favor lower-rated trucks in earlier regions and top-rated trucks in later regions. Allow fuzzy variation: a moderate chance for an SS truck to appear one or two regions earlier, and a very low chance for it to appear many regions earlier.",
+         "Choose tires using the player-defined region difficulty tier list: Highway in easier regions, then Allterrain, Offroad, and Mudtires in the hardest regions, where compatible. Allow some variation and use the first (smallest) tires in the chosen group.",

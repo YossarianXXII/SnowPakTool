@@ -1,0 +1,337 @@
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 4ee0850..2b40732 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -30,6 +30,8 @@ Region tiles retain their 150 × 210 size and are sorted by original release ord
+ 
+ Confirmed placement exceptions take precedence over inferred task rules. The 17 placements confirmed by the user on 2026-11-01 are permanently classified **Mission/task only** in `RegionTruckPlacementOverrides.cs`. Exceptions use the map and placement ID, so other copies of the same truck model retain their own availability. They survive app restarts and workspace/map reloads; the evidence pane identifies the user-confirmed rule and confirmation date. Unrelated ambiguous placements still remain **Unverified**.
+ 
++The truck table's **Tires** and **Addons** columns show each placement's map equipment, resolving blank configuration fields from the active workspace's vehicle defaults. Tires display **Highway**, **All-terrain**, **Offroad**, **Mudtires**, **Ice** (chains), or **Custom** (a tire definition compatible with only that truck in the current workspace). Hover over Tires for the specific tire name, wheel family, tire ID, rim and default/override information. Parent wheel definitions are followed when checking compatibility. If a map references a missing tire variant, the category is inferred from its stored ID where possible and the tooltip identifies the unresolved variant; unreadable equipment remains **Unknown**. Addons include explicitly installed equipment and default addons, with a map addon replacing the stock addon in the same socket. Hover over Addons for full names, IDs and default/map origins. These describe map placements rather than changes in a player save.
++
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 2950fc9..421e863 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -7,7 +7,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Func<string> _getPakPath;
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+-    private readonly TextBox _search = new() { Width = 250, PlaceholderText = "Search truck, map, task or placement ID…" };
++    private readonly TextBox _search = new() { Width = 250, PlaceholderText = "Search truck, map, task or equipment…" };
+     private readonly ComboBox _availability = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+@@ -87,6 +87,7 @@ internal sealed class RegionsTrucksTab : UserControl
+         _availability.SelectedIndexChanged += (_, _) => ApplyFilter();
+         _trucks.CurrentCellChanged += (_, _) => ShowDetails();
+         _trucks.DataBindingComplete += (_, _) => ShowDetails();
++        _trucks.CellToolTipTextNeeded += EquipmentToolTipNeeded;
+         AppColors.Changed += PaletteChanged;
+         Disposed += (_, _) => AppColors.Changed -= PaletteChanged;
+         PaletteChanged(this, EventArgs.Empty);
+@@ -203,18 +204,18 @@ internal sealed class RegionsTrucksTab : UserControl
+         var mode = _availability.SelectedItem?.ToString() ?? "All trucks";
+         var rows = _catalog.Entries.Where(entry => _selectedRegions.Contains(entry.RegionCode))
+             .Where(entry => mode == "All trucks" || entry.Availability.StartsWith(mode, StringComparison.Ordinal))
+-            .Where(entry => string.Join(" ", entry.Region, entry.Map, entry.MapCode, entry.Truck, entry.TruckCode, entry.Task, entry.PlacementId)
++            .Where(entry => string.Join(" ", entry.Region, entry.Map, entry.MapCode, entry.Truck, entry.TruckCode, entry.Task, entry.PlacementId, entry.Tires, entry.Addons)
+                 .Contains(query, StringComparison.CurrentCultureIgnoreCase))
+             .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
+         var table = new DataTable();
+-        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
++        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
+         table.Columns.Add("Entry", typeof(RegionTruckEntry));
+         foreach (var entry in rows) table.Rows.Add(entry.Region, entry.Map, entry.Truck, entry.Class,
+-            entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
++            entry.Tires, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
+         _trucks.DataSource = table;
+         _trucks.Columns["Entry"]!.Visible = false;
+         foreach (DataGridViewColumn column in _trucks.Columns)
+-            column.Width = column.Name switch { "Truck" => 210, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
++            column.Width = column.Name switch { "Truck" => 210, "Tires" => 95, "Addons" => 330, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
+         foreach (DataGridViewRow row in _trucks.Rows)
+         {
+             if (row.DataBoundItem is not DataRowView view || view["Entry"] is not RegionTruckEntry entry) continue;
+@@ -235,6 +236,15 @@ internal sealed class RegionsTrucksTab : UserControl
+         if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+ 
++    private void EquipmentToolTipNeeded(object? sender, DataGridViewCellToolTipTextNeededEventArgs e)
++    {
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || _trucks.Rows[e.RowIndex].DataBoundItem is not DataRowView row
++            || row["Entry"] is not RegionTruckEntry entry) return;
++        // Resolve from the bound entry so tooltips remain correct after sorting.
++        if (_trucks.Columns[e.ColumnIndex].Name == "Tires") e.ToolTipText = entry.TireDetails;
++        if (_trucks.Columns[e.ColumnIndex].Name == "Addons") e.ToolTipText = entry.AddonDetails;
++    }
++
+     private void PaletteChanged(object? sender, EventArgs e)
+     {
+         _trucks.BackgroundColor = _trucks.DefaultCellStyle.BackColor = AppColors.Get("Surface");
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index 1db1a0d..7e091b1 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -7,9 +7,10 @@ namespace SnowPakTool.Desktop;
+ 
+ internal sealed record RegionTruckEntry(string RegionCode, string Region, string MapCode, string Map,
+     string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
+-    float X, float Y, float Z, string Evidence, string Source);
++    float X, float Y, float Z, string Evidence, string Source,
++    string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "");
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
+-internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z);
++internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment);
+ 
+ internal static class RegionTruckCatalogService
+ {
+@@ -24,6 +25,7 @@ internal static class RegionTruckCatalogService
+         var trucks = LoadTrucks(workspace, names, warnings);
+         if (trucks.Count == 0) throw new InvalidDataException("No vehicle definitions were found in the selected workspace.");
+         var tasks = LoadTasks(workspace, names, warnings);
++        var equipmentCatalog = new TruckEquipmentCatalog(workspace, names, warnings);
+         var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+         foreach (var pak in Directory.EnumerateFiles(mapDirectory, "level_*.pak", SearchOption.TopDirectoryOnly))
+             if (MapCode.IsMatch(Path.GetFileNameWithoutExtension(pak))) sources[Path.GetFileNameWithoutExtension(pak)] = pak;
+@@ -91,9 +93,11 @@ internal static class RegionTruckCatalogService
+                     }
+                     var evidence = reason + $" Placement at 0x{placement.Offset:X}."
+                         + (links.Length == 0 ? "" : " Task sources: " + string.Join("; ", links.Select(link => link.Source).Distinct()));
++                    var equipment = equipmentCatalog.Resolve(placement.TruckCode, placement.Equipment);
+                     entries.Add(new(regionCode, region, map, mapName, placement.TruckCode, metadata.Name,
+                         metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
+-                        placement.Id, placement.X, placement.Y, placement.Z, evidence, source));
++                        placement.Id, placement.X, placement.Y, placement.Z, evidence, source,
++                        equipment.Tires, equipment.TireDetails, equipment.Addons, equipment.AddonDetails));
+                 }
+             }
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+@@ -109,12 +113,33 @@ internal static class RegionTruckCatalogService
+         {
+             if (!TryString(data, offset, out var model, out var next) || !truckCodes.Contains(model)) continue;
+             if (!TryString(data, next, out var id, out var transform) || !IsTransform(data, transform)) continue;
+-            result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56)));
++            result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56), ReadEquipment(data, transform)));
+             offset = transform + 63;
+         }
+         return result;
+     }
+ 
++    private static MapTruckEquipment ReadEquipment(byte[] data, int transform)
++    {
++        // Placement suffix: transform, flag, six bounds floats, addon count and
++        // addon IDs, then engine/gearbox/winch/suspension/wheel-family/rim/tire.
++        var position = transform + 64 + 1 + 6 * sizeof(float);
++        if (position + sizeof(uint) > data.Length || data[transform + 64] > 1) return MapTruckEquipment.Unknown;
++        var count = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position, sizeof(uint)));
++        if (count > 128) return MapTruckEquipment.Unknown;
++        position += sizeof(uint);
++        var addons = new List<string>();
++        for (var i = 0; i < count; i++)
++        {
++            if (!TryString(data, position, out var addon, out position)) return MapTruckEquipment.Unknown;
++            addons.Add(addon);
++        }
++        var fields = new string[7];
++        for (var i = 0; i < fields.Length; i++)
++            if (!TryString(data, position, out fields[i], out position)) return MapTruckEquipment.Unknown;
++        return new(true, addons, fields[4], fields[6], fields[5]);
++    }
++
+     private static bool IsTransform(byte[] data, int offset)
+     {
+         if (offset + 64 > data.Length) return false;
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+new file mode 100644
+index 0000000..b3df930
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -0,0 +1,185 @@
++using System.Text.RegularExpressions;
++using System.Xml;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record MapTruckEquipment(bool Parsed, IReadOnlyList<string> Addons, string WheelType, string Tire, string Rim)
++{
++    public static readonly MapTruckEquipment Unknown = new(false, [], "", "", "");
++}
++internal sealed record TruckEquipmentSummary(string Tires, string TireDetails, string Addons, string AddonDetails);
++
++/// <summary>Resolves per-placement equipment against the active workspace's vehicle defaults and wheel definitions.</summary>
++internal sealed class TruckEquipmentCatalog
++{
++    private sealed record Definition(string Path, XElement Xml, string Parent);
++    private sealed record Tire(string Identity, string Name, string Category);
++    private readonly IReadOnlyDictionary<string, string> _names;
++    private readonly List<string> _warnings;
++    private readonly Dictionary<string, string> _files;
++    private readonly Dictionary<string, Definition?> _definitions = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, HashSet<string>> _tireUsers = new(StringComparer.OrdinalIgnoreCase);
++
++    public TruckEquipmentCatalog(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
++    {
++        _names = names;
++        _warnings = warnings;
++        _files = WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
++            .Where(path => path.Replace('\\', '/').Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)
++                || path.Replace('\\', '/').Contains("/classes/wheels/", StringComparison.OrdinalIgnoreCase))
++            .GroupBy(path => Path.GetFileNameWithoutExtension(path)!, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
++        foreach (var (truck, path) in _files.Where(pair => string.Equals(Path.GetFileName(Path.GetDirectoryName(pair.Value)), "trucks", StringComparison.OrdinalIgnoreCase)).ToArray())
++        {
++            var chain = Chain(path).ToArray();
++            if (!chain.Any(definition => definition.Xml.Name.LocalName == "Truck")) continue;
++            var types = chain.SelectMany(definition => definition.Xml.Descendants("CompatibleWheels"))
++                .Select(element => (string?)element.Attribute("Type") ?? "")
++                .Append(DefaultWheel(chain, "DefaultWheelType")).Where(type => type.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase);
++            foreach (var type in types)
++                foreach (var tire in Tires(type).Values)
++                {
++                    if (!_tireUsers.TryGetValue(tire.Identity, out var users)) _tireUsers[tire.Identity] = users = new(StringComparer.OrdinalIgnoreCase);
++                    users.Add(truck);
++                }
++        }
++    }
++
++    public TruckEquipmentSummary Resolve(string truck, MapTruckEquipment equipment)
++    {
++        if (!equipment.Parsed) return new("Unknown", "The map equipment record could not be read; vehicle defaults were not assumed.",
++            "Unknown", "The map equipment record could not be read.");
++        var chain = FileChain(truck).ToArray();
++        var wheelType = equipment.WheelType.Length > 0 ? equipment.WheelType : DefaultWheel(chain, "DefaultWheelType");
++        var tireId = equipment.Tire.Length > 0 ? equipment.Tire : DefaultWheel(chain, "DefaultTire");
++        var rim = equipment.Rim.Length > 0 ? equipment.Rim : DefaultWheel(chain, "DefaultRim");
++        Tires(wheelType).TryGetValue(tireId, out var tire);
++        var custom = tire is not null && _tireUsers.TryGetValue(tire.Identity, out var users) && users.Count == 1 && users.Contains(truck);
++        var inferredCategory = tire is null ? Category(tireId.Replace("allterain", "allterrain", StringComparison.OrdinalIgnoreCase)) : null;
++        var category = custom ? "Custom" : tire?.Category ?? inferredCategory ?? "Unknown";
++        var tireDetails = $"{tire?.Name ?? tireId}\r\nWheel family: {wheelType}\r\nTire ID: {tireId}\r\nRim: {rim}"
++            + $"\r\nWheel family: {(equipment.WheelType.Length > 0 ? "map override" : "vehicle default")}; tire: {(equipment.Tire.Length > 0 ? "map override" : "vehicle default")}."
++            + (custom ? $"\r\nCustom: this tire definition is exclusive to this truck in the current workspace. Underlying category: {tire!.Category}." : "")
++            + (tire is null ? "\r\nThe stored tire ID has no matching definition in this wheel family. "
++                + (inferredCategory is not null ? "Category inferred from the stored ID; the exact variant could not be validated." : "The installed category could not be resolved.") : "");
++
++        var installed = equipment.Addons.Where(id => id.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
++        var mapAddons = installed.ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var occupied = installed.SelectMany(SocketTypes).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        foreach (var addon in DefaultAddons(chain))
++        {
++            if (installed.Contains(addon, StringComparer.OrdinalIgnoreCase) || SocketTypes(addon).Any(occupied.Contains)) continue;
++            installed.Add(addon);
++        }
++        var addonLabels = installed.Select(id => (Id: id, Name: AddonName(id))).ToArray();
++        var duplicateNames = addonLabels.GroupBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
++            .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.CurrentCultureIgnoreCase);
++        string Label((string Id, string Name) item) => duplicateNames.Contains(item.Name) ? $"{item.Name} ({item.Id})" : item.Name;
++        return new(category, tireDetails,
++            installed.Count == 0 ? "None" : string.Join(", ", addonLabels.Select(Label)),
++            installed.Count == 0 ? "No addons installed in the map record or vehicle defaults."
++                : string.Join("\r\n", addonLabels.Select(item => $"{item.Name} — {item.Id} [{(mapAddons.Contains(item.Id) ? "map" : "vehicle default")}]")));
++    }
++
++    private static string DefaultWheel(IEnumerable<Definition> chain, string attribute) => chain
++        .Select(definition => (string?)definition.Xml.Element("TruckData")?.Element("Wheels")?.Attribute(attribute))
++        .FirstOrDefault(value => value is not null) ?? "";
++
++    private static IEnumerable<string> DefaultAddons(IReadOnlyList<Definition> chain)
++    {
++        var sockets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var definition in chain.Reverse())
++            foreach (var addonSockets in definition.Xml.Element("GameData")?.Elements("AddonSockets") ?? [])
++            {
++                if (addonSockets.Attribute("DefaultAddon") is not { } addon) continue;
++                var types = addonSockets.Elements("Socket").SelectMany(socket => Split((string?)socket.Attribute("Names"))).Order().ToArray();
++                sockets[types.Length == 0 ? addon.Value : string.Join(",", types)] = addon.Value;
++            }
++        return sockets.Values.Where(id => id.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase);
++    }
++
++    private string AddonName(string id)
++    {
++        var key = FileChain(id).Select(definition => (string?)definition.Xml.Element("GameData")?.Element("UiDesc")?.Attribute("UiName"))
++            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
++        return key is not null ? _names.GetValueOrDefault(key, id) : id;
++    }
++
++    private IEnumerable<string> SocketTypes(string id) => FileChain(id)
++        .SelectMany(definition => definition.Xml.Element("GameData")?.Elements("InstallSocket") ?? [])
++        .SelectMany(socket => Split((string?)socket.Attribute("Type"))).Distinct(StringComparer.OrdinalIgnoreCase);
++
++    private Dictionary<string, Tire> Tires(string type)
++    {
++        var tires = new Dictionary<string, Tire>(StringComparer.OrdinalIgnoreCase);
++        foreach (var definition in FileChain(type).Reverse())
++            foreach (var element in definition.Xml.Element("TruckTires")?.Elements("TruckTire") ?? [])
++            {
++                var id = (string?)element.Attribute("Name");
++                if (string.IsNullOrWhiteSpace(id)) continue;
++                var ui = element.Element("GameData")?.Element("UiDesc");
++                var key = (string?)ui?.Attribute("UiName") ?? "";
++                var description = (string?)ui?.Attribute("UiDesc") ?? "";
++                var friction = (string?)element.Element("WheelFriction")?.Attribute("_template") ?? "";
++                var template = (string?)element.Attribute("_template") ?? "";
++                // UI category descriptions are more reliable than template names reused by unique tires.
++                var category = Category(description) ?? Category(friction) ?? Category(template) ?? Category(id) ?? "Unknown";
++                tires[id] = new(definition.Path + "|" + id, _names.GetValueOrDefault(key, id), category);
++            }
++        return tires;
++    }
++
++    private static string? Category(string value)
++    {
++        value = value.Replace("_", "").Replace("-", "").ToLowerInvariant();
++        if (value.Contains("chain") || value == "ice") return "Ice";
++        if (value.Contains("mudtire")) return "Mudtires";
++        if (value.Contains("allterrain")) return "All-terrain";
++        if (value.Contains("offroad")) return "Offroad";
++        if (value.Contains("highway")) return "Highway";
++        return null;
++    }
++
++    private IEnumerable<Definition> FileChain(string code) => _files.TryGetValue(code, out var path) ? Chain(path) : [];
++
++    private IEnumerable<Definition> Chain(string path)
++    {
++        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        while (visited.Count < 32 && visited.Add(path))
++        {
++            var definition = Read(path);
++            if (definition is null) yield break;
++            yield return definition;
++            if (definition.Parent.Length == 0) yield break;
++            var sibling = Path.Combine(Path.GetDirectoryName(path)!, definition.Parent + ".xml");
++            if (_files.Values.Contains(sibling, StringComparer.OrdinalIgnoreCase)) path = sibling;
++            else if (!_files.TryGetValue(definition.Parent, out path!)) yield break;
++        }
++    }
++
++    private Definition? Read(string path)
++    {
++        if (_definitions.TryGetValue(path, out var cached)) return cached;
++        try
++        {
++            var text = WorkspaceDataCache.ReadAllText(path);
++            // Game XML uses fragments and undeclared region-prefixed tags.
++            text = Regex.Replace(text, @"<\?xml[\s\S]*?\?>", "");
++            text = Regex.Replace(text, @"<(/?)([A-Za-z_][\w.-]*):", "<$1$2_");
++            var root = XElement.Parse("<Root>" + text + "</Root>");
++            var element = root.Elements().FirstOrDefault(element => element.Name.LocalName is "Truck" or "TruckAddon" or "TruckWheels");
++            var definition = element is null ? null : new Definition(path, element, (string?)root.Element("_parent")?.Attribute("File") ?? "");
++            _definitions[path] = definition;
++            return definition;
++        }
++        catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
++        {
++            _warnings.Add($"Equipment definition {Path.GetFileName(path)}: {ex.Message}");
++            _definitions[path] = null;
++            return null;
++        }
++    }
++
++    private static IEnumerable<string> Split(string? value) => (value ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
++}

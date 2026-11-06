@@ -1,0 +1,58 @@
+diff --git a/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs b/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
+index 376a8f4..bbd3a98 100644
+--- a/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
++++ b/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
+@@ -27,27 +27,24 @@ internal static class TruckDetailsFormatter
+         Section("AVAILABILITY EVIDENCE", entry.Evidence);
+         text.AppendLine(); text.AppendLine("INTERNAL EQUIPMENT / DRIVETRAIN");
+         if (entry.InternalEquipment is not { Count: > 0 }) text.AppendLine("Internal equipment could not be resolved from this placement.");
+-        else foreach (var item in entry.InternalEquipment)
++        else foreach (var item in entry.InternalEquipment.Where(item => item.Slot != "Vehicle definition"))
+         {
+-            text.AppendLine($"{item.Slot}: {item.Name}" + (item.Id.Length > 0 ? $" ({item.Id})" : "") + $" [{item.Origin}]");
+-            if (item.SourcePath.Length > 0) text.AppendLine("  Source: " + item.SourcePath);
+-            if (item.DefinitionDetails.Length > 0) text.AppendLine("  " + item.DefinitionDetails.Replace("\r\n", "\r\n  "));
+-            text.AppendLine();
+-        }
+-        text.AppendLine("VISUAL ADDONS (_tuning folders)");
+-        var visual = (entry.InstalledAddons ?? []).Where(addon => addon.IsVisual).ToArray();
+-        if (entry.InstalledAddons is null) text.AppendLine("Installed addon data could not be read.");
+-        else if (visual.Length == 0) text.AppendLine("None.");
+-        else foreach (var addon in visual)
+-        {
+-            text.AppendLine($"• {addon.Name} ({addon.Id}) [{addon.Origin}; category: {addon.Category}]");
+-            text.AppendLine("  Source: " + addon.SourcePath);
++            text.AppendLine($"{item.Slot}: {item.Name}");
+         }
++        Addons("VISUAL ADDONS (_tuning folders)", addon => addon.IsVisual);
++        var vehicle = entry.InternalEquipment?.FirstOrDefault(item => item.Slot == "Vehicle definition");
++        if (vehicle is not null) Section("VEHICLE PROPERTIES", vehicle.DefinitionDetails);
+         Section("TIRE / WHEEL DETAILS", entry.TireDetails);
+-        Section("FRAME ADDON DETAILS", entry.FrameAddonDetails);
+-        Section("OTHER ADDON DETAILS", entry.AddonDetails);
++        Addons("FRAME ADDONS", addon => !addon.IsVisual && addon.IsFrameAddon);
++        Addons("OTHER ADDONS", addon => !addon.IsVisual && !addon.IsFrameAddon);
+         return text.ToString().TrimEnd();
+ 
++        void Addons(string title, Func<InstalledAddonInfo, bool> predicate)
++        {
++            var names = entry.InstalledAddons?.Where(predicate).Select(addon => "• " + addon.Name).ToArray();
++            Section(title, names is null ? "Installed addon data could not be read." : names.Length == 0 ? "None." : string.Join(Environment.NewLine, names));
++        }
++
+         void Section(string title, string body)
+         { text.AppendLine(); text.AppendLine(title); text.AppendLine(body.Length == 0 ? "Not available." : body); }
+     }
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 33c5254..b6b09c1 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -40,7 +40,7 @@ In this application, **visual addons** specifically means addon definitions stor
+ 
+ The table excludes visual (`_tuning`) parts from both addon columns. The remaining equipment with `Category="frame_addons"` appears in **Frame addons**; the other remaining parts appear in **Addons**. Each column has a tooltip containing only that group's installed parts, including source IDs and default/map origins. The full installed-equipment metadata is retained for search and future filters. Empty groups display **None**.
+ 
+-The bottom details pane is resizable using the horizontal divider above it. It shows all hidden visual (`_tuning`) addons and their categories/source IDs, plus installed engine, gearbox, winch, suspension, AWD/transfer-box and differential-lock equipment. Map overrides take precedence over vehicle socket defaults. Component names resolve through the workspace definitions, including parent variant files; unresolved IDs are displayed explicitly. Each item includes its origin, source XML and explicit definition settings. Vehicle definition properties (such as fuel capacity), specific tires/rims/wheel scale, detailed frame/other addon information, placement coordinates, the full orientation/position matrix, binary record offset and availability evidence are also listed. Definition settings are identified separately from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
++The bottom details pane is resizable using the horizontal divider above it. Visual (`_tuning`), frame and other addons are listed by name only. Internal equipment lists the slot and component name, including engine, gearbox, winch, suspension and drivetrain equipment; addon IDs, origins, XML paths and technical settings are omitted from these lists. Map overrides take precedence over vehicle socket defaults. Component names resolve through workspace definitions, including parent variant files; unresolved names fall back to their IDs. Vehicle definition properties (such as fuel capacity), specific tires/rims/wheel scale, placement coordinates, the full orientation/position matrix, binary record offset and availability evidence remain available. Definition settings are identified separately from player save-state values, and template-inherited settings are not presented as fully resolved. All displayed details participate in the shared current-tab search.
+ 
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 

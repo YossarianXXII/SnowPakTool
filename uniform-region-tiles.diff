@@ -1,0 +1,34 @@
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -628,7 +628,7 @@
+         };
+         var classOverlay = new Label
+         {
+-            Text = region ? (string.IsNullOrWhiteSpace(truck.MapNames) ? "Map names unavailable" : truck.MapNames) : truck.Class,
++            Text = region ? (string.IsNullOrWhiteSpace(truck.MapNames) ? "Map names unavailable" : truck.MapNames.Replace("\r\n", ", ").Replace("\n", ", ")) : truck.Class,
+             Dock = DockStyle.Bottom,
+             Height = 24,
+             BackColor = Color.FromArgb(32, 38, 45),
+@@ -638,18 +638,11 @@
+         };
+         if (region)
+         {
+-            var headerSize = TextRenderer.MeasureText(name.Text, name.Font,
+-                new Size(RegionTileWidth - 12, int.MaxValue), TextFormatFlags.WordBreak);
+-            var headerHeight = Math.Max(44, headerSize.Height + 6);
+-            var footerSize = TextRenderer.MeasureText(classOverlay.Text, classOverlay.Font,
+-                new Size(RegionTileWidth - 12, int.MaxValue), TextFormatFlags.WordBreak);
+-            classOverlay.Height = Math.Max(32, footerSize.Height + 8);
++            tile.Height = 240;
++            name.Height = 44;
++            classOverlay.Height = 60;
+             classOverlay.Padding = new Padding(4);
+-            name.Height = headerHeight;
+-            var thumbnail = image.Image;
+-            var ratio = thumbnail is not null ? (double)thumbnail.Height / thumbnail.Width : 245.0 / 435;
+-            var imageHeight = (int)Math.Round((RegionTileWidth - 2) * ratio);
+-            tile.Height = headerHeight + classOverlay.Height + imageHeight + 2;
++            classOverlay.AutoEllipsis = true;
+         }
+         tile.Controls.Add(image);
+         tile.Controls.Add(name);

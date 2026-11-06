@@ -1,0 +1,372 @@
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -1,4 +1,5 @@
+ using System.Data;
++using System.Globalization;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+@@ -6,6 +7,10 @@
+ {
+     private readonly Func<string> _getWorkspacePath;
+     private readonly bool _frameAddonsOnly;
++    private readonly TrackBar _fuelMultiplier = new() { Minimum = 1, Maximum = 6, Value = 2, TickFrequency = 1, SmallChange = 1, LargeChange = 1, Width = 150, Height = 38, AutoSize = false, AccessibleName = "Frame addon fuel capacity multiplier" };
++    private readonly Label _fuelMultiplierValue = new() { Text = "×1.0", AutoSize = true, Margin = new Padding(4, 8, 8, 0) };
++    private readonly FlowLayoutPanel _fuelTools = new() { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty, Enabled = false };
++    private Dictionary<string, FrameAddonFuelRow> _fuelRows = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
+     private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+     private readonly DataGridView _addons = CreateGrid(new BoundCatalogGrid());
+@@ -23,7 +28,9 @@
+         _getWorkspacePath = getWorkspacePath;
+         _frameAddonsOnly = frameAddonsOnly;
+         if (_frameAddonsOnly) _reload.Text = "Reload frame addons";
+-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 6 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
+@@ -33,11 +40,40 @@
+         toolbar.Controls.Add(new Label { Text = _frameAddonsOnly ? "Frame addons" : "Addons", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
+         toolbar.Controls.Add(_reload);
+         if (!_frameAddonsOnly) toolbar.Controls.Add(_switchAddons);
++        if (_frameAddonsOnly)
++        {
++            _fuelTools.Controls.Add(new Label { Text = "Fuel multiplier", AutoSize = true, Margin = new Padding(4, 8, 0, 4) });
++            _fuelTools.Controls.Add(_fuelMultiplier);
++            _fuelTools.Controls.Add(_fuelMultiplierValue);
++            _fuelMultiplier.ValueChanged += (_, _) => _fuelMultiplierValue.Text = "×" + (_fuelMultiplier.Value / 2m).ToString("0.0", CultureInfo.CurrentCulture);
++            void Button(string text, Action action)
++            {
++                var button = new Button { Text = text, AutoSize = true };
++                button.Click += (_, _) =>
++                {
++                    if (!FuelReady()) return;
++                    try { action(); }
++                    catch (Exception ex) { _status.Text = "Could not update frame addon fuel: " + ex.Message; }
++                };
++                _fuelTools.Controls.Add(button);
++            }
++            Button("Multiply all fuel", MultiplyFuel);
++            Button("Stage changes", StageFuel);
++            Button("Revert unstaged edits", () => { RestoreStagedFuel(); UpdateFuelCells(); });
++            Button("Revert staged changes", () => { FrameAddonFuelStore.Save(_loadedWorkspace!, []); RestoreStagedFuel(); UpdateFuelCells(); });
++            Button("Reset to original values", () =>
++            {
++                foreach (var row in _fuelRows.Values) row.Draft = TruckPropertiesStore.RoundFuel(row.Original);
++                UpdateFuelCells();
++            });
++            layout.Controls.Add(_fuelTools, 0, 1);
++            _addons.CellFormatting += FormatFuel;
++        }
+         layout.Controls.Add(toolbar, 0, 0);
+-        layout.Controls.Add(_status, 0, 1);
+-        layout.Controls.Add(_addons, 0, 2);
+-        layout.Controls.Add(_description, 0, 3);
+-        layout.Controls.Add(_properties, 0, 4);
++        layout.Controls.Add(_status, 0, 2);
++        layout.Controls.Add(_addons, 0, 3);
++        layout.Controls.Add(_description, 0, 4);
++        layout.Controls.Add(_properties, 0, 5);
+         Controls.Add(layout);
+         _properties.Columns.Add("Property", _frameAddonsOnly ? "Selected frame addon property" : "Selected addon / upgrade property");
+         _properties.Columns.Add("Value", "Value");
+@@ -62,6 +98,7 @@
+     public void EnsureLoaded() => _ = EnsureLoadedAsync();
+ 
+     public Task EnsureLoadedAsync() => LoadAsync(force: false);
++    internal void InvalidateCatalog() => _loadedWorkspace = null;
+ 
+     private async Task LoadAsync(bool force)
+     {
+@@ -69,6 +106,8 @@
+         var workspace = _getWorkspacePath().Trim();
+         if (!force && string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) return;
+         _catalog = null;
++        _fuelTools.Enabled = false;
++        _fuelRows.Clear();
+         _switchAddons.Enabled = false;
+         _loadedWorkspace = null;
+         _addons.DataSource = null;
+@@ -89,10 +128,14 @@
+             else await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+             var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+             var catalog = await Task.Run(() => AddonCatalogService.Load(workspace, names));
++            var fuelRows = _frameAddonsOnly ? await Task.Run(() => LoadFuelRows(workspace, catalog)) : new Dictionary<string, FrameAddonFuelRow>();
+             if (IsDisposed || !string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
+             _catalog = catalog;
+             _loadedWorkspace = workspace;
++            _fuelRows = fuelRows;
++            if (_frameAddonsOnly) RestoreStagedFuel();
+             ApplyFilter();
++            _fuelTools.Enabled = _frameAddonsOnly;
+         }
+         catch (Exception ex) { if (!IsDisposed) _status.Text = $"Could not load addons: {ex.Message}"; }
+         finally
+@@ -154,7 +197,7 @@
+         static object Value(decimal? value) => (object?)value ?? DBNull.Value;
+         foreach (var entry in entries)
+             table.Rows.Add(entry.Name, entry.Id, entry.Family, entry.Content, entry.Exploration,
+-                Value(entry.Frame?.CargoSlots), Value(entry.Frame?.Fuel), Value(entry.Frame?.Water),
++                Value(entry.Frame?.CargoSlots), Value(_fuelRows.TryGetValue(entry.Source, out var fuel) ? fuel.Draft : entry.Frame?.Fuel), Value(entry.Frame?.Water),
+                 Value(entry.Frame?.Repairs), Value(entry.Frame?.SpareWheels), Value(entry.Price), Value(entry.UnlockRank), entry);
+         _binding = true;
+         try
+@@ -172,7 +215,7 @@
+             for (var i = 0; i < order.Length; i++) _addons.Columns[order[i]]!.DisplayIndex = i;
+         }
+         finally { _binding = false; }
+-        _status.Text = $"Frame addons · {entries.Count} definitions · Read-only catalog. Header funnels filter columns; select a row for all source properties."
++        _status.Text = $"Frame addons · {entries.Count} definitions · Fuel multiplier previews explicit capacities; stage changes, then apply from Start. Header funnels filter columns; select a row for all source properties."
+             + (_catalog!.Warnings.Count > 0 ? $" {_catalog.Warnings.Count} catalog warnings (see details)." : "");
+         ShowProperties();
+     }
+@@ -191,11 +234,76 @@
+         foreach (var reference in entry.MapReferences)
+             _properties.Rows.Add($"Map reward: {reference.Map} / {reference.Zone} / upgrades[{reference.Index}]", reference.UpgradeId, reference.Source);
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++        if (_frameAddonsOnly && _fuelRows.TryGetValue(entry.Source, out var fuel))
++            _properties.Rows.Add("Fuel capacity preview (L)", fuel.Draft.ToString(CultureInfo.InvariantCulture), entry.Source);
+         TableHeaderBehavior.Refresh(_properties);
+     }
+ 
+     private static bool IsInternal(AddonCatalogEntry entry) => entry.Type != "Addon"
+         || entry.Category is "awd" or "diff_lock" or "snorkel";
++
++    private bool FuelReady() => _frameAddonsOnly && !_loading && _catalog is not null && _loadedWorkspace is not null
++        && string.Equals(_loadedWorkspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase);
++
++    private static Dictionary<string, FrameAddonFuelRow> LoadFuelRows(string workspace, AddonCatalog catalog)
++    {
++        var result = new Dictionary<string, FrameAddonFuelRow>(StringComparer.OrdinalIgnoreCase);
++        foreach (var entry in catalog.Entries.Where(entry => entry.Type == "Addon" && entry.Category.Equals("frame_addons", StringComparison.OrdinalIgnoreCase)))
++        {
++            // Only locally explicit capacities/category are writable. Never multiply a shared parent on behalf of its children.
++            if (!entry.Properties.Any(property => property.Source == entry.Source && property.Property == "TruckAddon/GameData/@Category")) continue;
++            var current = FrameAddonFuelStore.Read(File.ReadAllText(WorkspaceOriginals.GetCurrentPath(workspace, entry.Source)));
++            if (current is null) continue;
++            var originalPath = WorkspaceOriginals.GetOriginalReadPath(workspace, entry.Source);
++            var original = File.Exists(originalPath) ? FrameAddonFuelStore.Read(File.ReadAllText(originalPath)) ?? current.Value : current.Value;
++            result[entry.Source] = new(entry.Name, original, current.Value);
++        }
++        return result;
++    }
++
++    private void RestoreStagedFuel()
++    {
++        var staged = FrameAddonFuelStore.Load(_loadedWorkspace!);
++        foreach (var pair in _fuelRows)
++            pair.Value.Draft = staged.FirstOrDefault(edit => edit.RelativeFile.Equals(pair.Key, StringComparison.OrdinalIgnoreCase))?.After ?? pair.Value.Current;
++    }
++
++    private void MultiplyFuel()
++    {
++        if (!FuelReady()) return;
++        foreach (var row in _fuelRows.Values) row.Draft = TruckPropertiesStore.RoundFuel(row.Draft * (_fuelMultiplier.Value / 2m));
++        UpdateFuelCells();
++    }
++
++    private void StageFuel()
++    {
++        var edits = _fuelRows.Where(pair => pair.Value.Draft != pair.Value.Current)
++            .Select(pair => new FrameAddonFuelEdit(pair.Key, pair.Value.Name, pair.Value.Current, pair.Value.Draft)).ToList();
++        FrameAddonFuelStore.Save(_loadedWorkspace!, edits);
++        _status.Text = $"Staged {edits.Count} frame addon fuel changes. Apply pending PAK edits from Start.";
++    }
++
++    private void UpdateFuelCells()
++    {
++        if (_addons.DataSource is not DataTable table) return;
++        foreach (DataRow row in table.Rows)
++            if (row["Entry"] is AddonCatalogEntry entry && _fuelRows.TryGetValue(entry.Source, out var fuel)) row["Fuel (L)"] = fuel.Draft;
++        _addons.Invalidate();
++        ShowProperties();
++        _status.Text = $"{_fuelRows.Count} explicit fuel capacities · {_fuelRows.Values.Count(row => row.Draft != row.Current)} changed values. Preview only; Stage changes, then apply from Start. Blank/inherited capacities stay unchanged.";
++    }
++
++    private void FormatFuel(object? sender, DataGridViewCellFormattingEventArgs e)
++    {
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || _addons.Columns[e.ColumnIndex].Name != "Fuel (L)"
++            || _addons.Rows[e.RowIndex].DataBoundItem is not DataRowView view || view["Entry"] is not AddonCatalogEntry entry
++            || !_fuelRows.TryGetValue(entry.Source, out var row)) return;
++        e.CellStyle!.BackColor = row.Draft != row.Current ? Color.LightGoldenrodYellow
++            : row.Draft != row.Original ? Color.Honeydew : AppColors.Get("Surface");
++        e.Value = row.Draft != row.Original ? $"{row.Draft:N0} ({row.Original:N0})" : row.Draft.ToString("N0");
++        e.FormattingApplied = true;
++        _addons.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = $"Original: {row.Original:N0} L\nIn files: {row.Current:N0} L\nPreview: {row.Draft:N0} L\nMultiplier: 0.5×–3×; round to 5 L; range 5–100,000 L.";
++    }
+ 
+     private void RefreshColors(object? sender, EventArgs e)
+     {
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/FrameAddonFuelStore.cs
+@@ -0,0 +1,98 @@
++using System.Globalization;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record FrameAddonFuelEdit(string RelativeFile, string Name, decimal Before, decimal After);
++internal sealed class FrameAddonFuelRow(string name, decimal original, decimal current)
++{
++    public string Name { get; } = name;
++    public decimal Original { get; } = original;
++    public decimal Current { get; } = current;
++    public decimal Draft { get; set; } = current;
++}
++
++internal static class FrameAddonFuelStore
++{
++    private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "frame-addon-fuel", "pending-changes.json");
++    private static Match Root(string text) => Regex.Match(text, @"<TruckAddon(?=[\s>])[\s\S]*?</TruckAddon\s*>");
++    internal static decimal? Read(string text)
++    {
++        var root = Root(text);
++        if (!root.Success) return null;
++        var xml = XElement.Parse(root.Value);
++        return decimal.TryParse((string?)xml.Element("TruckData")?.Attribute("FuelCapacity"), NumberStyles.Float,
++            CultureInfo.InvariantCulture, out var value) ? value : null;
++    }
++
++    internal static List<FrameAddonFuelEdit> Load(string workspace)
++    {
++        var path = PendingPath(workspace);
++        var edits = File.Exists(path) ? JsonSerializer.Deserialize<List<FrameAddonFuelEdit>>(File.ReadAllText(path))
++            ?? throw new InvalidDataException("Missing frame addon fuel edits.") : [];
++        Validate(edits);
++        return edits;
++    }
++
++    private static void Validate(IReadOnlyList<FrameAddonFuelEdit> edits)
++    {
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var edit in edits)
++        {
++            var path = edit?.RelativeFile?.Replace('\\', '/');
++            if (edit is null || path is null || edit.Name is null || Path.IsPathRooted(path) || path.Contains(':')
++                || path.Split('/').Any(part => part is ".." or "." or "")
++                || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase)
++                || !path.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
++                || !seen.Add(path) || edit.After < 5 || edit.After > 100000 || edit.After % 5 != 0)
++                throw new InvalidDataException("Invalid or duplicate frame addon fuel edit.");
++        }
++    }
++
++    internal static void Save(string workspace, List<FrameAddonFuelEdit> edits)
++    {
++        Validate(edits);
++        TruckPropertiesStore.WriteAtomic(PendingPath(workspace), JsonSerializer.Serialize(edits, new JsonSerializerOptions { WriteIndented = true }));
++    }
++
++    internal static IEnumerable<WorkspaceChange> Pending(string workspace) => Load(workspace).Select(edit =>
++        new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
++            edit.Name + " / Fuel capacity (L)", edit.Before.ToString(CultureInfo.InvariantCulture), edit.After.ToString(CultureInfo.InvariantCulture)));
++
++    internal static string Patch(string text, FrameAddonFuelEdit edit)
++    {
++        Validate([edit]);
++        var root = Root(text);
++        var current = Read(text);
++        if (current is null || current != edit.Before && current != edit.After)
++            throw new InvalidDataException($"{edit.Name}: fuel capacity changed since staging. Reload and stage again.");
++        var xml = XElement.Parse(root.Value);
++        if (!string.Equals((string?)xml.Element("GameData")?.Attribute("Category"), "frame_addons", StringComparison.OrdinalIgnoreCase))
++            throw new InvalidDataException($"{edit.Name}: expected an explicitly defined frame addon category.");
++        var tags = Regex.Matches(root.Value, @"<TruckData\b[^>]*>");
++        if (tags.Count != 1) throw new InvalidDataException($"{edit.Name}: ambiguous TruckData element.");
++        var attribute = Regex.Match(tags[0].Value, "\\bFuelCapacity\\s*=\\s*(?<quote>[\"'])(?<value>[^\"']*)\\k<quote>");
++        if (!attribute.Success) throw new InvalidDataException($"{edit.Name}: missing explicit fuel capacity.");
++        var value = attribute.Groups["value"];
++        var offset = root.Index + tags[0].Index + value.Index;
++        return text.Remove(offset, value.Length).Insert(offset, edit.After.ToString(CultureInfo.InvariantCulture));
++    }
++
++    internal static void Apply(string workspace)
++    {
++        var outputs = Load(workspace).Select(edit =>
++        {
++            var path = WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile);
++            return (Path: path, Text: Patch(File.ReadAllText(path), edit));
++        }).ToArray();
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(workspace, output.Path);
++            TruckPropertiesStore.WriteAtomic(path, output.Text);
++            WorkspaceDataCache.InvalidateFile(path);
++        }
++        Save(workspace, []);
++    }
++}
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -411,7 +411,7 @@
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -421,6 +421,7 @@
+         if (_truckEditTab.PendingChanges(workspace).Any()) _truckEditTab.SavePendingChanges();
+         if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
+         if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
++        if (FrameAddonFuelStore.Pending(workspace).Any()) _truckEditTab.ApplyFrameAddonFuelChanges(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+ 
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -234,6 +234,13 @@
+         else if (page.Name == "Frame addons") _frameAddonsTab.EnsureLoaded();
+     }
+ 
++    internal void ApplyFrameAddonFuelChanges(string workspace)
++    {
++        FrameAddonFuelStore.Apply(workspace);
++        _frameAddonsTab.InvalidateCatalog();
++        _addonsTab.InvalidateCatalog();
++    }
++
+     private Control CreatePlaceholder(string text)
+     {
+         return new Label { Dock = DockStyle.Fill, Text = text, TextAlign = ContentAlignment.MiddleCenter, ForeColor = SystemColors.GrayText };
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -440,7 +440,7 @@
+         data.Draft[spec.Attribute] = value; PaintValue(_grid.Rows[e.RowIndex], spec); UpdateStatus();
+     }
+ 
+-    private static decimal RoundFuel(decimal value) => Math.Clamp(decimal.Round(value / 5m, 0, MidpointRounding.AwayFromZero) * 5m, 5, 100000);
++    private static decimal RoundFuel(decimal value) => TruckPropertiesStore.RoundFuel(value);
+ 
+     private void MultiplyFuel()
+     {
+--- a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+@@ -13,6 +13,7 @@
+ 
+ internal static class TruckPropertiesStore
+ {
++    internal static decimal RoundFuel(decimal value) => Math.Clamp(decimal.Round(value / 5m, 0, MidpointRounding.AwayFromZero) * 5m, 5, 100000);
+     internal static readonly TruckPropertySpec[] Specs =
+     [
+         new("TruckData", "FuelCapacity", "Fuel capacity (L)", 10, 1, 100000),
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,9 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-**Editors â†’ Frame addons** lists frame attachments, roof racks and service equipment using the same read-only table, description and source-property view as Addons and Cargo. The main table shows cargo slots, fuel/water capacity, repair points, spare wheels, price, unlock rank, exploration lock, install socket, content and ID, with shared column sorting/filtering. Selecting a row shows all XML properties and source files below. Explicit file parents supply inherited summary values; templates remain visible without expansion, so blank capacities are unresolved rather than assumed zero. Install sockets do not establish complete truck compatibility. Reload reads the current workspace in the background; no game data is edited.
++**Editors → Frame addons** lists frame attachments, roof racks and service equipment with the same table, description and source-property view as Addons and Cargo. The main table shows cargo slots, fuel/water capacity, repair points, spare wheels, price, unlock rank, exploration lock, install socket, content and ID, with shared column sorting/filtering. Selecting a row shows all XML properties and source files below. Explicit file parents supply inherited summary values; templates remain visible without expansion, so blanks are unresolved rather than assumed zero. Install sockets do not establish complete truck compatibility.
++
++The **Fuel multiplier** slider uses Truck properties' shared calculations: 0.5×–3× in 0.5 steps. Moving it only selects the factor; **Multiply all fuel** multiplies the current preview of every frame addon with a locally explicit fuel capacity and category, rounds to the nearest 5 litres (ties upward), and clamps to 5–100,000 L. Repeated clicks multiply again; column filters do not restrict the operation. Blank/inherited capacities stay unchanged. Changed fuel cells show the preserved original in parentheses, with amber preview/staged and green applied highlights. **Stage changes** saves an explicit snapshot across restarts; only **Start → Apply pending PAK edits** writes it to the updated overlay. Later previews do not change the staged snapshot. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews rounded baseline capacities. Reload discards unstaged previews. Apply validates every fuel target before writing, preserves unrelated XML/templates and original files, and retains staged edits if a capacity changed externally.
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer â†’ Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 

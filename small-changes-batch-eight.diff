@@ -1,0 +1,650 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 22fa641..18640af 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -159,7 +159,6 @@ internal sealed class MainForm : Form
+         var truckPropertiesPage = Page("Truck properties", "TruckProperties", _truckPropertiesTab);
+         var experiencePage = Page("Experience / Ranks", "ExperienceRanks", _experienceTab);
+         var truckEditorPages = _truckEditTab.TakeEditorPages();
+-        editorTabs.TabPages.Add(truckPropertiesPage);
+         foreach (var name in new[] { "Engines", "Winches", "Addons" })
+             editorTabs.TabPages.Add(truckEditorPages.Single(page => page.Name == name));
+         editorTabs.TabPages.Add(experiencePage);
+@@ -167,7 +166,7 @@ internal sealed class MainForm : Form
+         var gameDataTabs = new NavigationTabControl { Name = "GameDataNavigation" };
+         var regionsTrucksPage = Page("Map trucks", "MapTrucks", _regionsTrucksTab);
+         var trucksCargoPage = Page("Cargo", "Cargo", _trucksCargoTab);
+-        gameDataTabs.TabPages.AddRange([regionsTrucksPage, trucksCargoPage]);
++        gameDataTabs.TabPages.AddRange([truckPropertiesPage, regionsTrucksPage, trucksCargoPage]);
+         var gameDataPage = Page("Game data", "GameData", gameDataTabs);
+         tabs.TabPages.AddRange([unpackPage, planningPage, randomizerPage, editorsPage, gameDataPage]);
+ 
+@@ -260,6 +259,7 @@ internal sealed class MainForm : Form
+         navigationHost.DpiChangedAfterParent += (_, _) => PositionSettings();
+         PositionSettings(); settings.Click += (_, _) => ShowSettings();
+         Controls.Add(navigationHost);
++        TextAreaStyle.Watch(this);
+         var search = new CurrentTabSearch(() => tabs.SelectedTab);
+         search.Attach(this);
+         Disposed += (_, _) => { search.Dispose(); settingsTip.Dispose(); settings.Font.Dispose(); _truckEditTab.Dispose(); };
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 3444ca4..811e24d 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -87,7 +87,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         _fuelMultiplier.ValueChanged += (_, _) => _fuelMultiplierValue.Text = "×" + (_fuelMultiplier.Value / 2m).ToString("0.0", CultureInfo.CurrentCulture);
+         _tips.SetToolTip(_fuelMultiplier, "0.5× to 3× in 0.5 steps. Moving the slider only selects the factor.");
+         var multiply = AddButton(bulk, "Multiply all fuel", MultiplyFuel);
+-        _tips.SetToolTip(multiply, "Multiply the current displayed fuel capacities. Round to whole litres; repeated clicks multiply again. Individual cells remain editable. Stage changes to keep the result.");
++        _tips.SetToolTip(multiply, "Multiply current fuel capacities and round to the nearest 20 litres (minimum 20 L). Repeated clicks multiply again. Individual fuel edits also round to 20 L. Stage changes to keep the result.");
+         var columns = AddButton(bulk, "Columns ▾", () => { });
+         columns.Click += (_, _) => _columnsMenu.Show(columns, new Point(0, columns.Height));
+         var unlockOptions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(12, 0, 4, 0) };
+@@ -230,8 +230,9 @@ internal sealed class TruckPropertiesTab : UserControl
+                     if (row.Tag is TruckPropertyRow data)
+                     {
+                         row.Cells["Regions"].Value = regions.TryGetValue(data.Truck.Code, out var locations) ? locations
+-                            : catalog.MapsRead > 0 ? "No verified obtainable placement in scanned maps" : "Unknown — load maps in Map trucks";
+-                        row.Cells["Regions"].ToolTipText = Convert.ToString(row.Cells["Regions"].Value);
++                            : catalog.MapsRead > 0 ? "─────" : "Unknown — load maps in Map trucks";
++                        row.Cells["Regions"].ToolTipText = regions.ContainsKey(data.Truck.Code) || catalog.MapsRead == 0
++                            ? Convert.ToString(row.Cells["Regions"].Value) : "No verified obtainable placement in scanned maps";
+                     }
+                 _regionStatus = $"Regions use current placements, including randomized/pending replacements ({catalog.MapsRead} maps; {catalog.Warnings.Count} warnings).";
+             }
+@@ -285,7 +286,7 @@ internal sealed class TruckPropertiesTab : UserControl
+                     data.Draft.GetValueOrDefault("UnlockByExploration"));
+                 var row = _grid.Rows[index]; row.Tag = data;
+                 row.Cells["Truck"].ToolTipText = data.Truck.Code + "\n" + data.RelativeFile;
+-                if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.ColorFor(tier);
++                if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.BackgroundFor(tier);
+                 foreach (var spec in TruckPropertiesStore.Specs)
+                 {
+                     var cell = row.Cells[spec.Attribute];
+@@ -425,9 +426,22 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (_updating || e.RowIndex < 0 || e.ColumnIndex < 0 || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
+         var spec = TruckPropertiesStore.Specs.FirstOrDefault(spec => spec.Attribute == _grid.Columns[e.ColumnIndex].Name);
+         if (spec is null || _grid[e.ColumnIndex, e.RowIndex].Value is not decimal value) return;
++        if (spec.Attribute == "FuelCapacity")
++        {
++            var rounded = RoundFuel(value);
++            if (value != rounded)
++            {
++                _updating = true;
++                try { _grid[e.ColumnIndex, e.RowIndex].Value = rounded; }
++                finally { _updating = false; }
++                value = rounded;
++            }
++        }
+         data.Draft[spec.Attribute] = value; PaintValue(_grid.Rows[e.RowIndex], spec); UpdateStatus();
+     }
+ 
++    private static decimal RoundFuel(decimal value) => Math.Clamp(decimal.Round(value / 20m, 0, MidpointRounding.AwayFromZero) * 20m, 20, 100000);
++
+     private void MultiplyFuel()
+     {
+         if (!_grid.EndEdit() || !Ready()) return;
+@@ -435,7 +449,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         var factor = _fuelMultiplier.Value / 2m;
+         foreach (var row in _rows)
+             if (row.Draft.TryGetValue(spec.Attribute, out var value))
+-                row.Draft[spec.Attribute] = Math.Clamp(decimal.Round(value * factor, 0, MidpointRounding.AwayFromZero), spec.Minimum, spec.Maximum);
++                row.Draft[spec.Attribute] = RoundFuel(value * factor);
+         ShowRows();
+     }
+ 
+@@ -499,6 +513,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         _grid.DefaultCellStyle.BackColor = AppColors.Get("Surface");
+         foreach (DataGridViewRow row in _grid.Rows)
+         {
++            if (row.Cells["Tier"].Value is string tier && tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.BackgroundFor(tier);
+             foreach (var spec in TruckPropertiesStore.Specs) PaintValue(row, spec);
+         }
+         _grid.Invalidate();
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+index 4001574..7b30102 100644
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -79,9 +79,9 @@ internal sealed class TruckRandomizationTab : UserControl
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         var header = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 0, 0, 10) };
+         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+@@ -96,6 +96,7 @@ internal sealed class TruckRandomizationTab : UserControl
+ 
+         // Rules stay at the top of each pane and scroll independently on small windows.
+         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty };
++        TextAreaStyle.Mark(scroll);
+         var list = new TableLayoutPanel
+         {
+             Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+@@ -104,6 +105,7 @@ internal sealed class TruckRandomizationTab : UserControl
+         list.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
+         list.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         list.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        TextAreaStyle.Mark(list);
+         void RefreshRules()
+         {
+             list.SuspendLayout();
+@@ -169,6 +171,35 @@ internal sealed class TruckRandomizationTab : UserControl
+         }
+         else
+             layout.Controls.Add(new Label { Text = "Mission randomization is not configured.", AutoSize = true }, 0, 2);
++        var fitting = false;
++        void FitRules()
++        {
++            if (fitting || layout.ClientSize.Height <= 0 || scroll.ClientSize.Width <= 0) return;
++            fitting = true;
++            try
++            {
++                var controlsHeight = layout.GetControlFromPosition(0, 2)?.GetPreferredSize(new Size(layout.ClientSize.Width, 0)).Height ?? 0;
++                var limit = Math.Max(48, layout.ClientSize.Height - header.PreferredSize.Height - controlsHeight - (title == "Obtainable" ? 130 : 0));
++                var desired = list.Height;
++                var height = Math.Clamp(desired, 24, limit);
++                if (Math.Abs(layout.RowStyles[1].Height - height) > 1) layout.RowStyles[1].Height = height;
++            }
++            finally { fitting = false; }
++        }
++        var fitQueued = false;
++        void QueueFit()
++        {
++            if (fitQueued || !layout.IsHandleCreated || layout.IsDisposed) return;
++            fitQueued = true;
++            layout.BeginInvoke((Action)(() =>
++            {
++                fitQueued = false;
++                if (!layout.IsDisposed) FitRules();
++            }));
++        }
++        layout.Layout += (_, _) => QueueFit();
++        layout.HandleCreated += (_, _) => QueueFit();
++        list.SizeChanged += (_, _) => QueueFit();
+         pane.Controls.Add(layout);
+         return pane;
+     }
+diff --git a/src/SnowPakTool.Desktop/TruckEditTab.cs b/src/SnowPakTool.Desktop/TruckEditTab.cs
+index ea1fc3f..4c8789f 100644
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -69,6 +69,8 @@ internal sealed class TruckEditTab : UserControl
+     private string? _loadedWorkspace;
+     private bool _updatingGrid;
+     private bool _syncingWinchNames;
++    private readonly TableHeaderBehavior _winchHeaders;
++    private readonly TextBox _winchSearch = new() { Dock = DockStyle.Fill, PlaceholderText = "Search truck, class or truck ID…", AccessibleName = "Search truck winch compatibility" };
+ 
+     public TruckEditTab(Func<string> getWorkspacePath, OwnedContentTab ownedContent)
+     {
+@@ -76,6 +78,10 @@ internal sealed class TruckEditTab : UserControl
+         _ownedContent = ownedContent;
+         _engineEditTab = new EngineEditTab(getWorkspacePath, ownedContent);
+         BuildLayout();
++        _winchHeaders = TableHeaderBehavior.Attach(_winchGrid);
++        _winchHeaders.AdditionalRowFilter = MatchesWinchSearch;
++        _winchHeaders.Changed += UpdateWinchVisibleCount;
++        _winchSearch.TextChanged += (_, _) => { _winchHeaders.ApplyFilters(); UpdateWinchVisibleCount(); };
+         AppColors.Changed += (_, _) => RefreshPaletteColors();
+         _ownedContent.OwnedTrucksChanged += RefreshOwnedTrucks;
+         _winchGrid.CurrentCellDirtyStateChanged += (_, _) =>
+@@ -138,13 +144,22 @@ internal sealed class TruckEditTab : UserControl
+         var matrices = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(2) };
+         matrices.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         var truckSection = new GroupBox { Text = "Truck winch compatibility", Dock = DockStyle.Fill, Padding = new Padding(6) };
+-        var truckGridLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        var truckGridLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
++        truckGridLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         truckGridLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         truckGridLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        truckGridLayout.Controls.Add(_winchGrid, 0, 0);
++        var search = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 0, 0, 6) };
++        search.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        search.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        search.Controls.Add(_winchSearch, 0, 0);
++        var clearSearch = new Button { Text = "×", AutoSize = true, AccessibleName = "Clear winch search" };
++        clearSearch.Click += (_, _) => _winchSearch.Clear();
++        search.Controls.Add(clearSearch, 1, 0);
++        truckGridLayout.Controls.Add(search, 0, 0);
++        truckGridLayout.Controls.Add(_winchGrid, 0, 1);
+         var saveCompatibilityPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
+         saveCompatibilityPanel.Controls.Add(_saveWinchCompatibilityButton);
+-        truckGridLayout.Controls.Add(saveCompatibilityPanel, 0, 1);
++        truckGridLayout.Controls.Add(saveCompatibilityPanel, 0, 2);
+         truckSection.Controls.Add(truckGridLayout);
+         matrices.Controls.Add(truckSection, 0, 0);
+         tables.Panel1.Controls.Add(matrices);
+@@ -425,7 +440,7 @@ internal sealed class TruckEditTab : UserControl
+             Frozen = true,
+             Width = 220,
+             MinimumWidth = 160,
+-            SortMode = DataGridViewColumnSortMode.NotSortable
++            SortMode = DataGridViewColumnSortMode.Programmatic
+         });
+         grid.Columns.Add(new DataGridViewTextBoxColumn
+         {
+@@ -434,7 +449,7 @@ internal sealed class TruckEditTab : UserControl
+             ReadOnly = true,
+             Width = 115,
+             MinimumWidth = 90,
+-            SortMode = DataGridViewColumnSortMode.NotSortable
++            SortMode = DataGridViewColumnSortMode.Programmatic
+         });
+         grid.Columns.Add(new DataGridViewTextBoxColumn
+         {
+@@ -459,6 +474,7 @@ internal sealed class TruckEditTab : UserControl
+             };
+             column.HeaderCell.ToolTipText = winch.Code;
+             grid.Columns.Add(column);
++            _winchHeaders.AddFilter(winch.Code, value => value is true ? "Compatible" : "Not compatible");
+         }
+     }
+ 
+@@ -566,10 +582,21 @@ internal sealed class TruckEditTab : UserControl
+             UpdateCompatibilityCellStyles(row);
+         }
+         _updatingGrid = false;
++        _winchHeaders.Refresh();
+         UpdateSaveCompatibilityButton();
+-        _winchStatus.Text = $"Showing {_winchGrid.Rows.Count} owned trucks. Green cells add and red cells remove winch classes compared with the original files.";
++        UpdateWinchVisibleCount();
+     }
+ 
++    private bool MatchesWinchSearch(DataGridViewRow row)
++    {
++        var query = _winchSearch.Text.Trim();
++        return query.Length == 0 || Convert.ToString(row.Cells["TruckName"].Value)?.Contains(query, StringComparison.CurrentCultureIgnoreCase) == true
++            || Convert.ToString(row.Cells["TruckClass"].Value)?.Contains(query, StringComparison.CurrentCultureIgnoreCase) == true
++            || row.Tag is TruckRow truck && Path.GetFileNameWithoutExtension(truck.FilePath).Contains(query, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private void UpdateWinchVisibleCount() => _winchStatus.Text = $"Showing {_winchGrid.Rows.Cast<DataGridViewRow>().Count(row => row.Visible)} of {_winchGrid.Rows.Count} owned trucks. Green cells add and red cells remove winch classes compared with the original files.";
++
+     private static HashSet<string> ReadWinchTypes(string xml)
+     {
+         var socket = WinchSocket.Match(xml);
+diff --git a/src/SnowPakTool.Desktop/AppColors.cs b/src/SnowPakTool.Desktop/AppColors.cs
+index c2932a5..07635bc 100644
+--- a/src/SnowPakTool.Desktop/AppColors.cs
++++ b/src/SnowPakTool.Desktop/AppColors.cs
+@@ -49,6 +49,7 @@ internal static class AppColors
+         ["TruckClassScout"] = new("TruckClassScout", "Scout", "Truck tile title and class background", Color.FromArgb(61, 88, 125)),
+         ["TruckClassHighway"] = new("TruckClassHighway", "Highway", "Truck tile title and class background", Color.FromArgb(132, 115, 48)),
+         ["Surface"] = new("Surface", "Surface", "Table and graph backgrounds", Color.White),
++        ["TextArea"] = new("TextArea", "Text areas", "Logs, details and randomization rule backgrounds", Color.White),
+         ["AlternateRow"] = new("AlternateRow", "Alternate row", "Alternating table rows", Color.FromArgb(248, 248, 248)),
+         ["SelectionBlue"] = new("SelectionBlue", "Selected cell", "Selected compatibility cells", Color.FromArgb(205, 226, 247)),
+         ["SearchActive"] = new("SearchActive", "Active search result", "Currently targeted search match", Color.FromArgb(255, 160, 65)),
+diff --git a/src/SnowPakTool.Desktop/TierListStore.cs b/src/SnowPakTool.Desktop/TierListStore.cs
+index 3cb4c12..0adfb0d 100644
+--- a/src/SnowPakTool.Desktop/TierListStore.cs
++++ b/src/SnowPakTool.Desktop/TierListStore.cs
+@@ -10,6 +10,12 @@ internal static class TierListStore
+     private static readonly string[] Names = ["SS", "S", "A", "B", "C", "D", "FX"];
+ 
+     public static Color ColorFor(string name) => AppColors.Get($"Tier{name}");
++    public static Color BackgroundFor(string name)
++    {
++        var color = ColorFor(name);
++        var background = AppColors.Get("Surface");
++        return Color.FromArgb((background.R * 4 + color.R) / 5, (background.G * 4 + color.G) / 5, (background.B * 4 + color.B) / 5);
++    }
+ 
+     public static string DescriptionFor(string name) => name switch
+     {
+diff --git a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+index c16d4ee..5d8b539 100644
+--- a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
++++ b/src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+@@ -150,7 +150,7 @@ private FlowLayoutPanel? _groupList;
+                 var c = _regionList ? RegionTierListStore.ColorFor(state.Name) : TierListStore.ColorFor(state.Name);
+                 var b = AppColors.Get("Surface");
+                 section.Panel.BackColor = _regionList ? RegionTierListStore.BackgroundFor(state.Name) :
+-                    Color.FromArgb((b.R * 4 + c.R) / 5, (b.G * 4 + c.G) / 5, (b.B * 4 + c.B) / 5);
++                    TierListStore.BackgroundFor(state.Name);
+                 tierHeader.BackColor = Color.FromArgb((b.R + c.R * 2) / 3, (b.G + c.G * 2) / 3, (b.B + c.B * 2) / 3);
+                 tierHeader.ForeColor = tierHeader.BackColor.GetBrightness() < 0.45f ? Color.White : Color.Black;
+             }
+diff --git a/src/SnowPakTool.Desktop/TableHeaderCell.cs b/src/SnowPakTool.Desktop/TableHeaderCell.cs
+index 1ef6b7a..2595e68 100644
+--- a/src/SnowPakTool.Desktop/TableHeaderCell.cs
++++ b/src/SnowPakTool.Desktop/TableHeaderCell.cs
+@@ -14,7 +14,13 @@ internal sealed class TableHeaderCell : DataGridViewColumnHeaderCell
+         clone.HasFilter = HasFilter;
+         return clone;
+     }
+-    internal static Rectangle FilterBounds(Rectangle bounds, float scale) => new(bounds.Right - (int)(24 * scale), bounds.Top, (int)(24 * scale), bounds.Height);
++    internal static Rectangle FilterBounds(Rectangle bounds, float scale) => new(bounds.Right - (int)(20 * scale), bounds.Top, (int)(20 * scale), bounds.Height);
++    internal static Rectangle TextBounds(Rectangle bounds, float scale, bool hasFilter, SortOrder sort)
++    {
++        var left = (int)(4 * scale);
++        var icons = (hasFilter ? 20 : 0) + (sort != SortOrder.None ? 10 : 0) + 2;
++        return new(bounds.Left + left, bounds.Top, Math.Max(0, bounds.Width - left - (int)(icons * scale)), bounds.Height);
++    }
+ 
+     protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
+         DataGridViewElementStates dataGridViewElementState, object? value, object? formattedValue, string? errorText,
+@@ -42,11 +48,11 @@ internal sealed class TableHeaderCell : DataGridViewColumnHeaderCell
+         if (!paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
+         var scale = graphics.DpiX / 96f;
+         var filter = FilterBounds(cellBounds, scale);
+-        var text = new Rectangle(cellBounds.Left + (int)(4 * scale), cellBounds.Top, Math.Max(0, cellBounds.Width - (int)((HasFilter ? 44 : 24) * scale)), cellBounds.Height);
++        var text = TextBounds(cellBounds, scale, HasFilter, SortGlyphDirection);
+         TextRenderer.DrawText(graphics, Convert.ToString(formattedValue), cellStyle.Font, text, cellStyle.ForeColor,
+-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
++            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+         var y = cellBounds.Top + cellBounds.Height / 2f;
+-        var x = HasFilter ? filter.Left - 8 * scale : cellBounds.Right - 12 * scale;
++        var x = HasFilter ? filter.Left - 5 * scale : cellBounds.Right - 7 * scale;
+         if (SortGlyphDirection != SortOrder.None)
+         {
+             var sign = SortGlyphDirection == SortOrder.Ascending ? 1 : -1;
+diff --git a/src/SnowPakTool.Desktop/TableHeaderBehavior.cs b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+index f160a87..c6cac9f 100644
+--- a/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
++++ b/src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+@@ -24,6 +24,7 @@ internal sealed class TableHeaderBehavior
+     private string? _sorted;
+     private SortOrder _direction;
+     public event Action? Changed;
++    public Func<DataGridViewRow, bool>? AdditionalRowFilter { get; set; }
+ 
+     public static TableHeaderBehavior Attach(DataGridView grid, Action? restore = null,
+         Action<DataGridViewColumn, ListSortDirection>? sort = null, Func<DataGridViewColumn, bool>? customHeader = null)
+@@ -221,10 +222,11 @@ internal sealed class TableHeaderBehavior
+         }
+         else
+         {
+-            var active = _filters.Values.Any(filter => filter.IsFiltered);
++            var active = AdditionalRowFilter is not null || _filters.Values.Any(filter => filter.IsFiltered);
+             if (!active && !_hadActiveFilters) return;
+             _hadActiveFilters = active;
+-            bool Includes(DataGridViewRow row) => _filters.Values.All(filter => !_grid.Columns.Contains(filter.ColumnName) || filter.Includes(row.Cells[filter.ColumnName].Value));
++            bool Includes(DataGridViewRow row) => AdditionalRowFilter?.Invoke(row) != false
++                && _filters.Values.All(filter => !_grid.Columns.Contains(filter.ColumnName) || filter.Includes(row.Cells[filter.ColumnName].Value));
+             if (_grid.CurrentCell is { OwningRow: { } current } && !Includes(current)) _grid.CurrentCell = null;
+             foreach (DataGridViewRow row in _grid.Rows)
+                 if (!row.IsNewRow) row.Visible = Includes(row);
+diff --git a/README.md b/README.md
+index 2cb4010..ea52302 100644
+--- a/README.md
++++ b/README.md
+@@ -14,11 +14,13 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++Truck randomization controls sit directly below the actual rule text, with scrolling when longer rule lists need it. Logs, details and rule text use the configurable white **Text areas** background. In **Editors -> Winches**, Truck winch compatibility has live search by truck name, class or truck ID, header filters for truck/class, and Compatible / Not compatible filters for each winch class. Search and filters combine without changing compatibility edits. Shared table headers reserve space only for icons that are present, with compact arrow/funnel spacing and unpadded text.
++
+ Sortable/filterable tables share the same header controls across Owned content, Engine compatibility, Truck properties, Map trucks, Cargo and its details, replacement candidates/comparisons, Start change lists, rank XP values, and file-conflict review. Click a heading to cycle ascending -> descending -> off; off restores the original/model order while retaining column filters. Funnels open checkbox filters, filled blue when active; right-click headers for explicit sort/filter/reset commands. Filters combine across columns, support numeric and blank values, and remain applied when the table refreshes. Class/DLC/tire/availability dropdown filters now live in their respective headers. Map availability keeps unverified placements visible and editable. Region tiles, column visibility and comparison-mode controls retain their separate purposes; the XP region list continues to follow Region progression. Sorting/filtering affect the display, so rank values retain their rank identities, row actions retain their record identities, and hidden records remain part of staging/Apply as before.
+ 
+ On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to cycle ascending, descending, then off. Off restores the original base-game/release order and removes the arrow; active filters stay in effect. The active sort arrow appears at the right of the heading. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
+ 
+-Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
++Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Engines, Winches, Addons, Experience / Ranks); and **Game data** (Truck properties first, Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
+ 
+ The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+@@ -26,7 +28,7 @@ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab h
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-**Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells individually. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to whole litres (halves away from zero), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
++**Game data → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Tier cells use exactly the soft tier-pane background tints. A five-character horizontal line replaces the missing verified-placement message; the explanation remains in its tooltip. Edit numeric cells individually; changed fuel values also round to the nearest 20 litres. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to the nearest 20 litres (ties upward, minimum 20 L), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+ **Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. All modes use wider independent per-truck variation: Easy is broadest and early-biased, Normal has a medium spread, and Hard unlocks later with a narrower but still substantial spread. Original game class is used for starter coverage only; other ranks depend on tier and independent random draws. There is no class balancing, rank-spacing enforcement or gap filling, so multiple trucks may share a rank and empty ranks can still occur. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. Starter coverage uses only the first region in the saved Region progression order and its existing store country. It sets one owned, directly purchasable Scout and Offroad starter to rank 1, and one Highway, Heavy Duty and Heavy starter to a randomly selected rank from 1-3; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in that first store country, the generator reports that class gap and proceeds with the achievable rank changes. Missing first-region/store definitions explicitly skip starter coverage. Other countries receive no starter guarantees. It does not add country assignments or remove task locks. Each generation asks whether to update UnlockByExploration, with Yes strongly recommended and selected by default; No changes ranks only and Cancel changes nothing. Yes sets true for trucks in current obtainable map placements (including randomized/pending replacements and task rewards), and false for other trucks; mission-only vehicles do not count. The table shows true/false with original values and change highlights. Starter eligibility uses these resulting flags, so a discovery-locked truck cannot satisfy immediate buyability. With no maps loaded, map-read warnings or unverified placements, uncertain flags are preserved and explained in the log; confirmed obtainable trucks can still be set true after partial reads. The report lists changed, unchanged and skipped exploration flags. Generate again after changing map-truck assignments, then stage both truck properties and map changes before applying. Staging, Apply, presets, revert and reset handle numeric values and exploration flags; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview. Generation opens a resizable, copyable report, which can be hidden with Show unlock log. It records the seed, difficulty, first region/store country, coverage warnings and changed/unchanged/skipped totals. Each truck lists its before/after preview rank, file and original ranks, and the reason for its result, including equal random draws, missing tiers/ranks and exclusions from starter coverage. UnlockByExploration=true keeps a truck store-locked until discovered on a map; rank changes do not clear that separate requirement.
+ 
+diff --git a/SMALL_CHANGE_QUEUE.md b/SMALL_CHANGE_QUEUE.md
+index 1fe7ebd..09e55f9 100644
+--- a/SMALL_CHANGE_QUEUE.md
++++ b/SMALL_CHANGE_QUEUE.md
+@@ -1,6 +1,10 @@
+ # Small change queue
+ 
+-Queued requests (8 of 10):
++Queued requests (0 of 10):
++
++None.
++
++Completed requests:
+ 
+ - Make Truck properties the first sub-tab under Game data, before Trucks-Cargo and Regions-Trucks.
+ - In Truck properties, use the softer tier list pane background colors for tier cells instead of the saturated tier colors.
+@@ -11,8 +15,6 @@ Queued requests (8 of 10):
+ - Add search/filter controls to the Truck winch compatibility table, consistent with the shared table filtering interface.
+ - Fix table-header sort-arrow spacing/background so it does not obscure more header text than the glyph needs; retain separation from the filter funnel.
+ 
+-Completed requests:
+-
+ - Rank XP staging: opening/leaving Experience / Ranks, loading saved settings, or changing the preview must not create a pending change on Start. Only pressing Save rank XP stages the selected values in internal/persisted memory, without editing game/workspace rank files. Start → Apply performs the actual file changes from those explicitly staged values.
+ - In Region progression, replace the dark tile backgrounds with the corresponding Region Difficulty tier palette color. Use dark/blackish text on light tier colors and light text where needed for contrast; keep Unsorted visually distinct.
+ - Make the numbers in Region progression position badges slightly larger and thicker/heavier while keeping them centered and readable, including double digits.
+diff --git a/.checks/truck-properties/Program.cs b/.checks/truck-properties/Program.cs
+index a6ea395..a37dff5 100644
+--- a/.checks/truck-properties/Program.cs
++++ b/.checks/truck-properties/Program.cs
+@@ -93,13 +93,13 @@ internal static class Program
+         var editor = (TextBox)grid.EditingControl!;
+         Check(editor.Text == "90", "editing shows the raw number without original-value annotation");
+         editor.Text = "99";
+-        Check(grid.EndEdit() && Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 99, "individual fuel edit commits a numeric value");
++        Check(grid.EndEdit() && Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 100, "individual fuel edit rounds to the nearest 20 litres");
+         grid.CurrentCell = row.Cells["Truck"];
+-        Check(Convert.ToString(row.Cells["FuelCapacity"].FormattedValue) == "99 (80)" && row.Cells["FuelCapacity"].Style.BackColor == Color.LightGoldenrodYellow,
++        Check(Convert.ToString(row.Cells["FuelCapacity"].FormattedValue) == "100 (80)" && row.Cells["FuelCapacity"].Style.BackColor == Color.LightGoldenrodYellow,
+             "changed fuel is highlighted and displays preserved original in parentheses");
+         Call(tab, "MultiplyFuel");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+-        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 149, "1.5 multiplier applies to current individual value and rounds half litres away from zero");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 160, "1.5 multiplier applies to the current individual value and rounds to 20 litres");
+         Check(Convert.ToDecimal(row.Cells["UnlockByRank"].Value) == 1 && Convert.ToDecimal(row.Cells["Price"].Value) == 3000
+             && grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "unknown").Cells["FuelCapacity"].Value is null,
+             "fuel multiplier preserves other properties and undefined fuel");
+@@ -111,7 +111,7 @@ internal static class Program
+         Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 90 && File.ReadAllText(updated) == source, "revert unstaged edits restores staged snapshot without writing files");
+         slider.Value = 1; Call(tab, "MultiplyFuel");
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+-        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 45, "0.5 multiplier halves current fuel capacity");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 40, "0.5 multiplier rounds the halved capacity to 20 litres");
+         var menu = (ContextMenuStrip)Field(tab, "_columnsMenu");
+         var differential = menu.Items.Cast<ToolStripMenuItem>().Single(item => item.Name == "DiffLock");
+         Check(!grid.Columns["DiffLock"]!.Visible && !differential.Checked && menu.Items.Cast<ToolStripMenuItem>().Where(item => item != differential).All(item => item.Checked),
+diff --git a/.checks/Navigation/Program.cs b/.checks/Navigation/Program.cs
+index 891f4c6..ed43791 100644
+--- a/.checks/Navigation/Program.cs
++++ b/.checks/Navigation/Program.cs
+@@ -17,7 +17,7 @@ internal static class Program
+   using var canvas=new Panel{Size=new Size(1100,820)};canvas.Controls.Add(host);canvas.CreateControl();host.CreateControl();
+   var main=All(host).OfType<TabControl>().Single(t=>t.Name=="MainNavigation");
+   Check(main.TabPages.Cast<TabPage>().Select(p=>p.Text).SequenceEqual(new[]{"Start","Planning","Randomizer","Editors","Game data"}),"five main tabs in agreed order");
+-  var expected=new Dictionary<string,string[]>{{"Planning",new[]{"Owned content","Truck tiers","Region difficulty","Truck groups"}},{"Randomizer",new[]{"Region progression","Truck randomization"}},{"Editors",new[]{"Truck properties","Engines","Winches","Addons","Experience / Ranks"}},{"GameData",new[]{"Map trucks","Cargo"}}};
++  var expected=new Dictionary<string,string[]>{{"Planning",new[]{"Owned content","Truck tiers","Region difficulty","Truck groups"}},{"Randomizer",new[]{"Region progression","Truck randomization"}},{"Editors",new[]{"Engines","Winches","Addons","Experience / Ranks"}},{"GameData",new[]{"Truck properties","Map trucks","Cargo"}}};
+   foreach(var (name,titles) in expected)
+   {
+    var page=main.TabPages[name]!;var child=page.Controls.OfType<TabControl>().Single();
+diff --git a/.checks/Navigation/Navigation.csproj b/.checks/Navigation/Navigation.csproj
+index 05e367c..4358de5 100644
+--- a/.checks/Navigation/Navigation.csproj
++++ b/.checks/Navigation/Navigation.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>
+diff --git a/.checks/RuleEditor/RuleEditor.csproj b/.checks/RuleEditor/RuleEditor.csproj
+index d4cf7bd..6336c05 100644
+--- a/.checks/RuleEditor/RuleEditor.csproj
++++ b/.checks/RuleEditor/RuleEditor.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs"/></ItemGroup></Project>
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 0ed7fcc..eb13686 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -50,4 +50,4 @@
+   <ItemGroup>
+     <EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png" LogicalName="SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)" />
+   </ItemGroup>
+-<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>
++<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup></Project>
+diff --git a/src/SnowPakTool.Desktop/TextAreaStyle.cs b/src/SnowPakTool.Desktop/TextAreaStyle.cs
+new file mode 100644
+index 0000000..c385d53
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TextAreaStyle.cs
+@@ -0,0 +1,48 @@
++using System.Runtime.CompilerServices;
++
++namespace SnowPakTool.Desktop;
++
++internal static class TextAreaStyle
++{
++    private static readonly ConditionalWeakTable<Control, object> Marked = new();
++
++    public static void Mark(Control control)
++    {
++        Marked.GetValue(control, _ => new());
++        Apply(control);
++    }
++
++    private static void Apply(Control control)
++    {
++        if (control is TextBox { Multiline: true } || Marked.TryGetValue(control, out _))
++        {
++            control.BackColor = AppColors.Get("TextArea");
++            control.ForeColor = SystemColors.WindowText;
++        }
++    }
++
++    public static void Watch(Control root)
++    {
++        var watched = new HashSet<Control>();
++        void Added(object? sender, ControlEventArgs e) { if (e.Control is not null) Visit(e.Control); }
++        void Visit(Control control)
++        {
++            if (!watched.Add(control)) return;
++            Apply(control);
++            control.ControlAdded += Added;
++            foreach (Control child in control.Controls) Visit(child);
++        }
++        void Refresh(object? sender, EventArgs e)
++        {
++            foreach (var control in watched) if (!control.IsDisposed) Apply(control);
++        }
++        Visit(root);
++        AppColors.Changed += Refresh;
++        root.Disposed += (_, _) =>
++        {
++            AppColors.Changed -= Refresh;
++            foreach (var control in watched) control.ControlAdded -= Added;
++            watched.Clear();
++        };
++    }
++}
+diff --git a/.checks/SmallBatch8/Program.cs b/.checks/SmallBatch8/Program.cs
+new file mode 100644
+index 0000000..8db18e0
+--- /dev/null
++++ b/.checks/SmallBatch8/Program.cs
+@@ -0,0 +1,88 @@
++using System.Collections;
++using System.Linq.Expressions;
++using System.Reflection;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string type) => App.GetType("SnowPakTool.Desktop." + type)!;
++    private static object? Call(object obj, string name, params object?[] args) => obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(obj, args);
++    private static object? Static(string type, string name, params object?[] args) => T(type).GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
++    private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static IEnumerable<Control> All(Control root) => root.Controls.Cast<Control>().SelectMany(control => new[] { control }.Concat(All(control)));
++    private static void Wait(Task task) { while (!task.IsCompleted) { Application.DoEvents(); Thread.Sleep(2); } task.GetAwaiter().GetResult(); }
++    private static void Capture(Control control, string name)
++    {
++        Application.DoEvents(); control.PerformLayout(); Application.DoEvents(); using var bitmap = new Bitmap(control.Width, control.Height);
++        control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, control.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, name + ".png"));
++    }
++    private static object Record(Type type, Dictionary<string, object?> values)
++    {
++        var ctor = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).OrderByDescending(ctor => ctor.GetParameters().Length).First();
++        return ctor.Invoke(ctor.GetParameters().Select(parameter => values.TryGetValue(parameter.Name!, out var value) ? value : parameter.HasDefaultValue ? parameter.DefaultValue
++            : parameter.ParameterType == typeof(string) ? "fixture" : parameter.ParameterType.IsValueType ? Activator.CreateInstance(parameter.ParameterType) : null).ToArray());
++    }
++    [STAThread] static void Main()
++    {
++        Application.EnableVisualStyles();
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
++        var rulesStore = Activator.CreateInstance(T("TruckRandomizationRuleStore"), Path.Combine(root, "rules.json"))!;
++        using var randomizer = (Control)Activator.CreateInstance(T("TruckRandomizationTab"), BindingFlags.Instance | BindingFlags.NonPublic, null,
++            new object?[] { null, rulesStore }, null)!;
++        randomizer.Size = new Size(1400, 900); randomizer.CreateControl(); Static("TextAreaStyle", "Watch", randomizer); randomizer.PerformLayout();
++        Capture(randomizer, "randomization-rules");
++        foreach (var panel in All(randomizer).OfType<Panel>().Where(panel => panel.AutoScroll))
++            Console.WriteLine($"Rule layout: body={panel.Height}, list={panel.Controls[0].Height}, preferred={panel.Controls[0].PreferredSize.Height}, style={((TableLayoutPanel)panel.Parent!).RowStyles[1].SizeType}/{((TableLayoutPanel)panel.Parent!).RowStyles[1].Height}");
++        var log = (TextBox)Field(randomizer, "_messages");
++        Check(log.BackColor == Color.White && All(randomizer).OfType<Panel>().Any(panel => panel.AutoScroll && panel.BackColor == Color.White), "logs and randomization rules use white text surfaces");
++        var fuelRoot = Path.Combine(root, "workspace", "initial.pak", "original_files", "[media]", "classes", "trucks"); Directory.CreateDirectory(fuelRoot);
++        File.WriteAllText(Path.Combine(fuelRoot, "fixture.xml"), "<Truck><TruckData TruckType=\"SCOUT\" FuelCapacity=\"90\"/><GameData Country=\"US\" UnlockByRank=\"1\" Price=\"1000\"><UiDesc UiName=\"fixture\"/></GameData></Truck>");
++        var workspace = Path.Combine(root, "workspace");
++        var entries = Array.CreateInstance(T("RegionTruckEntry"), 0);
++        var catalog = Activator.CreateInstance(T("RegionTruckCatalog"), entries, Array.Empty<string>(), 1, null)!;
++        var getter = Expression.Lambda(typeof(Func<>).MakeGenericType(typeof(Task<>).MakeGenericType(T("RegionTruckCatalog"))), Expression.Call(typeof(Task).GetMethod("FromResult")!.MakeGenericMethod(T("RegionTruckCatalog")), Expression.Constant(catalog))).Compile();
++        using var properties = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => workspace), getter)!;
++        properties.Size = new Size(1500, 750); properties.CreateControl(); Static("TextAreaStyle", "Watch", properties);
++        Wait((Task)Call(properties, "EnsureLoadedAsync", false)!);
++        var grid = (DataGridView)Field(properties, "_grid"); var row = grid.Rows[0];
++        Check((string)row.Cells["Regions"].Value! == "─────" && row.Cells["Regions"].ToolTipText.Contains("No verified"), "no verified placement uses a five-character line with an explanatory tooltip");
++        row.Cells["FuelCapacity"].Value = 99m;
++        Check((decimal)row.Cells["FuelCapacity"].Value! == 100m, "individual fuel changes round to 20 litres");
++        ((TrackBar)Field(properties, "_fuelMultiplier")).Value = 3; Call(properties, "MultiplyFuel"); row = grid.Rows[0];
++        Check((decimal)row.Cells["FuelCapacity"].Value! == 160m, "fuel multiplication rounds midpoint values to the next 20 litres");
++        row.Cells["Tier"].Value = "SS"; Call(properties, "RefreshColors", null, EventArgs.Empty);
++        Check(row.Cells["Tier"].Style.BackColor == (Color)Static("TierListStore", "BackgroundFor", "SS")!, "tier cells reuse the exact tier pane tint");
++        Capture(properties, "truck-properties");
++        Check(File.ReadAllText(Path.Combine(fuelRoot, "fixture.xml")).Contains("FuelCapacity=\"90\""), "preview rounding leaves truck files unchanged");
++        using var owned = (Control)Activator.CreateInstance(T("OwnedContentTab"), new Func<string>(() => workspace), Activator.CreateInstance(T("OwnedRegionState"))!)!;
++        using var winches = (Control)Activator.CreateInstance(T("TruckEditTab"), new Func<string>(() => workspace), owned)!;
++        winches.Size = new Size(1500, 900); winches.CreateControl();
++        var types = (IList)Field(winches, "_matrixWinchClasses");
++        types.Add(Record(T("TruckEditTab").GetNestedType("WinchClass", BindingFlags.NonPublic)!, new(StringComparer.OrdinalIgnoreCase) { ["Code"] = "w_fixture", ["DisplayName"] = "Fixture winch" }));
++        var matrix = (DataGridView)Field(winches, "_winchGrid"); Call(winches, "ConfigureWinchColumns", matrix);
++        var truckType = T("TruckEditTab").GetNestedType("TruckRow", BindingFlags.NonPublic)!;
++        foreach (var (name, code, truckClass, compatible) in new[] { ("First truck", "first_id", "Scout", true), ("Second truck", "second_id", "Offroad", false) })
++        {
++            var index = matrix.Rows.Add(name, truckClass, "Open", compatible);
++            var set = new HashSet<string>(compatible ? new[] { "w_fixture" } : Array.Empty<string>());
++            matrix.Rows[index].Tag = Activator.CreateInstance(truckType, Path.Combine(root, code + ".xml"), name, true, set, new HashSet<string>(set), "fixture")!;
++        }
++        var headers = Field(winches, "_winchHeaders"); Call(headers, "Refresh");
++        var search = (TextBox)Field(winches, "_winchSearch"); search.Text = "FIRST_ID";
++        Check(matrix.Rows.Cast<DataGridViewRow>().Count(row => row.Visible) == 1 && matrix.Rows[0].Visible, "live winch search matches truck IDs without changing rows");
++        search.Clear();
++        var filter = Call(headers, "AddFilter", "w_fixture", null, Array.Empty<string>())!;
++        Call(filter, "SelectValues", (object)new[] { "Compatible" });
++        Check(matrix.Rows.Cast<DataGridViewRow>().Count(row => row.Visible) == 1 && matrix.Rows[0].Visible, "winch header filters can select compatible trucks");
++        search.Text = "Offroad"; Check(matrix.Rows.Cast<DataGridViewRow>().All(row => !row.Visible), "winch search combines with compatibility filters");
++        search.Clear(); Call(filter, "Clear");
++        Check(matrix.Rows.Cast<DataGridViewRow>().All(row => row.Visible) && matrix.Rows[0].Cells[3].Value is true && matrix.Rows[1].Cells[3].Value is false, "clearing winch search/filters restores rows and preserves compatibility values");
++        Capture(winches, "winch-search");
++        var bounds = new Rectangle(0, 0, 100, 24);
++        var off = (Rectangle)Static("TableHeaderCell", "TextBounds", bounds, 1f, true, SortOrder.None)!;
++        var on = (Rectangle)Static("TableHeaderCell", "TextBounds", bounds, 1f, true, SortOrder.Ascending)!;
++        Check(off.Width == 74 && on.Width == 64, "headers reserve only the visible icons, reclaiming text width when sorting is off");
++        Console.WriteLine("Small-batch checks passed using isolated fixtures; screenshots captured.");
++    }
++}
+diff --git a/.checks/SmallBatch8/SmallBatch8.csproj b/.checks/SmallBatch8/SmallBatch8.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/SmallBatch8/SmallBatch8.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

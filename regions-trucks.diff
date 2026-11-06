@@ -1,0 +1,659 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index a5453d7..9667d7b 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -14,6 +14,7 @@ internal sealed class MainForm : Form
+     private readonly CustomGroupWipTab _tierListTab;
+     private readonly TruckEditTab _truckEditTab;
+     private readonly TrucksCargoTab _trucksCargoTab;
++    private readonly RegionsTrucksTab _regionsTrucksTab;
+     private readonly SettingsTab _settingsTab;
+     private readonly OwnedRegionState _ownedRegionState = new();
+     private readonly Button _unpackButton = new() { Text = "Unpack / merge PAK + cache block", AutoSize = true };
+@@ -44,6 +45,7 @@ internal sealed class MainForm : Form
+         _ownedContentTab.OwnedTrucksChanged += _tierListTab.RefreshOwnedTrucks;
+         _truckEditTab = new TruckEditTab(() => _workspacePath.Text.Trim(), _ownedContentTab);
+         _trucksCargoTab = new TrucksCargoTab(() => _workspacePath.Text.Trim());
++        _regionsTrucksTab = new RegionsTrucksTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim());
+         _settingsTab = new SettingsTab();
+         BuildLayout();
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+@@ -107,6 +109,7 @@ internal sealed class MainForm : Form
+         var gameDataPage = new TabPage("Game data");
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+         var trucksCargoPage = new TabPage("Trucks-Cargo");
++        var regionsTrucksPage = new TabPage("Regions-Trucks");
+         var settingsPage = new TabPage("Settings");
+         root.Dock = DockStyle.Fill;
+         _experienceTab.Dock = DockStyle.Fill;
+@@ -124,6 +127,14 @@ internal sealed class MainForm : Form
+         _trucksCargoTab.Dock = DockStyle.Fill;
+         trucksCargoPage.Controls.Add(_trucksCargoTab);
+         gameDataTabs.TabPages.Add(trucksCargoPage);
++        _regionsTrucksTab.Dock = DockStyle.Fill;
++        regionsTrucksPage.Controls.Add(_regionsTrucksTab);
++        gameDataTabs.TabPages.Add(regionsTrucksPage);
++        gameDataTabs.SelectedIndexChanged += async (_, _) =>
++        {
++            if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
++            else if (gameDataTabs.SelectedTab == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
++        };
+         gameDataPage.Controls.Add(gameDataTabs);
+         settingsPage.Controls.Add(_settingsTab);
+         tabs.TabPages.Add(unpackPage);
+@@ -152,7 +163,11 @@ internal sealed class MainForm : Form
+             if (tabs.SelectedTab != selectedPage) return;
+ 
+             if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+-            if (selectedPage == gameDataPage) _trucksCargoTab.EnsureLoaded();
++            if (selectedPage == gameDataPage)
++            {
++                if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
++                else _trucksCargoTab.EnsureLoaded();
++            }
+             if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
+             if (selectedPage == customGroupingPage)
+             {
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 06581d6..6b85ade 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -24,4 +24,8 @@ The desktop project references the original `SnowPakTool` project and calls its
+ 
+ The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
++The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. Search by truck, map, task or placement ID, and filter by availability. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
++
++The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Select a row for the classification evidence, map coordinates, and source files. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
++
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/src/SnowPakTool.Desktop/SsoDataReader.cs b/src/SnowPakTool.Desktop/SsoDataReader.cs
+new file mode 100644
+index 0000000..3390856
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/SsoDataReader.cs
+@@ -0,0 +1,88 @@
++using System.Text;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>Reads the nested object/array syntax used by extracted game settings.</summary>
++internal sealed class SsoValue
++{
++    public string Key { get; set; } = "";
++    public string Text { get; init; } = "";
++    public Dictionary<string, SsoValue> Members { get; } = new(StringComparer.OrdinalIgnoreCase);
++    public List<SsoValue> Items { get; } = [];
++    public string Get(string key) => Members.TryGetValue(key, out var value) ? value.Text : "";
++    public IEnumerable<SsoValue> DescendantsAndSelf()
++    {
++        yield return this;
++        foreach (var child in Members.Values.Concat(Items))
++            foreach (var node in child.DescendantsAndSelf()) yield return node;
++    }
++}
++
++internal static class SsoDataReader
++{
++    private static readonly Regex Tokens = new("\"(?:\\\\.|[^\"\\\\])*\"|//[^\\r\\n]*|[{}\\[\\]=,]|[^\\s{}\\[\\]=,]+", RegexOptions.Compiled);
++
++    public static SsoValue Parse(string text)
++    {
++        var tokens = Tokens.Matches(text).Select(match => match.Value).Where(token => !token.StartsWith("//")).ToArray();
++        var position = 0;
++        var root = new SsoValue();
++        ReadMembers(root, null, 0);
++        return root;
++
++        void ReadMembers(SsoValue value, string? end, int depth)
++        {
++            if (depth > 128) throw new FormatException("Game settings are nested too deeply.");
++            while (position < tokens.Length && tokens[position] != end)
++            {
++                if (tokens[position] == ",") { position++; continue; }
++                var key = Decode(tokens[position++]);
++                Require("=");
++                var child = ReadValue(depth + 1);
++                child.Key = key;
++                value.Members[key] = child;
++            }
++            if (end is not null) Require(end);
++        }
++
++        SsoValue ReadValue(int depth)
++        {
++            if (position >= tokens.Length) throw new FormatException("Missing game setting value.");
++            var token = tokens[position++];
++            var value = new SsoValue();
++            if (token == "{") ReadMembers(value, "}", depth);
++            else if (token == "[")
++            {
++                if (depth > 128) throw new FormatException("Game settings are nested too deeply.");
++                while (position < tokens.Length && tokens[position] != "]")
++                {
++                    if (tokens[position] == ",") { position++; continue; }
++                    value.Items.Add(ReadValue(depth + 1));
++                }
++                Require("]");
++            }
++            else value = new SsoValue { Text = Decode(token) };
++            return value;
++        }
++
++        void Require(string token)
++        {
++            if (position >= tokens.Length || tokens[position++] != token) throw new FormatException($"Expected '{token}' in game settings.");
++        }
++    }
++
++    private static string Decode(string token)
++    {
++        if (!token.StartsWith('"')) return token;
++        var result = new StringBuilder();
++        for (var i = 1; i < token.Length - 1; i++)
++        {
++            var ch = token[i];
++            if (ch == '\\' && i + 1 < token.Length - 1)
++                ch = token[++i] switch { 'n' => '\n', 'r' => '\r', 't' => '\t', var other => other };
++            result.Append(ch);
++        }
++        return result.ToString();
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+new file mode 100644
+index 0000000..12bd499
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -0,0 +1,242 @@
++using System.Buffers.Binary;
++using System.IO.Compression;
++using System.Text;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record RegionTruckEntry(string RegionCode, string Region, string MapCode, string Map,
++    string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
++    float X, float Y, float Z, string Evidence, string Source);
++internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
++internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z);
++
++internal static class RegionTruckCatalogService
++{
++    private sealed record TaskLink(string Name, string Map, string Action, string Source);
++    private static readonly Regex MapCode = new(@"level_(?<region>(?:us|ru)_\d{2})_\d{2}(?:_[a-z0-9]+)*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
++    private static readonly Regex TruckRoot = new(@"<Truck(?=[\s>])[\s\S]*?</Truck\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
++
++    public static RegionTruckCatalog Load(string workspace, string mapDirectory,
++        IReadOnlyDictionary<string, string> names, IReadOnlyDictionary<string, string> regionNames)
++    {
++        var warnings = new List<string>();
++        var trucks = LoadTrucks(workspace, names, warnings);
++        if (trucks.Count == 0) throw new InvalidDataException("No vehicle definitions were found in the selected workspace.");
++        var tasks = LoadTasks(workspace, names, warnings);
++        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var pak in Directory.EnumerateFiles(mapDirectory, "level_*.pak", SearchOption.TopDirectoryOnly))
++            if (MapCode.IsMatch(Path.GetFileNameWithoutExtension(pak))) sources[Path.GetFileNameWithoutExtension(pak)] = pak;
++        // Extracted map data takes precedence over its archive, without extracting or writing game assets.
++        var extractedDirectories = Directory.EnumerateDirectories(mapDirectory, "level_*", SearchOption.TopDirectoryOnly)
++            .Append(mapDirectory);
++        foreach (var directory in extractedDirectories)
++        {
++            var match = MapCode.Match(Path.GetFileName(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
++            if (!match.Success) continue;
++            var bin = Path.Combine(directory, "[scene]", "data_for_ssl.bin");
++            if (File.Exists(bin)) sources[match.Value] = bin;
++        }
++        var entries = new List<RegionTruckEntry>();
++        var mapsRead = 0;
++        foreach (var (map, source) in sources.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
++        {
++            try
++            {
++                var data = ReadMapData(source);
++                if (data is null) { warnings.Add($"{map}: no [scene]/data_for_ssl.bin in archive."); continue; }
++                var regionCode = MapCode.Match(map).Groups["region"].Value.ToLowerInvariant();
++                var region = regionNames.GetValueOrDefault(regionCode, regionCode);
++                var mapName = MapName(data, map, names);
++                mapsRead++;
++                foreach (var placement in ReadPlacements(data, trucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase)))
++                {
++                    var metadata = trucks[placement.TruckCode];
++                    var links = placement.Id.Length == 0 ? [] : tasks.GetValueOrDefault(placement.Id, [])
++                        .Where(link => SameMap(link.Map, map) || link.Map.Length == 0).Distinct().ToArray();
++                    var actions = links.Select(link => link.Action).ToHashSet(StringComparer.OrdinalIgnoreCase);
++                    string availability;
++                    string reason;
++                    if (actions.Contains("REWARD") && actions.Contains("DESTROY"))
++                    {
++                        availability = "Unverified";
++                        reason = "Both reward and removal rules reference this placement; review task stages.";
++                    }
++                    else if (actions.Contains("DESTROY"))
++                    {
++                        availability = "Mission/task only";
++                        reason = "Task removes the vehicle (DESTROY).";
++                    }
++                    else if (actions.Contains("REWARD"))
++                    {
++                        availability = "Obtainable — task reward";
++                        reason = "Task explicitly awards the vehicle (REWARD).";
++                    }
++                    else if (placement.Id.Length == 0)
++                    {
++                        availability = "Obtainable — discovery/start";
++                        reason = "Inferred: unnamed world placement; no task ID. Includes starting vehicles.";
++                    }
++                    else
++                    {
++                        availability = "Unverified";
++                        reason = links.Length > 0
++                            ? "Task vehicle; no explicit award/removal rule. " + string.Join(", ", actions)
++                            : "Named placement with no matching task ownership rule in this workspace.";
++                    }
++                    var evidence = reason + $" Placement at 0x{placement.Offset:X}."
++                        + (links.Length == 0 ? "" : " Task sources: " + string.Join("; ", links.Select(link => link.Source).Distinct()));
++                    entries.Add(new(regionCode, region, map, mapName, placement.TruckCode, metadata.Name,
++                        metadata.Class, availability, string.Join("; ", links.Select(link => link.Name).Distinct()),
++                        placement.Id, placement.X, placement.Y, placement.Z, evidence, source));
++                }
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
++            { warnings.Add($"{map}: {ex.Message}"); }
++        }
++        return new(entries, warnings, mapsRead);
++    }
++
++    internal static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, IReadOnlySet<string> truckCodes)
++    {
++        var result = new List<MapTruckPlacement>();
++        for (var offset = 0; offset + 3 < data.Length; offset++)
++        {
++            if (!TryString(data, offset, out var model, out var next) || !truckCodes.Contains(model)) continue;
++            if (!TryString(data, next, out var id, out var transform) || !IsTransform(data, transform)) continue;
++            result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56)));
++            offset = transform + 63;
++        }
++        return result;
++    }
++
++    private static bool IsTransform(byte[] data, int offset)
++    {
++        if (offset + 64 > data.Length) return false;
++        for (var i = 0; i < 16; i++)
++        {
++            var value = ReadFloat(data, offset + i * 4);
++            if (!float.IsFinite(value)) return false;
++            if (i < 12 && Math.Abs(value) > 1.1f) return false;
++            if (i is 3 or 7 or 11 && Math.Abs(value) > 0.0001f) return false;
++        }
++        return Math.Abs(ReadFloat(data, offset + 60) - 1f) < 0.0001f
++            && Math.Abs(ReadFloat(data, offset)) + Math.Abs(ReadFloat(data, offset + 4)) + Math.Abs(ReadFloat(data, offset + 8)) > 0.5f;
++    }
++
++    private static float ReadFloat(byte[] data, int offset) => BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(offset, 4));
++
++    private static bool TryString(byte[] data, int offset, out string value, out int next)
++    {
++        value = "";
++        next = offset;
++        if (offset + 2 > data.Length) return false;
++        var length = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2));
++        if (length is < 1 or > 256 || offset + 2 + length > data.Length || data[offset + 1 + length] != 0) return false;
++        for (var i = offset + 2; i < offset + 1 + length; i++) if (data[i] is < 32 or > 126) return false;
++        value = Encoding.ASCII.GetString(data, offset + 2, length - 1);
++        next = offset + 2 + length;
++        return true;
++    }
++
++    private static byte[]? ReadMapData(string source)
++    {
++        if (source.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) return File.ReadAllBytes(source);
++        using var archive = ZipFile.OpenRead(source);
++        var entry = archive.Entries.FirstOrDefault(entry => entry.FullName.Replace('\\', '/').Equals("[scene]/data_for_ssl.bin", StringComparison.OrdinalIgnoreCase));
++        if (entry is null) return null;
++        if (entry.Length > 128 * 1024 * 1024) throw new InvalidDataException("Map metadata is larger than supported (128 MB).");
++        using var stream = entry.Open();
++        using var memory = new MemoryStream();
++        stream.CopyTo(memory);
++        return memory.ToArray();
++    }
++
++    private static string MapName(byte[] data, string map, IReadOnlyDictionary<string, string> names)
++    {
++        for (var i = 0; i < Math.Min(256, data.Length); i++)
++            if (TryString(data, i, out var key, out _) && key.EndsWith("_NAME", StringComparison.OrdinalIgnoreCase)
++                && names.TryGetValue(key, out var name)) return name;
++        var keyName = Regex.Replace(map, "^level_", "", RegexOptions.IgnoreCase).ToUpperInvariant() + "_NAME";
++        return names.GetValueOrDefault(keyName, map);
++    }
++
++    private static Dictionary<string, (string Name, string Class)> LoadTrucks(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
++    {
++        var trucks = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase);
++        foreach (var file in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
++                     .Where(file => string.Equals(Path.GetFileName(Path.GetDirectoryName(file)), "trucks", StringComparison.OrdinalIgnoreCase)))
++        {
++            try
++            {
++                var root = TruckRoot.Match(WorkspaceDataCache.ReadAllText(file));
++                if (!root.Success) continue;
++                var key = Regex.Match(root.Value, "\\bUiName\\s*=\\s*\"([^\"]+)\"").Groups[1].Value;
++                var truckClass = Regex.Match(root.Value, "\\bTruckType\\s*=\\s*\"([^\"]+)\"").Groups[1].Value;
++                var code = Path.GetFileNameWithoutExtension(file);
++                trucks[code] = (names.GetValueOrDefault(key, code), truckClass);
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { warnings.Add($"{file}: {ex.Message}"); }
++        }
++        return trucks;
++    }
++
++    private static Dictionary<string, List<TaskLink>> LoadTasks(string workspace, IReadOnlyDictionary<string, string> names, List<string> warnings)
++    {
++        var links = new Dictionary<string, List<TaskLink>>(StringComparer.OrdinalIgnoreCase);
++        foreach (var file in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[ps]", "*.sso"))
++        {
++            try
++            {
++                var text = WorkspaceDataCache.ReadAllText(file);
++                if (!text.Contains("truckId", StringComparison.OrdinalIgnoreCase) && !text.Contains("truckUid", StringComparison.OrdinalIgnoreCase)) continue;
++                var root = SsoDataReader.Parse(text);
++                foreach (var task in root.DescendantsAndSelf().Where(node => node.Get("__type") is "TaskSettings" or "ContractSettings" or "ContestSettings"))
++                {
++                    var nodes = task.DescendantsAndSelf().ToArray();
++                    var key = task.Get("uiDesc");
++                    var titleKeys = new[] { task.Key, Path.GetFileNameWithoutExtension(file).ToUpperInvariant(), Regex.Replace(key, "_DESC.*$", "", RegexOptions.IgnoreCase) };
++                    var name = titleKeys.Where(title => title.Length > 0 && names.ContainsKey(title)).Select(title => names[title]).FirstOrDefault()
++                        ?? (task.Key.Length > 0 ? task.Key : Path.GetFileNameWithoutExtension(file));
++                    // Scope reused placement IDs to the task's region; deliveries can cross maps.
++                    var map = task.Members.TryGetValue("taskGiverZone", out var giver) ? MapCode.Match(giver.Get("globalZoneId")).Value : "";
++                    if (map.Length == 0 && Regex.IsMatch(task.Get("region"), @"^(?:us|ru)_\d{2}$", RegexOptions.IgnoreCase))
++                        map = "level_" + task.Get("region") + "_00";
++                    if (map.Length == 0) map = MapCode.Match("level_" + Path.GetFileNameWithoutExtension(file).Replace("level_", "")).Value;
++                    foreach (var node in nodes)
++                    {
++                        var id = node.Get("truckId");
++                        if (id.Length == 0) id = node.Get("truckUid");
++                        if (id.Length == 0) continue;
++                        var action = node.Get("afterStageFinished");
++                        if (node.Get("mustDestroyAfterSubstage").Equals("True", StringComparison.OrdinalIgnoreCase)) action = "DESTROY";
++                        if (action.Length == 0) action = "Unspecified";
++                        if (!links.TryGetValue(id, out var list)) links[id] = list = [];
++                        list.Add(new(name, map, action, WorkspaceOriginals.GetRelativePath(workspace, file)));
++                    }
++                }
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException)
++            { warnings.Add($"{Path.GetFileName(file)}: {ex.Message}"); }
++        }
++        return links;
++    }
++
++    private static bool SameMap(string first, string second) =>
++        MapCode.Match(first).Groups["region"].Value.Equals(MapCode.Match(second).Groups["region"].Value, StringComparison.OrdinalIgnoreCase);
++
++    public static string FindMapDirectory(string inputPak)
++    {
++        var candidates = new List<string>();
++        if (!string.IsNullOrWhiteSpace(inputPak)) candidates.Add(Path.GetDirectoryName(Path.GetFullPath(inputPak))!);
++        foreach (var drive in DriveInfo.GetDrives().Where(drive => drive.IsReady && drive.DriveType == DriveType.Fixed))
++            foreach (var library in new[] { "SteamLibrary", "Steam", "Program Files (x86)/Steam" })
++                candidates.Add(Path.Combine(drive.RootDirectory.FullName, library, "steamapps/common/SnowRunner/preload/paks/client"));
++        foreach (var candidate in candidates)
++        {
++            try { if (Directory.Exists(candidate) && Directory.EnumerateFiles(candidate, "level_*.pak").Any()) return candidate; }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
++        }
++        return "";
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+new file mode 100644
+index 0000000..c11e177
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -0,0 +1,242 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class RegionsTrucksTab : UserControl
++{
++    private readonly Func<string> _getWorkspacePath;
++    private readonly Func<string> _getPakPath;
++    private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
++    private readonly TextBox _search = new() { Width = 250, PlaceholderText = "Search truck, map, task or placement ID…" };
++    private readonly ComboBox _availability = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
++    private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
++    private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
++    private readonly FlowLayoutPanel _regions = new()
++    {
++        Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
++        AutoScroll = true, Padding = new Padding(2), Margin = Padding.Empty
++    };
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 5, 4, 5) };
++    private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
++    private readonly DataGridView _trucks = new()
++    {
++        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
++        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
++        RowTemplate = { Height = 26 }
++    };
++    private readonly HashSet<string> _selectedRegions = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, Button> _tiles = new(StringComparer.OrdinalIgnoreCase);
++    private RegionTruckCatalog? _catalog;
++    private string? _loadedWorkspace;
++    private string? _loadedMapFolder;
++    private bool _loading;
++
++    public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath)
++    {
++        _getWorkspacePath = getWorkspacePath;
++        _getPakPath = getPakPath;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
++        layout.Controls.Add(_regions, 0, 0);
++        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4 };
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        folderRow.Controls.Add(new Label { Text = "Map folder", AutoSize = true, Padding = new Padding(0, 5, 8, 0) }, 0, 0);
++        folderRow.Controls.Add(_mapFolder, 1, 0);
++        folderRow.Controls.Add(_browse, 2, 0);
++        folderRow.Controls.Add(_reload, 3, 0);
++        layout.Controls.Add(folderRow, 0, 1);
++        var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        filters.Controls.Add(_search);
++        _availability.Items.AddRange(["All trucks", "Obtainable", "Mission/task only", "Unverified"]);
++        _availability.SelectedIndex = 0;
++        filters.Controls.Add(_availability);
++        var all = new Button { Text = "Select all regions", AutoSize = true };
++        var clear = new Button { Text = "Clear selection", AutoSize = true };
++        filters.Controls.Add(all);
++        filters.Controls.Add(clear);
++        layout.Controls.Add(filters, 0, 2);
++        layout.Controls.Add(_status, 0, 3);
++        layout.Controls.Add(_trucks, 0, 4);
++        layout.Controls.Add(_details, 0, 5);
++        Controls.Add(layout);
++        _status.Text = "Open this tab with an extracted workspace to scan installed maps. Click region tiles to select multiple regions.";
++        _browse.Click += async (_, _) =>
++        {
++            using var dialog = new FolderBrowserDialog { Description = "Choose the folder containing level_*.pak archives or extracted map folders." };
++            if (Directory.Exists(_mapFolder.Text)) dialog.SelectedPath = _mapFolder.Text;
++            if (dialog.ShowDialog(this) != DialogResult.OK) return;
++            _mapFolder.Text = dialog.SelectedPath;
++            await LoadAsync(force: true);
++        };
++        _reload.Click += async (_, _) => await LoadAsync(force: true);
++        all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshTiles(); ApplyFilter(); };
++        clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshTiles(); ApplyFilter(); };
++        _search.TextChanged += (_, _) => ApplyFilter();
++        _availability.SelectedIndexChanged += (_, _) => ApplyFilter();
++        _trucks.CurrentCellChanged += (_, _) => ShowDetails();
++        _trucks.DataBindingComplete += (_, _) => ShowDetails();
++        AppColors.Changed += PaletteChanged;
++        Disposed += (_, _) => AppColors.Changed -= PaletteChanged;
++        PaletteChanged(this, EventArgs.Empty);
++    }
++
++    public Task EnsureLoadedAsync() => LoadAsync(force: false);
++
++    private async Task LoadAsync(bool force)
++    {
++        if (_loading) return;
++        var workspace = _getWorkspacePath().Trim();
++        if (_mapFolder.Text.Length == 0) _mapFolder.Text = RegionTruckCatalogService.FindMapDirectory(_getPakPath());
++        var mapFolder = _mapFolder.Text.Trim();
++        if (!force && workspace.Equals(_loadedWorkspace, StringComparison.OrdinalIgnoreCase)
++            && mapFolder.Equals(_loadedMapFolder, StringComparison.OrdinalIgnoreCase)) return;
++        ClearCatalog();
++        if (workspace.Length == 0 || !Directory.Exists(workspace)) { _status.Text = "Choose an extracted workspace on the Unpack / Pack tab."; return; }
++        if (mapFolder.Length == 0 || !Directory.Exists(mapFolder)) { _status.Text = "Choose a map folder containing level_*.pak archives or extracted maps."; return; }
++        _loading = true;
++        _reload.Enabled = _browse.Enabled = false;
++        _mapFolder.ReadOnly = true;
++        _status.Text = "Reading map placements and matching task rewards/removal rules…";
++        try
++        {
++            await WorkspaceDataCache.PreloadAsync(workspace, forceReload: force);
++            var names = WorkspaceDataCache.GetLocalizedNames(workspace);
++            var regions = WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase);
++            var catalog = await Task.Run(() => RegionTruckCatalogService.Load(workspace, mapFolder, names, regions));
++            if (IsDisposed || !workspace.Equals(_getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)
++                || !mapFolder.Equals(_mapFolder.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
++            _catalog = catalog;
++            _loadedWorkspace = workspace;
++            _loadedMapFolder = mapFolder;
++            BuildRegionTiles();
++            ApplyFilter();
++        }
++        catch (Exception ex) { if (!IsDisposed) _status.Text = $"Could not load map trucks: {ex.Message}"; }
++        finally
++        {
++            _loading = false;
++            if (!IsDisposed) { _reload.Enabled = _browse.Enabled = true; _mapFolder.ReadOnly = false; }
++        }
++    }
++
++    private void ClearCatalog()
++    {
++        _catalog = null;
++        _loadedWorkspace = _loadedMapFolder = null;
++        _trucks.DataSource = null;
++        _details.Clear();
++        foreach (var tile in _tiles.Values) tile.Dispose();
++        _tiles.Clear();
++        _regions.Controls.Clear();
++    }
++
++    private void BuildRegionTiles()
++    {
++        if (_catalog is null) return;
++        _regions.SuspendLayout();
++        foreach (var group in _catalog.Entries.GroupBy(entry => entry.RegionCode).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
++        {
++            var code = group.Key;
++            var rows = group.ToArray();
++            var obtainable = rows.Count(row => row.Availability.StartsWith("Obtainable", StringComparison.Ordinal));
++            var missions = rows.Count(row => row.Availability == "Mission/task only");
++            var unverified = rows.Length - obtainable - missions;
++            var tile = new Button
++            {
++                Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
++                Text = rows[0].Region + "\n\n" + code.ToUpperInvariant() + "\n"
++                    + $"{rows.Select(row => row.MapCode).Distinct().Count()} maps · {rows.Length} placements\n\n"
++                    + $"{obtainable} obtainable\n{missions} mission/task only\n{unverified} unverified",
++                Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
++                TextAlign = ContentAlignment.MiddleCenter, UseVisualStyleBackColor = false,
++                AccessibleName = rows[0].Region, AccessibleDescription = "Toggle this region in the truck table", Tag = code
++            };
++            tile.Click += (_, _) =>
++            {
++                if (!_selectedRegions.Add(code)) _selectedRegions.Remove(code);
++                RefreshTiles();
++                ApplyFilter();
++            };
++            _tiles[code] = tile;
++            _regions.Controls.Add(tile);
++        }
++        _selectedRegions.IntersectWith(_tiles.Keys);
++        if (_selectedRegions.Count == 0 && _tiles.Count > 0) _selectedRegions.Add(_tiles.Keys.First());
++        RefreshTiles();
++        _regions.ResumeLayout();
++    }
++
++    private void RefreshTiles()
++    {
++        foreach (var (code, tile) in _tiles)
++        {
++            var selected = _selectedRegions.Contains(code);
++            tile.BackColor = selected ? AppColors.Get("SelectionBlue") : Color.FromArgb(32, 38, 45);
++            tile.ForeColor = tile.BackColor.GetBrightness() < 0.55f ? Color.White : Color.Black;
++            tile.FlatAppearance.BorderSize = selected ? 3 : 1;
++            tile.FlatAppearance.BorderColor = selected ? SystemColors.Highlight : Color.FromArgb(70, 80, 90);
++            tile.AccessibleDescription = selected ? "Selected region. Activate to remove from the table." : "Activate to add this region to the table.";
++        }
++    }
++
++    private void ApplyFilter()
++    {
++        if (_catalog is null) return;
++        var query = _search.Text.Trim();
++        var mode = _availability.SelectedItem?.ToString() ?? "All trucks";
++        var rows = _catalog.Entries.Where(entry => _selectedRegions.Contains(entry.RegionCode))
++            .Where(entry => mode == "All trucks" || entry.Availability.StartsWith(mode, StringComparison.Ordinal))
++            .Where(entry => string.Join(" ", entry.Region, entry.Map, entry.MapCode, entry.Truck, entry.TruckCode, entry.Task, entry.PlacementId)
++                .Contains(query, StringComparison.CurrentCultureIgnoreCase))
++            .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
++        var table = new DataTable();
++        foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
++        table.Columns.Add("Entry", typeof(RegionTruckEntry));
++        foreach (var entry in rows) table.Rows.Add(entry.Region, entry.Map, entry.Truck, entry.Class,
++            entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
++        _trucks.DataSource = table;
++        _trucks.Columns["Entry"]!.Visible = false;
++        foreach (DataGridViewColumn column in _trucks.Columns)
++            column.Width = column.Name switch { "Truck" => 210, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
++        foreach (DataGridViewRow row in _trucks.Rows)
++        {
++            if (row.DataBoundItem is not DataRowView view || view["Entry"] is not RegionTruckEntry entry) continue;
++            row.Cells["Availability"].Style.BackColor = AppColors.Get(entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal)
++                ? "DAF8E0" : entry.Availability == "Mission/task only" ? "FFDCDC" : "EngineMatch");
++        }
++        _status.Text = $"{rows.Length} placements in {_selectedRegions.Count} selected regions · {_catalog.MapsRead} maps read · {_catalog.Warnings.Count} warnings. "
++            + "Discovery/start is inferred; task rewards and removals use explicit rules. Click a row for evidence.";
++        if (_catalog.MapsRead == 0) _status.Text = "No supported map files found. Choose the folder containing level_*.pak or extracted level folders.";
++        ShowDetails();
++    }
++
++    private void ShowDetails()
++    {
++        _details.Clear();
++        if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
++            _details.Text = $"{entry.Evidence}\r\nMap: {entry.MapCode} · Position: ({entry.X:0.##}, {entry.Y:0.##}, {entry.Z:0.##})\r\nSource: {entry.Source}";
++        if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
++    }
++
++    private void PaletteChanged(object? sender, EventArgs e)
++    {
++        _trucks.BackgroundColor = _trucks.DefaultCellStyle.BackColor = AppColors.Get("Surface");
++        _trucks.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow");
++        _trucks.DefaultCellStyle.SelectionBackColor = AppColors.Get("SelectionBlue");
++        _trucks.DefaultCellStyle.SelectionForeColor = SystemColors.ControlText;
++        RefreshTiles();
++        ApplyFilter();
++    }
++}

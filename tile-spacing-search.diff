@@ -1,0 +1,230 @@
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -29,6 +29,8 @@
+         var wheelFilter = new DirectionalWheelFilter(this);
+         Application.AddMessageFilter(wheelFilter);
+         Disposed += (_, _) => Application.RemoveMessageFilter(wheelFilter);
++        var search = new QuickSearchOverlay(this, FindTruck);
++        Disposed += (_, _) => search.Dispose();
+         RefreshOwnedTrucks();
+     }
+ 
+@@ -116,6 +118,8 @@
+         else
+         {
+             section.Tiles.WrapContents = false;
++            section.Tiles.Margin = Padding.Empty;
++            section.Tiles.Padding = Padding.Empty;
+             section.Panel.Text = state.Description;
+             var content = (TableLayoutPanel)section.Header.Parent!;
+             content.Controls.Remove(section.Header);
+@@ -353,10 +357,10 @@
+         if (_unsortedTiles is null || _unsortedColumnStyle is null)
+             return;
+ 
+-        const int tileStride = TileWidth + 6;
++        const int tileStride = TileWidth + 1;
+         const int fixedPaneSpacing = 57;
+         const int defaultColumns = 3;
+-        var rowsThatFit = Math.Max(1, _unsortedTiles.ClientSize.Height / (TileHeight + 6));
++        var rowsThatFit = Math.Max(1, _unsortedTiles.ClientSize.Height / (TileHeight + 1));
+         var tileCount = _unsortedTiles.Controls.Count;
+         var columns = tileCount <= rowsThatFit ? 1
+             : tileCount <= rowsThatFit * 2 ? 2
+@@ -373,7 +377,7 @@
+         {
+             if (_tierList)
+             {
+-                pane.Height = TileHeight + 6 + SystemInformation.HorizontalScrollBarHeight + 42;
++                pane.Height = TileHeight + 1 + SystemInformation.HorizontalScrollBarHeight + 42;
+                 pane.Width = Math.Max(180, groupList.ClientSize.Width - groupList.Padding.Horizontal - pane.Margin.Horizontal - SystemInformation.VerticalScrollBarWidth);
+             }
+             else pane.Height = Math.Max(1, groupList.ClientSize.Height - groupList.Padding.Vertical - pane.Margin.Vertical);
+@@ -564,6 +568,29 @@
+         UpdateUnsortedPaneWidth();
+     }
+ 
++    private bool FindTruck(string query)
++    {
++        query = query.Trim();
++        if (query.Length == 0) return false;
++        var panes = new List<(TileFlowPanel Tiles, Control? Pane)>();
++        if (_unsortedTiles is not null) panes.Add((_unsortedTiles, null));
++        panes.AddRange(_groupViews.Select(view => (view.Tiles, (Control?)view.Panel)));
++        foreach (var (tiles, pane) in panes)
++        {
++            foreach (Control tile in tiles.Controls)
++            {
++                var matches = (tile.Tag as string)?.Contains(query, StringComparison.CurrentCultureIgnoreCase) == true ||
++                    tile.Controls.OfType<Label>().Any(label => label.Text.Contains(query, StringComparison.CurrentCultureIgnoreCase));
++                if (!matches) continue;
++                if (pane is not null) _groupList?.ScrollControlIntoView(pane);
++                tiles.ScrollControlIntoView(tile);
++                _status.Text = $"Found: {tile.Controls.OfType<Label>().FirstOrDefault()?.Text ?? tile.Tag}";
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private static Panel CreateTile(CustomTruck truck)
+     {
+         var tile = new Panel
+@@ -571,7 +598,7 @@
+             Tag = truck.Code,
+             Width = 150,
+             Height = 210,
+-            Margin = new Padding(3),
++            Margin = new Padding(0, 0, 1, 1),
+             BorderStyle = BorderStyle.FixedSingle,
+             BackColor = Color.FromArgb(30, 35, 40)
+         };
+--- DirectionalWheelFilter.cs
++++ DirectionalWheelFilter.cs
+@@ -60,7 +60,7 @@
+         lastTarget = pane;
+         ScrollProperties scroll = horizontal ? pane.HorizontalScroll : pane.VerticalScroll;
+         var lines = SystemInformation.MouseWheelScrollLines;
+-        var distance = lines < 0 ? scroll.LargeChange : Math.Max(1, scroll.SmallChange) * lines;
++        var distance = lines < 0 ? scroll.LargeChange : Math.Max(40, scroll.SmallChange) * lines;
+         remainder += delta / 120.0 * distance;
+         var pixels = (int)remainder;
+         remainder -= pixels;
+--- /dev/null
++++ QuickSearchOverlay.cs
+@@ -0,0 +1,135 @@
++namespace SnowPakTool.Desktop;
++
++/// <summary>A double tap of Shift opens an immediately focused search field.</summary>
++internal sealed class QuickSearchOverlay : IMessageFilter, IDisposable
++{
++    private readonly Control _root;
++    private readonly Func<string, bool> _find;
++    private readonly Panel _overlay;
++    private readonly TextBox _input;
++    private readonly Label _hint;
++    private long _lastShiftRelease = -1000;
++    private bool _shiftOnly;
++    private Control? _previousFocus;
++
++    public QuickSearchOverlay(Control root, Func<string, bool> find)
++    {
++        _root = root;
++        _find = find;
++        _overlay = new Panel
++        {
++            Size = new Size(340, 76), BorderStyle = BorderStyle.FixedSingle,
++            BackColor = SystemColors.Control, Visible = false, Padding = new Padding(8)
++        };
++        _input = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search truck name, code or class..." };
++        _hint = new Label
++        {
++            Dock = DockStyle.Bottom, Height = 24, Text = "Enter: find first match    Esc: close",
++            TextAlign = ContentAlignment.MiddleLeft
++        };
++        _overlay.Controls.Add(_input);
++        _overlay.Controls.Add(_hint);
++        root.Controls.Add(_overlay);
++        root.SizeChanged += PositionOverlay;
++        root.VisibleChanged += RootVisibilityChanged;
++        _input.KeyDown += (_, e) =>
++        {
++            if (e.KeyCode is not (Keys.Enter or Keys.Escape)) return;
++            e.SuppressKeyPress = true;
++            e.Handled = true;
++            if (e.KeyCode == Keys.Escape) Close();
++            else if (_input.Text.Trim().Length == 0) _hint.Text = "Type a truck name, code or class.";
++            else
++            {
++                var query = _input.Text;
++                // Restore focus before scrolling so focus restoration cannot undo the result.
++                Close();
++                if (!_find(query))
++                {
++                    Open();
++                    _input.Text = query;
++                    _input.SelectionStart = query.Length;
++                    _hint.Text = "No matching truck in the available panes.";
++                }
++            }
++        };
++        Application.AddMessageFilter(this);
++    }
++
++    public bool PreFilterMessage(ref Message message)
++    {
++        const int KeyDown = 0x100, KeyUp = 0x101, SystemKeyDown = 0x104;
++        if (!_root.Visible || _root.IsDisposed || !(_root.ContainsFocus || _root.FindForm()?.ContainsFocus == true)) return false;
++        if (message.Msg is not (KeyDown or KeyUp or SystemKeyDown)) return false;
++        var key = (Keys)message.WParam.ToInt32();
++        var shift = key is Keys.ShiftKey or Keys.LShiftKey or Keys.RShiftKey;
++        if (!shift)
++        {
++            _shiftOnly = false;
++            _lastShiftRelease = -1000;
++            return false;
++        }
++        if (message.Msg == KeyDown)
++        {
++            if ((message.LParam.ToInt64() & (1L << 30)) != 0) return false;
++            if (Environment.TickCount64 - _lastShiftRelease <= 350)
++            {
++                _lastShiftRelease = -1000;
++                _shiftOnly = false;
++                Open();
++                return true;
++            }
++            _shiftOnly = true;
++        }
++        else if (message.Msg == KeyUp && _shiftOnly)
++        {
++            _lastShiftRelease = Environment.TickCount64;
++            _shiftOnly = false;
++        }
++        return false;
++    }
++
++    private void Open()
++    {
++        if (!_overlay.Visible) _previousFocus = FindFocused(_root.FindForm() ?? _root);
++        _input.Clear();
++        _hint.Text = "Enter: find first match    Esc: close";
++        PositionOverlay(null, EventArgs.Empty);
++        _overlay.Show();
++        _overlay.BringToFront();
++        _input.Focus();
++    }
++
++    private void Close()
++    {
++        _overlay.Hide();
++        if (_previousFocus is { IsDisposed: false, CanFocus: true }) _previousFocus.Focus();
++    }
++
++    private static Control? FindFocused(Control root)
++    {
++        if (root.Focused) return root;
++        foreach (Control child in root.Controls)
++            if (child.ContainsFocus) return FindFocused(child);
++        return null;
++    }
++
++    private void PositionOverlay(object? sender, EventArgs e)
++    {
++        _overlay.Width = Math.Min(340, Math.Max(100, _root.ClientSize.Width - 24));
++        _overlay.Location = new Point(Math.Max(0, (_root.ClientSize.Width - _overlay.Width) / 2), 12);
++    }
++
++    private void RootVisibilityChanged(object? sender, EventArgs e)
++    {
++        if (!_root.Visible) { _overlay.Hide(); _lastShiftRelease = -1000; _shiftOnly = false; }
++    }
++
++    public void Dispose()
++    {
++        Application.RemoveMessageFilter(this);
++        _root.SizeChanged -= PositionOverlay;
++        _root.VisibleChanged -= RootVisibilityChanged;
++        _overlay.Dispose();
++    }
++}

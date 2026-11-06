@@ -1,0 +1,689 @@
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+index 0434c93..32837da 100644
+--- a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
++++ b/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+@@ -26,10 +26,21 @@ internal sealed class TruckEquipmentCatalog
+ {
+     private sealed record Definition(string Path, XElement Xml, string Parent);
+     private sealed record Tire(string Identity, string Name, string Category);
++    private sealed record AddonOption(string Name, string Category);
++    private readonly object _gate = new();
+     private readonly IReadOnlyDictionary<string, string> _names;
+     private readonly string _workspace;
+     private readonly List<string> _warnings;
+     private readonly Dictionary<string, string> _files;
++    private readonly HashSet<string> _filePaths;
++    private readonly Dictionary<string, Definition[]> _chains = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, Dictionary<string, Tire>> _tires = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, string[]> _sockets = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, string> _addonNames = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, TruckEquipmentSummary> _defaults = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _comparisonProperties = new(StringComparer.OrdinalIgnoreCase);
++    private Dictionary<string, List<AddonOption>>? _optionsBySocket;
++    private readonly long _version;
+     private readonly Dictionary<string, Definition?> _definitions = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Dictionary<string, HashSet<string>> _tireUsers = new(StringComparer.OrdinalIgnoreCase);
+     private readonly Dictionary<string, List<(Definition Definition, XElement Variant)>> _components = new(StringComparer.OrdinalIgnoreCase);
+@@ -39,11 +50,13 @@ internal sealed class TruckEquipmentCatalog
+     {
+         _names = names;
+         _workspace = workspace;
++        _version = WorkspaceDataCache.ContentVersion;
+         _warnings = warnings;
+         _files = WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml")
+             .Where(path => Regex.IsMatch(path.Replace('\\', '/'), @"/classes/(trucks|wheels|engines|gearboxes|winches|suspensions)/", RegexOptions.IgnoreCase))
+             .GroupBy(path => Path.GetFileNameWithoutExtension(path)!, StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
++        _filePaths = _files.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
+         foreach (var (truck, path) in _files.Where(pair => string.Equals(Path.GetFileName(Path.GetDirectoryName(pair.Value)), "trucks", StringComparison.OrdinalIgnoreCase)).ToArray())
+         {
+             var chain = Chain(path).ToArray();
+@@ -61,6 +74,24 @@ internal sealed class TruckEquipmentCatalog
+     }
+ 
+     public TruckEquipmentSummary Resolve(string truck, MapTruckEquipment equipment)
++    {
++        lock (_gate) return ResolveCore(truck, equipment);
++    }
++
++    public bool IsCurrent(string workspace) => _version == WorkspaceDataCache.ContentVersion
++        && Path.GetFullPath(_workspace).Equals(Path.GetFullPath(workspace), StringComparison.OrdinalIgnoreCase);
++
++    public TruckEquipmentSummary ResolveDefault(string truck)
++    {
++        lock (_gate)
++        {
++            if (!_defaults.TryGetValue(truck, out var summary))
++                _defaults[truck] = summary = ResolveCore(truck, new(true, [], "", "", ""));
++            return summary;
++        }
++    }
++
++    private TruckEquipmentSummary ResolveCore(string truck, MapTruckEquipment equipment)
+     {
+         if (!equipment.Parsed) return new("Unknown", "The map equipment record could not be read; vehicle defaults were not assumed.",
+             "Unknown", "The map equipment record could not be read.");
+@@ -140,6 +171,21 @@ internal sealed class TruckEquipmentCatalog
+     }
+ 
+     public IReadOnlyDictionary<string, string> ComparisonProperties(string truck)
++    {
++        lock (_gate)
++        {
++            if (!_comparisonProperties.TryGetValue(truck, out var properties))
++                _comparisonProperties[truck] = properties = BuildComparisonProperties(truck);
++            return properties;
++        }
++    }
++
++    public bool TryGetComparisonProperties(string truck, out IReadOnlyDictionary<string, string> properties)
++    {
++        lock (_gate) return _comparisonProperties.TryGetValue(truck, out properties!);
++    }
++
++    private IReadOnlyDictionary<string, string> BuildComparisonProperties(string truck)
+     {
+         var chain = FileChain(truck).ToArray();
+         var properties = chain.SelectMany(definition => new[] { "TruckData", "GameData" }
+@@ -158,19 +204,36 @@ internal sealed class TruckEquipmentCatalog
+         var sockets = chain.SelectMany(definition => definition.Xml.Element("GameData")?.Elements("AddonSockets") ?? [])
+             .SelectMany(element => element.Elements("Socket")).SelectMany(socket => Split((string?)socket.Attribute("Names")))
+             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+-        var nonvisualOptions = _files.Keys.Where(id => !(FileChain(id).FirstOrDefault()?.Path ?? "")
+-                .Replace('\\', '/').Split('/').Any(part => part.EndsWith("_tuning", StringComparison.OrdinalIgnoreCase))
+-            && SocketTypes(id).Any(sockets.Contains)).ToArray();
+-        properties["Addons / Supported sockets"] = string.Join(", ", nonvisualOptions.SelectMany(SocketTypes).Where(sockets.Contains)
+-            .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.CurrentCultureIgnoreCase));
+-        foreach (var group in nonvisualOptions.GroupBy(id =>
+-                     FileChain(id).Select(definition => (string?)definition.Xml.Element("GameData")?.Attribute("Category"))
+-                         .FirstOrDefault(value => value is not null) ?? "Uncategorized"))
+-            foreach (var name in group.Select(AddonName).Distinct().Order(StringComparer.CurrentCultureIgnoreCase))
++        IndexAddonOptions();
++        var supported = sockets.Where(socket => _optionsBySocket!.ContainsKey(socket)).ToArray();
++        properties["Addons / Supported sockets"] = string.Join(", ", supported.Order(StringComparer.CurrentCultureIgnoreCase));
++        foreach (var group in supported.SelectMany(socket => _optionsBySocket![socket]).Distinct().GroupBy(option => option.Category))
++            foreach (var name in group.Select(option => option.Name).Distinct().Order(StringComparer.CurrentCultureIgnoreCase))
+                 properties["Addon socket options / " + group.Key.Replace('_', ' ') + " / " + name] = "Supported socket match";
+         return properties;
+     }
+ 
++    private void IndexAddonOptions()
++    {
++        if (_optionsBySocket is not null) return;
++        _optionsBySocket = new(StringComparer.OrdinalIgnoreCase);
++        foreach (var id in _files.Keys)
++        {
++            var chain = FileChain(id).ToArray();
++            if ((chain.FirstOrDefault()?.Path ?? "").Replace('\\', '/').Split('/').Any(part => part.EndsWith("_tuning", StringComparison.OrdinalIgnoreCase))) continue;
++            var sockets = SocketTypes(id).ToArray();
++            if (sockets.Length == 0) continue;
++            var category = chain.Select(definition => (string?)definition.Xml.Element("GameData")?.Attribute("Category"))
++                .FirstOrDefault(value => value is not null) ?? "Uncategorized";
++            var option = new AddonOption(AddonName(id), category);
++            foreach (var socket in sockets)
++            {
++                if (!_optionsBySocket.TryGetValue(socket, out var options)) _optionsBySocket[socket] = options = [];
++                options.Add(option);
++            }
++        }
++    }
++
+     private InternalEquipmentInfo ResolveComponent(IReadOnlyList<Definition> truck, string kind, string socket, string mapId)
+     {
+         var sockets = truck.Select(definition => definition.Xml.Element("TruckData")?.Element(socket)).Where(element => element is not null).ToArray();
+@@ -252,17 +315,24 @@ internal sealed class TruckEquipmentCatalog
+ 
+     private string AddonName(string id)
+     {
++        if (_addonNames.TryGetValue(id, out var name)) return name;
+         var key = FileChain(id).Select(definition => (string?)definition.Xml.Element("GameData")?.Element("UiDesc")?.Attribute("UiName"))
+             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+-        return key is not null ? _names.GetValueOrDefault(key, id) : id;
++        return _addonNames[id] = key is not null ? _names.GetValueOrDefault(key, id) : id;
+     }
+ 
+-    private IEnumerable<string> SocketTypes(string id) => FileChain(id)
+-        .SelectMany(definition => definition.Xml.Element("GameData")?.Elements("InstallSocket") ?? [])
+-        .SelectMany(socket => Split((string?)socket.Attribute("Type"))).Distinct(StringComparer.OrdinalIgnoreCase);
++    private IEnumerable<string> SocketTypes(string id)
++    {
++        if (!_sockets.TryGetValue(id, out var sockets))
++            _sockets[id] = sockets = FileChain(id)
++                .SelectMany(definition => definition.Xml.Element("GameData")?.Elements("InstallSocket") ?? [])
++                .SelectMany(socket => Split((string?)socket.Attribute("Type"))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
++        return sockets;
++    }
+ 
+     private Dictionary<string, Tire> Tires(string type)
+     {
++        if (_tires.TryGetValue(type, out var cached)) return cached;
+         var tires = new Dictionary<string, Tire>(StringComparer.OrdinalIgnoreCase);
+         foreach (var definition in FileChain(type).Reverse())
+             foreach (var element in definition.Xml.Element("TruckTires")?.Elements("TruckTire") ?? [])
+@@ -278,7 +348,7 @@ internal sealed class TruckEquipmentCatalog
+                 var category = Category(description) ?? Category(friction) ?? Category(template) ?? Category(id) ?? "Unknown";
+                 tires[id] = new(definition.Path + "|" + id, _names.GetValueOrDefault(key, id), category);
+             }
+-        return tires;
++        return _tires[type] = tires;
+     }
+ 
+     private static string? Category(string value)
+@@ -294,19 +364,23 @@ internal sealed class TruckEquipmentCatalog
+ 
+     private IEnumerable<Definition> FileChain(string code) => _files.TryGetValue(code, out var path) ? Chain(path) : [];
+ 
+-    private IEnumerable<Definition> Chain(string path)
++    private Definition[] Chain(string path)
+     {
++        if (_chains.TryGetValue(path, out var cached)) return cached;
++        var start = path;
++        var result = new List<Definition>();
+         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+         while (visited.Count < 32 && visited.Add(path))
+         {
+             var definition = Read(path);
+-            if (definition is null) yield break;
+-            yield return definition;
+-            if (definition.Parent.Length == 0) yield break;
++            if (definition is null) break;
++            result.Add(definition);
++            if (definition.Parent.Length == 0) break;
+             var sibling = Path.Combine(Path.GetDirectoryName(path)!, definition.Parent + ".xml");
+-            if (_files.Values.Contains(sibling, StringComparer.OrdinalIgnoreCase)) path = sibling;
+-            else if (!_files.TryGetValue(definition.Parent, out path!)) yield break;
++            if (_filePaths.Contains(sibling)) path = sibling;
++            else if (!_files.TryGetValue(definition.Parent, out path!)) break;
+         }
++        return _chains[start] = result.ToArray();
+     }
+ 
+     private Definition? Read(string path)
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index f037678..4731784 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -1,4 +1,5 @@
+ using System.Buffers.Binary;
++using System.Buffers;
+ using System.IO.Compression;
+ using System.Text;
+ using System.Text.RegularExpressions;
+@@ -11,7 +12,8 @@ internal sealed record RegionTruckEntry(string RegionCode, string Region, string
+     string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false,
+     IReadOnlyList<InstalledAddonInfo>? InstalledAddons = null, string FrameAddons = "Unknown", string FrameAddonDetails = "",
+     IReadOnlyList<InternalEquipmentInfo>? InternalEquipment = null, IReadOnlyList<float>? Transform = null, int BinaryOffset = -1);
+-internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
++internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead,
++    TruckEquipmentCatalog? EquipmentCatalog = null);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment, IReadOnlyList<float>? Transform = null);
+ 
+ internal static class RegionTruckCatalogService
+@@ -29,6 +31,7 @@ internal static class RegionTruckCatalogService
+         if (trucks.Count == 0) throw new InvalidDataException("No vehicle definitions were found in the selected workspace.");
+         var tasks = LoadTasks(workspace, names, warnings);
+         var equipmentCatalog = new TruckEquipmentCatalog(workspace, names, warnings);
++        var models = new TruckModelIndex(trucks.Keys);
+         var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+         foreach (var pak in Directory.EnumerateFiles(mapDirectory, "level_*.pak", SearchOption.TopDirectoryOnly))
+             if (MapCode.IsMatch(Path.GetFileNameWithoutExtension(pak))) sources[Path.GetFileNameWithoutExtension(pak)] = pak;
+@@ -54,7 +57,7 @@ internal static class RegionTruckCatalogService
+                 var region = regionNames.GetValueOrDefault(regionCode, regionCode);
+                 var mapName = MapName(data, map, names);
+                 mapsRead++;
+-                foreach (var placement in ReadPlacements(data, trucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase)))
++                foreach (var placement in ReadPlacements(data, models))
+                 {
+                     var metadata = trucks[placement.TruckCode];
+                     var links = placement.Id.Length == 0 ? [] : tasks.GetValueOrDefault(placement.Id, [])
+@@ -108,15 +111,53 @@ internal static class RegionTruckCatalogService
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+             { warnings.Add($"{map}: {ex.Message}"); }
+         }
+-        return new(entries.Select(availabilityStore.Apply).ToArray(), warnings, mapsRead);
++        return new(entries.Select(availabilityStore.Apply).ToArray(), warnings.ToArray(), mapsRead, equipmentCatalog);
+     }
+ 
+     internal static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, IReadOnlySet<string> truckCodes)
++        => ReadPlacements(data, new TruckModelIndex(truckCodes));
++
++    private sealed class TruckModelIndex
++    {
++        public readonly Dictionary<int, byte[][]> Candidates;
++        public readonly int MinLength;
++        public readonly int MaxLength;
++        public readonly SearchValues<byte> LengthBytes;
++
++        public TruckModelIndex(IEnumerable<string> codes)
++        {
++            var bytes = codes.Where(code => code.Length is > 0 and < 256 && code.All(character => character is >= ' ' and <= '~'))
++                .Select(Encoding.ASCII.GetBytes).ToArray();
++            Candidates = bytes.GroupBy(code => Key(code.Length + 1, code[0])).ToDictionary(group => group.Key, group => group.ToArray());
++            MinLength = bytes.Length == 0 ? 1 : bytes.Min(code => code.Length + 1);
++            MaxLength = bytes.Length == 0 ? 0 : bytes.Max(code => code.Length + 1);
++            LengthBytes = SearchValues.Create(bytes.Select(code => (byte)(code.Length + 1)).Distinct().ToArray());
++        }
++
++        public static int Key(int length, byte first) => length | (first is >= (byte)'A' and <= (byte)'Z' ? first + 32 : first) << 9;
++    }
++
++    private static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, TruckModelIndex models)
+     {
+         var result = new List<MapTruckPlacement>();
+         for (var offset = 0; offset + 3 < data.Length; offset++)
+         {
+-            if (!TryString(data, offset, out var model, out var next) || !truckCodes.Contains(model)) continue;
++            var candidateOffset = data.AsSpan(offset, data.Length - offset - 3).IndexOfAny(models.LengthBytes);
++            if (candidateOffset < 0) break;
++            offset += candidateOffset;
++            // Every model ID is a short ASCII Pascal string. Reject binary bytes
++            // before decoding or walking arbitrary strings at every map offset.
++            var length = data[offset] | data[offset + 1] << 8;
++            if (length < models.MinLength || length > models.MaxLength || offset + 2 + length > data.Length
++                || data[offset + 1 + length] != 0
++                || !models.Candidates.TryGetValue(TruckModelIndex.Key(length, data[offset + 2]), out var candidates)) continue;
++            var encoded = data.AsSpan(offset + 2, length - 1);
++            var found = false;
++            foreach (var candidate in candidates)
++                if (Ascii.EqualsIgnoreCase(encoded, candidate)) { found = true; break; }
++            if (!found) continue;
++            var model = Encoding.ASCII.GetString(encoded);
++            var next = offset + 2 + length;
+             if (!TryString(data, next, out var id, out var transform) || !IsTransform(data, transform)) continue;
+             result.Add(new(model, id, offset, ReadFloat(data, transform + 48), ReadFloat(data, transform + 52), ReadFloat(data, transform + 56), ReadEquipment(data, transform),
+                 Enumerable.Range(0, 16).Select(index => ReadFloat(data, transform + index * 4)).ToArray()));
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 0fdb811..926cf89 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -136,7 +136,10 @@ internal sealed class RegionsTrucksTab : UserControl
+         _status.Text = "Reading map placements and matching task rewards/removal rules…";
+         try
+         {
+-            await WorkspaceDataCache.PreloadAsync(workspace, forceReload: force);
++            // Region names and workspace text are ready before unrelated engine,
++            // winch and experience editor warm-up has finished.
++            if (force) _ = WorkspaceDataCache.PreloadAsync(workspace, forceReload: true);
++            await WorkspaceDataCache.PreloadOwnedAsync(workspace);
+             var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+             var regions = WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase);
+             var catalog = await Task.Run(() => RegionTruckCatalogService.Load(workspace, mapFolder, names, regions, _availabilityStore));
+@@ -343,7 +346,7 @@ internal sealed class RegionsTrucksTab : UserControl
+     {
+         if (rowIndex < 0 || rowIndex >= _trucks.Rows.Count || _loadedWorkspace is null
+             || _trucks.Rows[rowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry) return;
+-        using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks);
++        using var dialog = new TruckReplacementDialog(_loadedWorkspace, entry, _getEnabledTrucks, _catalog?.EquipmentCatalog);
+         dialog.ShowDialog(this);
+     }
+ 
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+index b029883..1251af4 100644
+--- a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
++++ b/src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+@@ -54,10 +54,14 @@ internal sealed class TruckReplacementDialog : Form
+     private IReadOnlyList<ReplacementTruck> _trucks = [];
+     private ReplacementTruck? _original;
+     private bool _updating;
++    private TruckEquipmentCatalog? _equipmentCatalog;
++    private int _comparisonRequest;
+ 
+-    public TruckReplacementDialog(string workspace, RegionTruckEntry current, Func<IReadOnlyList<CustomTruck>> getEnabled)
++    public TruckReplacementDialog(string workspace, RegionTruckEntry current, Func<IReadOnlyList<CustomTruck>> getEnabled,
++        TruckEquipmentCatalog? equipmentCatalog = null)
+     {
+         _workspace = workspace; _current = current; _getEnabled = getEnabled;
++        _equipmentCatalog = equipmentCatalog;
+         ConfigureGrid(_comparison);
+         _comparisonScroll = new SmoothComparisonPanel(_comparison) { Dock = DockStyle.Fill };
+         Text = "Replace truck — " + current.Truck;
+@@ -98,23 +102,32 @@ internal sealed class TruckReplacementDialog : Form
+             var names = WorkspaceDataCache.GetLocalizedNames(_workspace);
+             var loaded = await Task.Run(() =>
+             {
+-                var catalog = new TruckEquipmentCatalog(_workspace, names, []);
+-                ReplacementTruck Profile(CustomTruck truck) => new(truck, catalog.Resolve(truck.Code, new MapTruckEquipment(true, [], "", "", "")), catalog.ComparisonProperties(truck.Code));
++                var catalog = _equipmentCatalog?.IsCurrent(_workspace) == true ? _equipmentCatalog : new TruckEquipmentCatalog(_workspace, names, []);
++                ReplacementTruck Profile(CustomTruck truck) => new(truck, catalog.ResolveDefault(truck.Code), new Dictionary<string, string>());
+                 var trucks = enabled.Select(Profile).OrderBy(item => item.Truck.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
+                 var original = trucks.FirstOrDefault(item => item.Truck.Code.Equals(_current.TruckCode, StringComparison.OrdinalIgnoreCase))
+                     ?? Profile(new CustomTruck(_current.TruckCode, _current.Truck, _current.Class));
+-                return (trucks, original);
++                original = original with { Properties = catalog.ComparisonProperties(original.Truck.Code) };
++                if (trucks.Length > 0) catalog.ComparisonProperties(trucks[0].Truck.Code);
++                return (trucks, original, catalog);
+             });
+             if (IsDisposed) return;
+-            _trucks = loaded.trucks; _original = loaded.original;
+-            _updating = true;
+-            _class.Items.Add("All classes"); _class.Items.AddRange(_trucks.Select(item => item.Truck.Class).Distinct().Order().Cast<object>().ToArray());
+-            _tires.Items.Add("All tires"); _tires.Items.AddRange(_trucks.Select(item => item.Equipment.Tires).Distinct().Order().Cast<object>().ToArray());
+-            _class.SelectedIndex = _tires.SelectedIndex = 0; _updating = false; ApplyFilter();
++            if (InvokeRequired) BeginInvoke((Action)(() => FinishLoading(loaded.trucks, loaded.original, loaded.catalog)));
++            else FinishLoading(loaded.trucks, loaded.original, loaded.catalog);
+         }
+         catch (Exception ex) { if (!IsDisposed) _status.Text = "Could not load replacement trucks: " + ex.Message; }
+     }
+ 
++    private void FinishLoading(IReadOnlyList<ReplacementTruck> trucks, ReplacementTruck original, TruckEquipmentCatalog catalog)
++    {
++        if (IsDisposed) return;
++        _trucks = trucks; _original = original; _equipmentCatalog = catalog;
++        _updating = true;
++        _class.Items.Add("All classes"); _class.Items.AddRange(_trucks.Select(item => item.Truck.Class).Distinct().Order().Cast<object>().ToArray());
++        _tires.Items.Add("All tires"); _tires.Items.AddRange(_trucks.Select(item => item.Equipment.Tires).Distinct().Order().Cast<object>().ToArray());
++        _class.SelectedIndex = _tires.SelectedIndex = 0; _updating = false; ApplyFilter();
++    }
++
+     private void ApplyFilter()
+     {
+         if (_updating) return;
+@@ -139,12 +152,38 @@ internal sealed class TruckReplacementDialog : Form
+ 
+     private void Compare()
+     {
++        var request = ++_comparisonRequest;
++        var selected = Selected();
+         var table = new DataTable(); table.Columns.Add("Property");
+         table.Columns.Add("Current — " + _current.Truck + " (map equipment)");
+         table.Columns.Add("Replacement — " + (Selected()?.Truck.Name ?? "select a truck") + " (defaults)");
+-        if (_original is not null && Selected() is { } selected)
++        if (_original is not null && selected is not null && _equipmentCatalog is { } catalog)
++        {
++            if (!catalog.TryGetComparisonProperties(selected.Truck.Code, out var properties))
++            {
++                _comparison.DataSource = table;
++                var code = selected.Truck.Code;
++                _ = Task.Run(() => catalog.ComparisonProperties(code)).ContinueWith(task =>
++                {
++                    var error = task.Exception?.GetBaseException().Message;
++                    if (IsDisposed || !IsHandleCreated) return;
++                    try
++                    {
++                        BeginInvoke((Action)(() =>
++                        {
++                            if (IsDisposed || request != _comparisonRequest) return;
++                            if (error is not null) _status.Text = "Could not compare this truck: " + error;
++                            else Compare();
++                        }));
++                    }
++                    catch (InvalidOperationException) when (IsDisposed || !IsHandleCreated) { }
++                }, TaskScheduler.Default);
++                return;
++            }
++            selected = selected with { Properties = properties };
+             foreach (var item in TruckReplacementComparison.Build(_current, _original, selected))
+                 if (!_differences.Checked || item.Current != item.Replacement) table.Rows.Add(item.Property, item.Current, item.Replacement);
++        }
+         _comparison.DataSource = table;
+         foreach (DataGridViewRow row in _comparison.Rows)
+             if (!Equals(row.Cells[1].Value, row.Cells[2].Value)) row.Cells[2].Style.BackColor = AppColors.Get("EngineMatch");
+diff --git a/src/SnowPakTool.Desktop/WorkspaceDataCache.cs b/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
+index 6697164..3dd0b62 100644
+--- a/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceDataCache.cs
+@@ -11,6 +11,8 @@ internal static class WorkspaceDataCache
+     private static Task? _loadTask;
+     private static TaskCompletionSource<bool> _ownedReady = NewReadySignal();
+     private static volatile WorkspaceSnapshot? _snapshot;
++    private static long _contentVersion;
++    public static long ContentVersion => Interlocked.Read(ref _contentVersion);
+ 
+     public static Task PreloadAsync(string workspace, bool forceReload = false)
+     {
+@@ -36,6 +38,7 @@ internal static class WorkspaceDataCache
+ 
+             _workspace = workspace;
+             _snapshot = null;
++            Interlocked.Increment(ref _contentVersion);
+             _ownedReady = NewReadySignal();
+             var ownedReady = _ownedReady;
+             _loadTask = Task.Run(() =>
+@@ -62,6 +65,7 @@ internal static class WorkspaceDataCache
+ 
+     public static void InvalidateFile(string path)
+     {
++        Interlocked.Increment(ref _contentVersion);
+         var snapshot = _snapshot;
+         snapshot?.TextByPath.TryRemove(Path.GetFullPath(path), out _);
+     }
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 64d9d29..9e0b575 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -46,4 +46,6 @@ Each **Truck** cell has a right-aligned **⇄** button (**F4** or **Alt+Down** w
+ 
+ The catalog matches placement IDs to nested task/contract settings in the active workspace. Explicit `REWARD` actions indicate obtainable task vehicles; `DESTROY` and `mustDestroyAfterSubstage` indicate mission-only vehicles. Untagged world placements are labeled **Obtainable — discovery/start**, an inference that includes starting vehicles. Named placements without an explicit ownership rule, and conflicting reward/removal rules, remain **Unverified**. Classification evidence, map coordinates and source metadata remain available internally for search. This is a catalog of the selected map files, not the player's save progress. Use a workspace from the same game version as the maps. Reading does not modify or extract the source archives.
+ 
++Regions-Trucks waits for the shared workspace/ownership snapshot without waiting for unrelated editor warm-up. Map scanning matches known ASCII truck signatures before decoding placement records. Equipment definitions, parent chains, wheel families, addon sockets, default summaries and comparison properties are cached per catalog. Replacement popups reuse the region catalog, read the live enabled-truck selection each time, and calculate full comparisons only for the original and selected candidates; late background results cannot replace a newer selection. Reloading the workspace or invalidating a file changes the content version so stale catalogs are not reused. Reload maps after external workspace edits. See [loading-performance.md](../../loading-performance.md) for local benchmark results.
++
+ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]` are written into `initial.cache_block`. Regular assets use ZIP deflate compression (while `pak.load_list` and `.pct_header` files are stored) to avoid producing archives several times larger than the original.
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 272d84c..0643f47 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -57,6 +57,10 @@ internal static class Program
+         Check(sample.Entries.Single(entry => entry.PlacementId == "").Availability == "Obtainable — discovery/start", "Discovery placement");
+         Check(sample.Entries.All(entry => entry.X == 100 && entry.Z == 200), "Transform positions");
+         Check(sample.Entries.All(entry => entry.Transform is { Count: 16 } && entry.BinaryOffset >= 0), "Full placement transform and record offset retained");
++        Check(RegionTruckCatalogService.ReadPlacements(bin, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "TEST_TRUCK" }).Count == 5
++            && RegionTruckCatalogService.ReadPlacements(bin, new HashSet<string>()).Count == 0
++            && RegionTruckCatalogService.ReadPlacements(bin[..50], new HashSet<string> { "test_truck" }).Count == 0,
++            "Fast model scan preserves case-insensitive IDs and ignores unknown/truncated records");
+         Check(sample.Entries.Single(entry => entry.PlacementId == "").InternalEquipment!.Single(item => item.Slot == "Engine") is { Id: "engine_default", Origin: "vehicle default" }, "Default engine resolved from vehicle socket");
+         var overrideEquipment = sample.Entries.Single(entry => entry.PlacementId == "AWARD").InternalEquipment!;
+         Check(overrideEquipment.Take(4).All(item => item.Id.EndsWith("_override") && item.Origin == "map override" && item.DefinitionDetails.Contains("TestValue=200")), "All four map component fields resolve independently of vehicle defaults");
+@@ -91,6 +95,12 @@ internal static class Program
+         Check(cleanRows.All(row => row.Property is not ("Truck" or "Class" or "Truck ID") && !row.Property.StartsWith("Internal settings")
+             && !row.Property.StartsWith("Internal resolution") && !row.Current.Contains("test_visual_frame") && !row.Replacement.Contains("test_visual_frame")),
+             "Comparison omits identity, component settings and installed visual addons");
++        Check(ReferenceEquals(replacementCatalog.ResolveDefault("test_truck"), replacementCatalog.ResolveDefault("TEST_TRUCK"))
++            && ReferenceEquals(replacementCatalog.ComparisonProperties("test_truck"), replacementCatalog.ComparisonProperties("TEST_TRUCK")),
++            "Default summaries and comparison options are reused by model ID");
++        Check(replacementCatalog.IsCurrent(fixture), "Catalog belongs to the active workspace version");
++        WorkspaceDataCache.ContentVersion++;
++        Check(!replacementCatalog.IsCurrent(fixture), "Workspace changes invalidate reusable equipment catalogs");
+ 
+         var catalog = RegionTruckCatalogService.Load(workspace, maps, WorkspaceDataCache.GetLocalizedNames(workspace), new Dictionary<string, string>(), availabilityStore);
+         Check(catalog.MapsRead > 50 && catalog.Entries.Count > 100, "Installed map coverage");
+@@ -121,7 +131,7 @@ internal static class Program
+                 .All(addon => visualSection.Contains(addon.Name + " (" + addon.Category.Replace('_', ' ') + ")")),
+             "Visual addon names include categories and exclude drivetrain components");
+         File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "gmc-details-preview.txt"), detailText);
+-        ReplacementPopupRegression(workspace, gmc);
++        ReplacementPopupRegression(workspace, gmc, catalog.EquipmentCatalog!);
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "gmc_9500_diff_lock_default") is { IsVisual: true, Category: "diff_lock" }, "User's visual group follows tuning folders even for functional diff locks");
+         Check(gmc.InstalledAddons!.Single(addon => addon.Id == "frame_addon_sideboard_2") is { IsVisual: false, Category: "frame_addons" }, "Shared bed is outside the tuning group");
+         Check(gmc.Addons == "None" && gmc.FrameAddons == "Sideboard Bed" && !gmc.AddonDetails.Contains("gmc_9500_diff_lock_default")
+@@ -253,24 +263,33 @@ internal static class Program
+         Console.WriteLine("PASS: map equipment, confirmed exceptions, checkbox filters, overlay search, tile counts, editable unknowns and persistent availability choices.");
+     }
+ 
+-    private static void ReplacementPopupRegression(string workspace, RegionTruckEntry source)
++    private static void ReplacementPopupRegression(string workspace, RegionTruckEntry source, TruckEquipmentCatalog equipmentCatalog)
+     {
+         var enabled = new[] { new CustomTruck(source.TruckCode, source.Truck, source.Class),
+             new CustomTruck("chevrolet_ck1500", "Chevrolet CK1500", "Scout"), new CustomTruck("tayga_6436", "Tayga 6436", "Offroad") };
+-        using var dialog = new TruckReplacementDialog(workspace, source, () => enabled);
++        using var dialog = new TruckReplacementDialog(workspace, source, () => enabled, equipmentCatalog);
+         dialog.Show();
+         var list = Field<DataGridView>(dialog, "_list");
+         var clock = System.Diagnostics.Stopwatch.StartNew();
+         while (list.Rows.Count == 0 && clock.Elapsed < TimeSpan.FromSeconds(45)) { Application.DoEvents(); Thread.Sleep(10); }
+         Check(list.Rows.Count == enabled.Length, "Popup uses exactly the enabled truck source");
++        Check(ReferenceEquals(Field<TruckEquipmentCatalog>(dialog, "_equipmentCatalog"), equipmentCatalog)
++            && !equipmentCatalog.TryGetComparisonProperties("tayga_6436", out _), "Popup reuses the region catalog and leaves unselected comparisons lazy");
+         var comparison = Field<DataGridView>(dialog, "_comparison");
+         Check(comparison.Rows.Count > 10 && comparison.Columns[1].HeaderText.Contains("map equipment")
+             && comparison.Columns[2].HeaderText.Contains("defaults"), "Selection fills side-by-side equipment comparison with explicit origins");
+         list.Sort(list.Columns["Truck"]!, System.ComponentModel.ListSortDirection.Descending);
+         Check(list.Rows[0].Cells["Truck"].Value?.ToString() == "Tayga 6436", "Candidate list sorts by column headers");
++        list.CurrentCell = list.Rows[0].Cells[0];
++        // Change selection before the uncached comparison finishes; its result must not replace the new one.
+         var classes = Field<ComboBox>(dialog, "_class"); classes.SelectedItem = "Scout";
+         Check(list.Rows.Count == 1 && list.Rows[0].Cells["Truck ID"].Value?.ToString() == "chevrolet_ck1500", "Class filter restricts replacement candidates");
+         Check(comparison.Columns[2].HeaderText.Contains("Chevrolet CK1500"), "Comparison follows the filtered selection");
++        var comparisonClock = System.Diagnostics.Stopwatch.StartNew();
++        while (!equipmentCatalog.TryGetComparisonProperties("tayga_6436", out _) && comparisonClock.ElapsedMilliseconds < 5000)
++        { Application.DoEvents(); Thread.Sleep(5); }
++        Application.DoEvents();
++        Check(comparison.Columns[2].HeaderText.Contains("Chevrolet CK1500"), "A late background result cannot overwrite the current candidate");
+         var tires = Field<ComboBox>(dialog, "_tires");
+         tires.SelectedItem = Field<IReadOnlyList<ReplacementTruck>>(dialog, "_trucks").Single(item => item.Truck.Code == "chevrolet_ck1500").Equipment.Tires;
+         Check(list.Rows.Count == 1, "Tire filter combines with class filter");
+@@ -297,6 +316,12 @@ internal static class Program
+         using var preview = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(preview, new Rectangle(0, 0, dialog.Width, dialog.Height));
+         preview.Save(Path.Combine(AppContext.BaseDirectory, "replacement-popup-preview.png"));
+         dialog.Close();
++        using var reopened = new TruckReplacementDialog(workspace, source, () => enabled, equipmentCatalog);
++        reopened.Show();
++        var reopenedList = Field<DataGridView>(reopened, "_list"); comparisonClock.Restart();
++        while (reopenedList.Rows.Count == 0 && comparisonClock.ElapsedMilliseconds < 5000) { Application.DoEvents(); Thread.Sleep(5); }
++        Check(reopenedList.Rows.Count == enabled.Length && ReferenceEquals(Field<TruckEquipmentCatalog>(reopened, "_equipmentCatalog"), equipmentCatalog),
++            "Reopened popup reuses default equipment and comparison caches"); reopened.Close();
+         Console.WriteLine("PASS: replacement popup enabled candidates, sorting, combined filters, live comparison, difference mode and shared search.");
+     }
+ 
+@@ -329,9 +354,11 @@ namespace SnowPakTool.Desktop
+ {
+     internal static class WorkspaceDataCache
+     {
++        public static long ContentVersion { get; set; }
+         public static string ReadAllText(string path, Encoding? encoding = null) => File.ReadAllText(path, encoding ?? Encoding.UTF8);
+         public static bool TryGetCurrentFiles(string workspace, string directory, string pattern, SearchOption option, out IReadOnlyList<string> files) { files = []; return false; }
+         public static Task PreloadAsync(string workspace, bool forceReload = false) => Task.CompletedTask;
++        public static Task PreloadOwnedAsync(string workspace) => Task.CompletedTask;
+         public static IReadOnlyDictionary<string, string> GetLocalizedNames(string workspace) => LocalizedStrings.Load(WorkspaceOriginals.GetCurrentPath(workspace, Path.Combine("[strings]", "strings_english.str")));
+         public static IReadOnlyDictionary<string, RegionMetadata> GetRegionMetadata(string workspace) => new Dictionary<string, RegionMetadata>();
+     }
+diff --git a/.checks/LoadingBenchmark/LoadingBenchmark.csproj b/.checks/LoadingBenchmark/LoadingBenchmark.csproj
+new file mode 100644
+index 0000000..2a46b7c
+--- /dev/null
++++ b/.checks/LoadingBenchmark/LoadingBenchmark.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>
+diff --git a/.checks/LoadingBenchmark/Program.cs b/.checks/LoadingBenchmark/Program.cs
+new file mode 100644
+index 0000000..ee702d8
+--- /dev/null
++++ b/.checks/LoadingBenchmark/Program.cs
+@@ -0,0 +1,87 @@
++using System.Collections;
++using System.Diagnostics;
++using System.Reflection;
++using System.Text.Json;
++using System.Linq.Expressions;
++
++var workspace = Path.GetFullPath(args[0]);
++var maps = Path.GetFullPath(args[1]);
++var assembly = Assembly.Load("SnowPakTool.Desktop");
++Type Type(string name) => assembly.GetType("SnowPakTool.Desktop." + name)!;
++object? Call(string type, string method, params object?[] values) => Type(type).GetMethod(method, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, values);
++var timings = new Dictionary<string, double>();
++var clock = Stopwatch.StartNew();
++await (Task)Call("WorkspaceDataCache", "PreloadAsync", workspace, false)!;
++timings["Workspace preload"] = clock.Elapsed.TotalMilliseconds;
++var names = (IReadOnlyDictionary<string, string>)Call("WorkspaceDataCache", "GetLocalizedNames", workspace)!;
++clock.Restart();
++var trucks = (Dictionary<string, (string Name, string Class)>)Call("RegionTruckCatalogService", "LoadTrucks", workspace, names, new List<string>())!;
++timings["Truck metadata"] = clock.Elapsed.TotalMilliseconds;
++clock.Restart();
++Call("RegionTruckCatalogService", "LoadTasks", workspace, names, new List<string>());
++timings["Task links"] = clock.Elapsed.TotalMilliseconds;
++clock.Restart();
++var equipment = Activator.CreateInstance(Type("TruckEquipmentCatalog"), workspace, names, new List<string>())!;
++timings["Equipment catalog"] = clock.Elapsed.TotalMilliseconds;
++var defaultEquipment = Activator.CreateInstance(Type("MapTruckEquipment"), true, Array.Empty<string>(), "", "", "", "", "", "", "", null)!;
++var resolve = Type("TruckEquipmentCatalog").GetMethod("Resolve")!;
++var properties = Type("TruckEquipmentCatalog").GetMethod("ComparisonProperties")!;
++clock.Restart();
++foreach (var truck in trucks.Keys) resolve.Invoke(equipment, [truck, defaultEquipment]);
++timings[$"Default equipment ({trucks.Count} trucks)"] = clock.Elapsed.TotalMilliseconds;
++clock.Restart();
++foreach (var truck in trucks.Keys) properties.Invoke(equipment, [truck]);
++timings[$"Comparison options ({trucks.Count} trucks)"] = clock.Elapsed.TotalMilliseconds;
++var readMap = Type("RegionTruckCatalogService").GetMethod("ReadMapData", BindingFlags.NonPublic | BindingFlags.Static)!;
++var readPlacements = Type("RegionTruckCatalogService").GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
++    .Single(method => method.Name == "ReadPlacements" && method.GetParameters()[1].ParameterType.Name.StartsWith("IReadOnlySet"));
++var codes = trucks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
++double archiveMs = 0, placementMs = 0;
++foreach (var path in Directory.EnumerateFiles(maps, "level_*.pak"))
++{
++    clock.Restart(); var data = (byte[]?)readMap.Invoke(null, [path]); archiveMs += clock.Elapsed.TotalMilliseconds;
++    if (data is null) continue;
++    clock.Restart(); readPlacements.Invoke(null, [data, codes]); placementMs += clock.Elapsed.TotalMilliseconds;
++}
++timings["Map archive reads"] = archiveMs; timings["Placement scans"] = placementMs;
++clock.Restart();
++var catalog = Call("RegionTruckCatalogService", "Load", workspace, maps, names, new Dictionary<string, string>(), null)!;
++timings["Regions-Trucks total"] = clock.Elapsed.TotalMilliseconds;
++var entries = ((IEnumerable)catalog.GetType().GetProperty("Entries")!.GetValue(catalog)!).Cast<object>().ToArray();
++var enabled = Array.CreateInstance(Type("CustomTruck"), trucks.Count);
++var index = 0;
++foreach (var (code, metadata) in trucks) enabled.SetValue(Activator.CreateInstance(Type("CustomTruck"), code, metadata.Name, metadata.Class), index++);
++var listType = typeof(IReadOnlyList<>).MakeGenericType(Type("CustomTruck"));
++var provider = Expression.Lambda(typeof(Func<>).MakeGenericType(listType), Expression.Convert(Expression.Constant(enabled), listType)).Compile();
++var popupTimings = new TaskCompletionSource<double[]>();
++var uiThread = new Thread(() =>
++{
++    try
++    {
++        Control.CheckForIllegalCrossThreadCalls = true;
++        var times = new List<double>();
++        for (var attempt = 0; attempt < 2; attempt++)
++        {
++            using var popup = (Form)Activator.CreateInstance(Type("TruckReplacementDialog"), workspace, entries[0], provider,
++                catalog.GetType().GetProperty("EquipmentCatalog")!.GetValue(catalog))!;
++            popup.StartPosition = FormStartPosition.Manual; popup.Location = new Point(-10000, -10000);
++            var elapsed = Stopwatch.StartNew(); popup.Show();
++            var grid = (DataGridView)popup.GetType().GetField("_comparison", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(popup)!;
++            while (grid.Rows.Count == 0 && elapsed.Elapsed.TotalSeconds < 30) { Application.DoEvents(); Thread.Sleep(1); }
++            if (grid.Rows.Count == 0) throw new Exception("Popup did not finish loading.");
++            times.Add(elapsed.Elapsed.TotalMilliseconds); popup.Close(); Application.DoEvents();
++        }
++        popupTimings.SetResult(times.ToArray());
++    }
++    catch (Exception ex) { popupTimings.SetException(ex); }
++});
++uiThread.SetApartmentState(ApartmentState.STA); uiThread.Start();
++var popupTimes = await popupTimings.Task;
++timings[$"Popup first open ({trucks.Count} enabled trucks)"] = popupTimes[0];
++timings[$"Popup reopened ({trucks.Count} enabled trucks)"] = popupTimes[1];
++var result = new { TimingsMs = timings, Maps = catalog.GetType().GetProperty("MapsRead")!.GetValue(catalog), Placements = entries.Length,
++    Warnings = ((IEnumerable)catalog.GetType().GetProperty("Warnings")!.GetValue(catalog)!).Cast<object>().ToArray(),
++    Entries = entries.Select(entry => JsonSerializer.SerializeToElement(entry, entry.GetType())).ToArray() };
++File.WriteAllText(args[2], JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
++foreach (var timing in timings) Console.WriteLine($"{timing.Key}: {timing.Value:N1} ms");
++Console.WriteLine($"Maps: {result.Maps}; placements: {entries.Length}; warnings: {result.Warnings.Length}");
+diff --git a/loading-performance.md b/loading-performance.md
+new file mode 100644
+index 0000000..be4a8f4
+--- /dev/null
++++ b/loading-performance.md
+@@ -0,0 +1,22 @@
++# Loading performance
++
++Measured locally on 2026-11-01 with the active workspace, installed map archives and Debug build. These are single-process measurements with the OS file cache already warm, not cold-disk guarantees.
++
++| Work | Before | After |
++| --- | ---: | ---: |
++| Regions-Trucks catalog (56 maps) | 6.29 s | 1.27 s |
++| Placement scanning alone | 6.18 s | 0.77 s |
++| Comparison options for all 120 trucks | 11.05 s | 0.17 s |
++
++The map-catalog measurement excludes workspace preload (about 0.99 seconds in the optimized run) and UI painting. The comparison-options measurement is a backend benchmark; the popup now prepares full comparisons only for the original and initially selected trucks rather than all candidates.
++
++The optimized popup was also measured with all 120 trucks enabled, from showing the window until the initial comparison was populated:
++
++- First opening, reusing the Regions-Trucks equipment catalog: **0.33 seconds**.
++- Reopening with the same catalog: **0.16 seconds**.
++
++The enabled-truck provider in this UI benchmark supplies an already prepared list; first-time loading of the Owned Content tab is not included.
++
++Validation: all **248** complete placement records match the pre-optimization JSON snapshot, with **56 maps** and **zero warnings** before and after. Regression checks cover classification, equipment/default resolution, persistent overrides, filters, sorting, shared search, scrolling, cache invalidation, popup reuse and stale selection results.
++
++Benchmark runner: `.checks/LoadingBenchmark/LoadingBenchmark.csproj`, which uses the built desktop assembly and actual workspace cache. Snapshots and build output remain under `.checks/`.

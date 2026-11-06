@@ -1,0 +1,413 @@
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 2b40732..0c7e23c 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -24,10 +24,12 @@ The desktop project references the original `SnowPakTool` project and calls its
+ 
+ The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Search by cargo name, type, variant, or content pack; click column headers to sort. The table shows the defined cargo length, sum of addon physics body masses, and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and all attributes from the cargo type and addon source files. **Reload cargo** refreshes the workspace data after external edits. This catalog is read-only.
+ 
+-The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. Search by truck, map, task or placement ID, and filter by availability. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
++The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: three or more characters highlight matches and scroll to the first; **Enter** selects a match and **Esc** closes the overlay. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
+ Region tiles retain their 150 × 210 size and are sorted by original release order: the base-game regions followed by seasons 1–19. Each tile has a region-name header, a representative map screenshot from [MapRunner](https://www.maprunner.info/), and a season/counts footer. Thumbnails are embedded for offline use; the source manifest is in `Assets/Regions/sources.json`. Unrecognized future region IDs sort after known releases and retain a text fallback.
+ 
++Tiles show only map/placement totals, plus an **unverified** count when it is greater than zero. Unverified rows have an editable **Availability** dropdown. Choose discovery/start, task reward, or mission/task-only; the choice saves immediately to `%LocalAppData%/SnowPakTool.Desktop/region-truck-availability.json`, scoped by map and placement ID. Saved choices survive reloads and restarts, update tile counts and filters, and remain editable if a correction is needed. Other known rows stay read-only. Availability review does not modify game data.
++
+ Confirmed placement exceptions take precedence over inferred task rules. The 17 placements confirmed by the user on 2026-11-01 are permanently classified **Mission/task only** in `RegionTruckPlacementOverrides.cs`. Exceptions use the map and placement ID, so other copies of the same truck model retain their own availability. They survive app restarts and workspace/map reloads; the evidence pane identifies the user-confirmed rule and confirmation date. Unrelated ambiguous placements still remain **Unverified**.
+ 
+ The truck table's **Tires** and **Addons** columns show each placement's map equipment, resolving blank configuration fields from the active workspace's vehicle defaults. Tires display **Highway**, **All-terrain**, **Offroad**, **Mudtires**, **Ice** (chains), or **Custom** (a tire definition compatible with only that truck in the current workspace). Hover over Tires for the specific tire name, wheel family, tire ID, rim and default/override information. Parent wheel definitions are followed when checking compatibility. If a map references a missing tire variant, the category is inferred from its stored ID where possible and the tooltip identifies the unresolved variant; unreadable equipment remains **Unknown**. Addons include explicitly installed equipment and default addons, with a map addon replacing the stock addon in the same socket. Hover over Addons for full names, IDs and default/map origins. These describe map placements rather than changes in a player save.
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+index 421e863..c2561a8 100644
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -6,9 +6,10 @@ internal sealed class RegionsTrucksTab : UserControl
+ {
+     private readonly Func<string> _getWorkspacePath;
+     private readonly Func<string> _getPakPath;
++    private readonly RegionTruckAvailabilityStore _availabilityStore;
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+-    private readonly TextBox _search = new() { Width = 250, PlaceholderText = "Search truck, map, task or equipment…" };
+-    private readonly ComboBox _availability = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
++    private readonly CheckBox _showObtainable = new() { Text = "Obtainable", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
++    private readonly CheckBox _showMission = new() { Text = "Mission", Checked = true, AutoSize = true, Margin = new Padding(4, 7, 12, 4) };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+     private readonly FlowLayoutPanel _regions = new()
+@@ -20,7 +21,8 @@ internal sealed class RegionsTrucksTab : UserControl
+     private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
+     private readonly DataGridView _trucks = new()
+     {
+-        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        Dock = DockStyle.Fill, ReadOnly = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        EditMode = DataGridViewEditMode.EditOnEnter,
+         AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
+         SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
+         Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
+@@ -33,11 +35,15 @@ internal sealed class RegionsTrucksTab : UserControl
+     private string? _loadedWorkspace;
+     private string? _loadedMapFolder;
+     private bool _loading;
++    private bool _updatingTable;
++    private bool _savingAvailability;
++    private string _searchQuery = "";
+ 
+-    public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath)
++    public RegionsTrucksTab(Func<string> getWorkspacePath, Func<string> getPakPath, RegionTruckAvailabilityStore? availabilityStore = null)
+     {
+         _getWorkspacePath = getWorkspacePath;
+         _getPakPath = getPakPath;
++        _availabilityStore = availabilityStore ?? new RegionTruckAvailabilityStore();
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(12) };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 238));
+@@ -58,10 +64,8 @@ internal sealed class RegionsTrucksTab : UserControl
+         folderRow.Controls.Add(_reload, 3, 0);
+         layout.Controls.Add(folderRow, 0, 1);
+         var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+-        filters.Controls.Add(_search);
+-        _availability.Items.AddRange(["All trucks", "Obtainable", "Mission/task only", "Unverified"]);
+-        _availability.SelectedIndex = 0;
+-        filters.Controls.Add(_availability);
++        filters.Controls.Add(_showObtainable);
++        filters.Controls.Add(_showMission);
+         var all = new Button { Text = "Select all regions", AutoSize = true };
+         var clear = new Button { Text = "Clear selection", AutoSize = true };
+         filters.Controls.Add(all);
+@@ -83,11 +87,26 @@ internal sealed class RegionsTrucksTab : UserControl
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
+         all.Click += (_, _) => { _selectedRegions.UnionWith(_tiles.Keys); RefreshTiles(); ApplyFilter(); };
+         clear.Click += (_, _) => { _selectedRegions.Clear(); RefreshTiles(); ApplyFilter(); };
+-        _search.TextChanged += (_, _) => ApplyFilter();
+-        _availability.SelectedIndexChanged += (_, _) => ApplyFilter();
++        _showObtainable.CheckedChanged += (_, _) => ApplyFilter();
++        _showMission.CheckedChanged += (_, _) => ApplyFilter();
+         _trucks.CurrentCellChanged += (_, _) => ShowDetails();
+-        _trucks.DataBindingComplete += (_, _) => ShowDetails();
++        _trucks.DataBindingComplete += (_, _) => { ConfigureAvailabilityCells(); ShowDetails(); };
++        _trucks.Sorted += (_, _) => { ConfigureAvailabilityCells(); SearchTrucks(_searchQuery); };
++        _trucks.CellBeginEdit += (_, e) =>
++        {
++            e.Cancel = _trucks.Columns[e.ColumnIndex].Name != "Availability"
++                || _trucks.Rows[e.RowIndex].DataBoundItem is not DataRowView row
++                || row["Entry"] is not RegionTruckEntry { AvailabilityEditable: true };
++        };
+         _trucks.CellToolTipTextNeeded += EquipmentToolTipNeeded;
++        _trucks.CurrentCellDirtyStateChanged += (_, _) =>
++        {
++            if (_trucks.IsCurrentCellDirty && _trucks.CurrentCell is DataGridViewComboBoxCell)
++                _trucks.CommitEdit(DataGridViewDataErrorContexts.Commit);
++        };
++        _trucks.CellValueChanged += AvailabilityChanged;
++        var search = new QuickSearchOverlay(this, FindTruck, SearchTrucks);
++        Disposed += (_, _) => search.Dispose();
+         AppColors.Changed += PaletteChanged;
+         Disposed += (_, _) => AppColors.Changed -= PaletteChanged;
+         PaletteChanged(this, EventArgs.Empty);
+@@ -115,7 +134,7 @@ internal sealed class RegionsTrucksTab : UserControl
+             await WorkspaceDataCache.PreloadAsync(workspace, forceReload: force);
+             var names = WorkspaceDataCache.GetLocalizedNames(workspace);
+             var regions = WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase);
+-            var catalog = await Task.Run(() => RegionTruckCatalogService.Load(workspace, mapFolder, names, regions));
++            var catalog = await Task.Run(() => RegionTruckCatalogService.Load(workspace, mapFolder, names, regions, _availabilityStore));
+             if (IsDisposed || !workspace.Equals(_getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)
+                 || !mapFolder.Equals(_mapFolder.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+             _catalog = catalog;
+@@ -153,16 +172,12 @@ internal sealed class RegionsTrucksTab : UserControl
+         {
+             var code = group.Key;
+             var rows = group.ToArray();
+-            var obtainable = rows.Count(row => row.Availability.StartsWith("Obtainable", StringComparison.Ordinal));
+-            var missions = rows.Count(row => row.Availability == "Mission/task only");
+-            var unverified = rows.Length - obtainable - missions;
+             var tile = new RegionTileButton
+             {
+                 Width = 150, Height = 210, Margin = new Padding(0, 0, 1, 1), FlatStyle = FlatStyle.Flat,
+                 RegionName = rows[0].Region,
+                 ReleaseLabel = RegionTileAssets.GetReleaseLabel(code) + " · " + code.ToUpperInvariant(),
+-                Summary = $"{rows.Select(row => row.MapCode).Distinct().Count()} maps · {rows.Length} placements\n"
+-                    + $"{obtainable} obtainable\n{missions} mission/task only\n{unverified} unverified",
++                Summary = TileSummary(rows),
+                 Thumbnail = RegionTileAssets.GetThumbnail(code),
+                 Text = rows[0].Region,
+                 Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+@@ -200,34 +215,138 @@ internal sealed class RegionsTrucksTab : UserControl
+     private void ApplyFilter()
+     {
+         if (_catalog is null) return;
+-        var query = _search.Text.Trim();
+-        var mode = _availability.SelectedItem?.ToString() ?? "All trucks";
+         var rows = _catalog.Entries.Where(entry => _selectedRegions.Contains(entry.RegionCode))
+-            .Where(entry => mode == "All trucks" || entry.Availability.StartsWith(mode, StringComparison.Ordinal))
+-            .Where(entry => string.Join(" ", entry.Region, entry.Map, entry.MapCode, entry.Truck, entry.TruckCode, entry.Task, entry.PlacementId, entry.Tires, entry.Addons)
+-                .Contains(query, StringComparison.CurrentCultureIgnoreCase))
++            .Where(entry => entry.Availability == "Unverified"
++                || (entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal) && _showObtainable.Checked)
++                || (entry.Availability == "Mission/task only" && _showMission.Checked))
+             .OrderBy(entry => entry.Region).ThenBy(entry => entry.Map).ThenBy(entry => entry.Truck).ToArray();
+         var table = new DataTable();
+         foreach (var name in new[] { "Region", "Map", "Truck", "Class", "Tires", "Addons", "Availability", "Task / contract", "Placement ID", "Truck ID" }) table.Columns.Add(name);
+         table.Columns.Add("Entry", typeof(RegionTruckEntry));
+         foreach (var entry in rows) table.Rows.Add(entry.Region, entry.Map, entry.Truck, entry.Class,
+             entry.Tires, entry.Addons, entry.Availability, entry.Task, entry.PlacementId, entry.TruckCode, entry);
+-        _trucks.DataSource = table;
+-        _trucks.Columns["Entry"]!.Visible = false;
+-        foreach (DataGridViewColumn column in _trucks.Columns)
+-            column.Width = column.Name switch { "Truck" => 210, "Tires" => 95, "Addons" => 330, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
+-        foreach (DataGridViewRow row in _trucks.Rows)
++        _updatingTable = true;
++        try
+         {
+-            if (row.DataBoundItem is not DataRowView view || view["Entry"] is not RegionTruckEntry entry) continue;
+-            row.Cells["Availability"].Style.BackColor = AppColors.Get(entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal)
+-                ? "DAF8E0" : entry.Availability == "Mission/task only" ? "FFDCDC" : "EngineMatch");
++            _trucks.DataSource = table;
++            _trucks.Columns["Entry"]!.Visible = false;
++            foreach (DataGridViewColumn column in _trucks.Columns)
++            {
++                column.ReadOnly = column.Name != "Availability";
++                column.Width = column.Name switch { "Truck" => 210, "Tires" => 95, "Addons" => 330, "Availability" => 220, "Task / contract" => 260, "Class" => 85, _ => 160 };
++            }
++            ConfigureAvailabilityCells();
+         }
++        finally { _updatingTable = false; }
+         _status.Text = $"{rows.Length} placements in {_selectedRegions.Count} selected regions · {_catalog.MapsRead} maps read · {_catalog.Warnings.Count} warnings. "
+-            + "Discovery/start is inferred; task rewards and removals use explicit rules. Click a row for evidence.";
++            + "Double-tap Shift to search. Unverified rows are always visible; use their Availability dropdown to resolve them.";
+         if (_catalog.MapsRead == 0) _status.Text = "No supported map files found. Choose the folder containing level_*.pak or extracted level folders.";
+         ShowDetails();
++        SearchTrucks(_searchQuery);
++    }
++
++    private void ConfigureAvailabilityCells()
++    {
++        var updating = _updatingTable;
++        _updatingTable = true;
++        try
++        {
++            foreach (DataGridViewRow row in _trucks.Rows)
++            {
++                if (row.DataBoundItem is not DataRowView view || view["Entry"] is not RegionTruckEntry entry) continue;
++                if (entry.AvailabilityEditable && row.Cells["Availability"] is not DataGridViewComboBoxCell)
++                {
++                    var choice = new DataGridViewComboBoxCell { DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton };
++                    choice.Items.AddRange(RegionTruckAvailabilityStore.Choices);
++                    choice.Value = entry.Availability;
++                    row.Cells["Availability"] = choice;
++                }
++                else if (!entry.AvailabilityEditable && row.Cells["Availability"] is DataGridViewComboBoxCell)
++                    row.Cells["Availability"] = new DataGridViewTextBoxCell { Value = entry.Availability };
++                row.Cells["Availability"].ReadOnly = !entry.AvailabilityEditable;
++                row.Cells["Availability"].Style.BackColor = AppColors.Get(entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal)
++                    ? "DAF8E0" : entry.Availability == "Mission/task only" ? "FFDCDC" : "EngineMatch");
++            }
++        }
++        finally { _updatingTable = updating; }
++    }
++
++    private static string TileSummary(IEnumerable<RegionTruckEntry> entries)
++    {
++        var rows = entries.ToArray();
++        var unverified = rows.Count(row => row.Availability == "Unverified");
++        return $"{rows.Select(row => row.MapCode).Distinct().Count()} maps · {rows.Length} placements"
++            + (unverified > 0 ? $"\n{unverified} unverified" : "");
++    }
++
++    private void UpdateTileSummaries()
++    {
++        if (_catalog is null) return;
++        foreach (var group in _catalog.Entries.GroupBy(entry => entry.RegionCode))
++            if (_tiles.TryGetValue(group.Key, out var button) && button is RegionTileButton tile)
++            { tile.Summary = TileSummary(group); tile.Invalidate(); }
+     }
+ 
++    private void AvailabilityChanged(object? sender, DataGridViewCellEventArgs e)
++    {
++        if (_updatingTable || _savingAvailability || _catalog is null || e.RowIndex < 0 || e.ColumnIndex < 0
++            || _trucks.Columns[e.ColumnIndex].Name != "Availability"
++            || _trucks.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not RegionTruckEntry entry
++            || !entry.AvailabilityEditable) return;
++        var value = Convert.ToString(_trucks.Rows[e.RowIndex].Cells[e.ColumnIndex].Value) ?? "";
++        if (value == entry.Availability || !RegionTruckAvailabilityStore.Choices.Contains(value, StringComparer.Ordinal)) return;
++        _savingAvailability = true;
++        try
++        {
++            _availabilityStore.Set(entry.MapCode, entry.PlacementId, value);
++            _catalog = _catalog with { Entries = _catalog.Entries.Select(item =>
++                item.MapCode.Equals(entry.MapCode, StringComparison.OrdinalIgnoreCase)
++                && item.PlacementId.Equals(entry.PlacementId, StringComparison.OrdinalIgnoreCase)
++                    ? _availabilityStore.Apply(item) : item).ToArray() };
++            row["Entry"] = _availabilityStore.Apply(entry);
++            // Finish committing the combo box before rebinding the filtered table.
++            if (IsHandleCreated) BeginInvoke(new Action(RefreshAfterEdit));
++            else RefreshAfterEdit();
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
++        {
++            _trucks.Rows[e.RowIndex].Cells[e.ColumnIndex].Value = entry.Availability;
++            _status.Text = $"Could not save availability: {ex.Message}";
++        }
++        finally { _savingAvailability = false; }
++
++        void RefreshAfterEdit()
++        {
++            if (IsDisposed) return;
++            UpdateTileSummaries();
++            ApplyFilter();
++        }
++    }
++
++    private bool FindTruck(string query)
++    {
++        if (SearchTrucks(query) == 0) return false;
++        var first = _trucks.Rows.Cast<DataGridViewRow>().First(row => MatchesSearch(row, query.Trim()));
++        _trucks.CurrentCell = first.Cells["Truck"];
++        return true;
++    }
++
++    private int SearchTrucks(string query)
++    {
++        _searchQuery = query.Trim();
++        var matches = _trucks.Rows.Cast<DataGridViewRow>().Where(row => MatchesSearch(row, _searchQuery)).ToArray();
++        var matching = matches.ToHashSet();
++        foreach (DataGridViewRow row in _trucks.Rows)
++            row.DefaultCellStyle.BackColor = matching.Contains(row) ? AppColors.Get("EngineMatch") : Color.Empty;
++        if (matches.Length > 0 && _trucks.IsHandleCreated) _trucks.FirstDisplayedScrollingRowIndex = matches[0].Index;
++        return matches.Length;
++    }
++
++    private static bool MatchesSearch(DataGridViewRow row, string query) => query.Length >= 3
++        && row.DataBoundItem is DataRowView view && view["Entry"] is RegionTruckEntry entry
++        && string.Join(" ", entry.Truck, entry.TruckCode, entry.Class, entry.Region, entry.Map, entry.MapCode,
++            entry.Task, entry.PlacementId, entry.Tires, entry.Addons).Contains(query, StringComparison.CurrentCultureIgnoreCase);
++
+     private void ShowDetails()
+     {
+         _details.Clear();
+diff --git a/src/SnowPakTool.Desktop/RegionTileButton.cs b/src/SnowPakTool.Desktop/RegionTileButton.cs
+index 799b2e2..fbc511a 100644
+--- a/src/SnowPakTool.Desktop/RegionTileButton.cs
++++ b/src/SnowPakTool.Desktop/RegionTileButton.cs
+@@ -10,7 +10,7 @@ internal sealed class RegionTileButton : Button
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal string ReleaseLabel { get; init; } = "";
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+-    internal string Summary { get; init; } = "";
++    internal string Summary { get; set; } = "";
+     // Cached by RegionTileAssets and shared by every tile for this region.
+     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+     internal Image? Thumbnail { get; init; }
+@@ -31,7 +31,8 @@ internal sealed class RegionTileButton : Button
+         TextRenderer.DrawText(graphics, RegionName, headerFont, header, ForeColor,
+             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+ 
+-        var picture = new Rectangle(inner.X, header.Bottom, inner.Width, Math.Max(1, inner.Height - 30 - 76));
++        var footerHeight = 24 + 14 * Math.Max(1, Summary.Split('\n').Length);
++        var picture = new Rectangle(inner.X, header.Bottom, inner.Width, Math.Max(1, inner.Height - 30 - footerHeight));
+         using (var background = new SolidBrush(Color.FromArgb(30, 35, 40))) graphics.FillRectangle(background, picture);
+         if (Thumbnail is not null)
+         {
+diff --git a/src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs b/src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs
+new file mode 100644
+index 0000000..20d0ed7
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs
+@@ -0,0 +1,65 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++/// <summary>User resolutions for individual map placements, kept independently of game/workspace files.</summary>
++internal sealed class RegionTruckAvailabilityStore
++{
++    internal static readonly string[] Choices = ["Unverified", "Obtainable — discovery/start", "Obtainable — task reward", "Mission/task only"];
++    internal sealed record Selection(string Availability, DateTimeOffset SavedAt);
++    private readonly string _path;
++    private Dictionary<string, Selection> _selections;
++
++    public RegionTruckAvailabilityStore(string? path = null)
++    {
++        _path = path ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++            "SnowPakTool.Desktop", "region-truck-availability.json");
++        try
++        {
++            var saved = File.Exists(_path) ? JsonSerializer.Deserialize<Dictionary<string, Selection>>(File.ReadAllText(_path)) : null;
++            _selections = new(StringComparer.OrdinalIgnoreCase);
++            if (saved is not null)
++                foreach (var (key, value) in saved)
++                    if (value is not null && Choices.Contains(value.Availability, StringComparer.Ordinal)) _selections[key] = value;
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
++        { _selections = new(StringComparer.OrdinalIgnoreCase); }
++    }
++
++    public void Set(string map, string placementId, string availability)
++    {
++        if (string.IsNullOrWhiteSpace(map) || string.IsNullOrWhiteSpace(placementId) || !Choices.Contains(availability, StringComparer.Ordinal))
++            throw new ArgumentException("Choose a valid availability for a named map placement.");
++        var updated = new Dictionary<string, Selection>(_selections, StringComparer.OrdinalIgnoreCase)
++        { [Key(map, placementId)] = new(availability, DateTimeOffset.UtcNow) };
++        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
++        var temporary = _path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try
++        {
++            File.WriteAllText(temporary, JsonSerializer.Serialize(updated, new JsonSerializerOptions { WriteIndented = true }));
++            File.Move(temporary, _path, overwrite: true);
++            _selections = updated;
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    public RegionTruckEntry Apply(RegionTruckEntry entry)
++    {
++        // The 17 already-confirmed mission placements are not editable unknowns.
++        if (RegionTruckPlacementOverrides.GetMissionOnlyReason(entry.MapCode, entry.PlacementId) is not null)
++            return entry with { AvailabilityEditable = false };
++        if (!_selections.TryGetValue(Key(entry.MapCode, entry.PlacementId), out var selection))
++            return entry with { AvailabilityEditable = entry.Availability == "Unverified" && entry.PlacementId.Length > 0 };
++        const string separator = "\r\nUnderlying scan: ";
++        var index = entry.Evidence.IndexOf(separator, StringComparison.Ordinal);
++        var evidence = index < 0 ? entry.Evidence : entry.Evidence[(index + separator.Length)..];
++        return entry with
++        {
++            Availability = selection.Availability,
++            AvailabilityEditable = true,
++            Evidence = $"User-selected availability: {selection.Availability} (saved {selection.SavedAt.ToLocalTime():yyyy-MM-dd})." + separator + evidence
++        };
++    }
++
++    private static string Key(string map, string placementId) => map + "|" + placementId;
++}
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+index 7e091b1..b027d32 100644
+--- a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
++++ b/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+@@ -8,7 +8,7 @@ namespace SnowPakTool.Desktop;
+ internal sealed record RegionTruckEntry(string RegionCode, string Region, string MapCode, string Map,
+     string TruckCode, string Truck, string Class, string Availability, string Task, string PlacementId,
+     float X, float Y, float Z, string Evidence, string Source,
+-    string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "");
++    string Tires = "Unknown", string TireDetails = "", string Addons = "Unknown", string AddonDetails = "", bool AvailabilityEditable = false);
+ internal sealed record RegionTruckCatalog(IReadOnlyList<RegionTruckEntry> Entries, IReadOnlyList<string> Warnings, int MapsRead);
+ internal sealed record MapTruckPlacement(string TruckCode, string Id, int Offset, float X, float Y, float Z, MapTruckEquipment Equipment);
+ 
+@@ -19,9 +19,10 @@ internal static class RegionTruckCatalogService
+     private static readonly Regex TruckRoot = new(@"<Truck(?=[\s>])[\s\S]*?</Truck\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+ 
+     public static RegionTruckCatalog Load(string workspace, string mapDirectory,
+-        IReadOnlyDictionary<string, string> names, IReadOnlyDictionary<string, string> regionNames)
++        IReadOnlyDictionary<string, string> names, IReadOnlyDictionary<string, string> regionNames, RegionTruckAvailabilityStore? availabilityStore = null)
+     {
+         var warnings = new List<string>();
++        availabilityStore ??= new RegionTruckAvailabilityStore();
+         var trucks = LoadTrucks(workspace, names, warnings);
+         if (trucks.Count == 0) throw new InvalidDataException("No vehicle definitions were found in the selected workspace.");
+         var tasks = LoadTasks(workspace, names, warnings);
+@@ -103,7 +104,7 @@ internal static class RegionTruckCatalogService
+             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+             { warnings.Add($"{map}: {ex.Message}"); }
+         }
+-        return new(entries, warnings, mapsRead);
++        return new(entries.Select(availabilityStore.Apply).ToArray(), warnings, mapsRead);
+     }
+ 
+     internal static IReadOnlyList<MapTruckPlacement> ReadPlacements(byte[] data, IReadOnlySet<string> truckCodes)

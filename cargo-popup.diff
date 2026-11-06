@@ -1,0 +1,389 @@
+diff --git a/investigation/cargo-popup/before/TrucksCargoTab.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+index 6c303b7..8ccbf1f 100644
+--- a/investigation/cargo-popup/before/TrucksCargoTab.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/TrucksCargoTab.cs
+@@ -100,38 +100,29 @@ internal sealed partial class TrucksCargoTab : UserControl
+         foreach (var column in new[] { "Cargo", "Cargo type", "Variant", "Content" }) table.Columns.Add(column);
+         foreach (var column in new[] { "Cargo length (slots)", "Loose weight (kg)", "Packed weight (kg)", "Cargo value" }) table.Columns.Add(column, typeof(decimal));
+         table.Columns.Add("Entry", typeof(CargoEntry));
+-        AddRawMassColumns(table);
+         foreach (var entry in visible)
+             table.Rows.Add(entry.Name, entry.Type, entry.Variant, entry.Content,
+                 (object?)entry.Slots ?? DBNull.Value, (object?)entry.LooseMassKg ?? DBNull.Value,
+                 (object?)entry.PackedMassKg ?? DBNull.Value, (object?)entry.LoadValue ?? DBNull.Value, entry);
+         _cargo.DataSource = table;
+-        _cargo.ReadOnly = false;
+-        _cargo.EditMode = DataGridViewEditMode.EditOnEnter;
++        _cargo.ReadOnly = true;
+         _cargo.SelectionMode = DataGridViewSelectionMode.CellSelect;
+         _cargo.Columns["Entry"]!.Visible = false;
+         foreach (DataGridViewColumn column in _cargo.Columns)
+         {
+             column.Width = column.Index switch { 0 => 200, 1 => 190, 2 => 290, 3 => 90, _ => 125 };
+             if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
+-            column.ReadOnly = !IsRawMassColumn(column.Name);
+-            if (IsRawMassColumn(column.Name))
+-            {
+-                column.HeaderText = column.Name.Replace(" raw mass ", " raw ");
+-                column.Width = 140;
+-                column.DefaultCellStyle.Format = "0.############################";
+-            }
++            column.ReadOnly = true;
+         }
+         _cargo.Columns["Cargo value"]!.DefaultCellStyle.Format = "0.###";
+         foreach (var role in new[] { "Loose", "Packed" })
+         {
+             _cargo.Columns[role + " weight (kg)"]!.DefaultCellStyle.Format = "0.############################";
+-            _cargo.Columns[role + " weight (kg)"]!.ToolTipText = "Calculated total. Edit the individual raw mass columns to change XML values.";
++            _cargo.Columns[role + " weight (kg)"]!.HeaderText = role + " (kg)";
++            _cargo.Columns[role + " weight (kg)"]!.Width = 155;
++            _cargo.Columns[role + " weight (kg)"]!.ToolTipText = "Double-click, or press Enter/F2, to edit individual body masses in a popup.";
+         }
+-        var massOrder = new[] { "Cargo", "Loose weight (kg)" }
+-            .Concat(_cargo.Columns.Cast<DataGridViewColumn>().Where(column => column.Name.StartsWith("Loose raw mass ")).Select(column => column.Name))
+-            .Append("Packed weight (kg)")
+-            .Concat(_cargo.Columns.Cast<DataGridViewColumn>().Where(column => column.Name.StartsWith("Packed raw mass ")).Select(column => column.Name)).ToArray();
++        var massOrder = new[] { "Cargo", "Loose weight (kg)", "Packed weight (kg)" };
+         for (var index = 0; index < massOrder.Length; index++) _cargo.Columns[massOrder[index]]!.DisplayIndex = index;
+         _status.Text = $"{visible.Count} variants · {_catalog.Entries.Select(entry => entry.Type).Distinct(StringComparer.OrdinalIgnoreCase).Count()} cargo types. "
+             + "Blank = missing, unresolved or differing loose variants. Log cargo length uses carrier slots.";
+@@ -146,7 +137,7 @@ internal sealed partial class TrucksCargoTab : UserControl
+         if (_cargo.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not CargoEntry entry) return;
+         _description.Text = entry.Description + Environment.NewLine
+             + "Loose weight is per loose cargo unit (one individual log for logs). Packed weight sums the cargo addon's physics bodies for the complete load; it can include carrier parts."
+-            + Environment.NewLine + "Edit Loose/Packed raw mass cells: each targets exactly one body's Mass attribute. Totals are read-only. Blank removes the local attribute and restores inheritance. Stage changes, then Apply pending changes from Start."
++            + Environment.NewLine + "Double-click Loose or Packed (or press Enter/F2) to edit individual body masses in a popup. OK updates the preview; Stage changes, then Apply pending changes from Start. Blank raw mass restores inheritance."
+             + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
+         foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
+         foreach (var target in entry.MassTargets)
+diff --git a/investigation/cargo-popup/before/CargoMassEditing.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+index 658d5a9..789b301 100644
+--- a/investigation/cargo-popup/before/CargoMassEditing.cs
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassEditing.cs
+@@ -7,46 +7,22 @@ internal sealed partial class TrucksCargoTab
+ {
+     private Dictionary<string, CargoMassRow> _massRows = new(StringComparer.OrdinalIgnoreCase);
+     private Dictionary<string, CargoMassEdit> _stagedMass = new(StringComparer.OrdinalIgnoreCase);
+-    private bool _bindingMass;
+     private long _loadedVersion;
+     internal event Action? StagingChanged;
+-    private static string RawColumn(string role, int index) => $"{role} raw mass {index + 1} (kg)";
+-    private static bool IsRawMassColumn(string name) => name.StartsWith("Loose raw mass ") || name.StartsWith("Packed raw mass ");
+-    private static IEnumerable<(string Column, CargoMassTarget Target)> RawTargets(CargoEntry entry)
++    private static string? MassRole(string column) => column == "Loose weight (kg)" ? "Loose" : column == "Packed weight (kg)" ? "Packed" : null;
++    private void EditMassBodies(int rowIndex, int columnIndex)
+     {
+-        foreach (var role in new[] { "Loose", "Packed" })
+-        {
+-            var index = 0;
+-            foreach (var target in entry.MassTargets.Where(target => target.Role == role)) yield return (RawColumn(role, index++), target);
+-        }
+-    }
+-    private void AddRawMassColumns(DataTable table)
+-    {
+-        foreach (var role in new[] { "Loose", "Packed" })
+-            for (var index = 0; index < (_catalog?.Entries.Select(entry => entry.MassTargets.Count(target => target.Role == role)).DefaultIfEmpty().Max() ?? 0); index++)
+-                table.Columns.Add(RawColumn(role, index), typeof(decimal));
+-    }
+-    private CargoMassRow? CellMassRow(int row, int column)
+-    {
+-        if (row < 0 || column < 0 || _cargo.Rows[row].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return null;
+-        var target = RawTargets(entry).FirstOrDefault(pair => pair.Column == _cargo.Columns[column].Name).Target;
+-        return target is null ? null : _massRows.GetValueOrDefault(CargoMassStore.Key(target));
+-    }
+-    private static bool TryMass(object? input, out string? value)
+-    {
+-        var text = input is null or DBNull ? "" : Convert.ToString(input, CultureInfo.CurrentCulture)?.Trim() ?? "";
+-        value = null;
+-        if (text.Length == 0) return true;
+-        if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.CurrentCulture, out var number) || number < 0 || number > 1000000) return false;
+-        value = number.ToString(CultureInfo.InvariantCulture); return true;
+-    }
+-    private bool CommitMass()
+-    {
+-        if (_cargo.IsCurrentCellInEditMode && _cargo.EditingControl is TextBox text && !TryMass(text.Text, out _))
+-        { _status.Text = "Enter a mass from 0 to 1,000,000 kg, or leave blank to restore inheritance."; return false; }
+-        if (!_cargo.EndEdit()) return false;
+-        if (_cargo.DataSource is DataTable table) BindingContext?[table]?.EndCurrentEdit();
+-        return true;
++        if (rowIndex < 0 || columnIndex < 0 || _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim()
++            || PresetBrowseMode.IsReadOnly(this) || SharedPreset.HasPending(_loadedWorkspace)
++            || MassRole(_cargo.Columns[columnIndex].Name) is not { } role
++            || _cargo.Rows[rowIndex].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return;
++        var rows = entry.MassTargets.Where(target => target.Role == role).Select(target => _massRows[CargoMassStore.Key(target)])
++            .DistinctBy(row => CargoMassStore.Key(row.Target), StringComparer.OrdinalIgnoreCase).ToArray();
++        if (rows.Length == 0) { _status.Text = $"No editable {role.ToLowerInvariant()} body definitions are available for {entry.Name}."; return; }
++        using var dialog = new CargoMassDialog(entry.Name, role, rows);
++        if (dialog.ShowDialog(this) != DialogResult.OK) return;
++        foreach (var (key, value) in dialog.Values) _massRows[key].Draft = value;
++        UpdateMassCells();
+     }
+     private void InitializeMassEditing(FlowLayoutPanel toolbar)
+     {
+@@ -55,7 +31,7 @@ internal sealed partial class TrucksCargoTab
+             var button = new Button { Text = text, AutoSize = true };
+             button.Click += (_, _) =>
+             {
+-                if (_loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim() || PresetBrowseMode.IsReadOnly(this) || !CommitMass()) return;
++                if (_loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim() || PresetBrowseMode.IsReadOnly(this)) return;
+                 try { action(); }
+                 catch (Exception ex) { _status.Text = "Could not update cargo masses: " + ex.Message; }
+             };
+@@ -77,26 +53,12 @@ internal sealed partial class TrucksCargoTab
+             UpdateMassCells();
+         });
+         Button("Reset to original values", () => { foreach (var row in _massRows.Values.Where(row => row.HasOriginal)) row.Draft = row.Original; UpdateMassCells(); });
+-        _cargo.CellBeginEdit += (_, e) => { if (PresetBrowseMode.IsReadOnly(this) || CellMassRow(e.RowIndex, e.ColumnIndex) is null) e.Cancel = true; };
+-        _cargo.CellValidating += (_, e) =>
++        _cargo.CellDoubleClick += (_, e) => EditMassBodies(e.RowIndex, e.ColumnIndex);
++        _cargo.KeyDown += (_, e) =>
+         {
+-            if (CellMassRow(e.RowIndex, e.ColumnIndex) is null) return;
+-            if (!TryMass(e.FormattedValue, out var parsed)) { e.Cancel = true; _status.Text = "Enter a mass from 0 to 1,000,000 kg, or blank for inheritance."; }
+-        };
+-        _cargo.CellParsing += (_, e) =>
+-        {
+-            if (CellMassRow(e.RowIndex, e.ColumnIndex) is null || !TryMass(e.Value, out var value)) return;
+-            e.Value = value is null ? DBNull.Value : decimal.Parse(value, CultureInfo.InvariantCulture); e.ParsingApplied = true;
+-        };
+-        _cargo.CellValueChanged += (_, e) =>
+-        {
+-            if (_bindingMass || CellMassRow(e.RowIndex, e.ColumnIndex) is not { } row || !TryMass(_cargo[e.ColumnIndex, e.RowIndex].Value, out var value)) return;
+-            row.Draft = value; UpdateMassCells();
+-        };
+-        _cargo.EditingControlShowing += (_, e) =>
+-        {
+-            if (_cargo.CurrentCell is not { } cell || CellMassRow(cell.RowIndex, cell.ColumnIndex) is not { } row || e.Control is not TextBox text) return;
+-            text.Text = row.Draft is null ? "" : decimal.Parse(row.Draft, CultureInfo.InvariantCulture).ToString(CultureInfo.CurrentCulture); text.SelectAll();
++            if (e.KeyCode is not (Keys.Enter or Keys.F2) || _cargo.CurrentCell is not { OwningColumn: { } column } cell || MassRole(column.Name) is null) return;
++            e.Handled = e.SuppressKeyPress = true;
++            EditMassBodies(cell.RowIndex, cell.ColumnIndex);
+         };
+         _cargo.CellFormatting += FormatMass;
+         _cargo.DataError += (_, e) => { e.ThrowException = false; _status.Text = "Enter a valid mass in kg."; };
+@@ -110,7 +72,7 @@ internal sealed partial class TrucksCargoTab
+         foreach (var (key, row) in _massRows)
+             row.Draft = _stagedMass.TryGetValue(key, out var edit) ? edit.After : row.Current;
+     }
+-    private decimal? PreviewTotal(CargoEntry entry, string role)
++    private decimal? PreviewTotal(CargoEntry entry, string role, bool original = false)
+     {
+         var groups = entry.MassTargets.Where(target => target.Role == role).GroupBy(target => target.RelativeFile).ToArray();
+         var totals = new List<decimal>();
+@@ -120,7 +82,9 @@ internal sealed partial class TrucksCargoTab
+             foreach (var target in group)
+             {
+                 var row = _massRows[CargoMassStore.Key(target)];
+-                if (row.Draft is not null) total += decimal.Parse(row.Draft, CultureInfo.InvariantCulture);
++                if (original && !row.HasOriginal) return null;
++                var value = original ? row.Original : row.Draft;
++                if (value is not null) total += decimal.Parse(value, CultureInfo.InvariantCulture);
+                 else if (target.InheritedMass.HasValue) total += target.InheritedMass.Value;
+                 else return null;
+             }
+@@ -131,49 +95,34 @@ internal sealed partial class TrucksCargoTab
+     private void UpdateMassCells()
+     {
+         if (_cargo.DataSource is not DataTable table) return;
+-        _bindingMass = true;
+-        try
++        foreach (DataRow data in table.Rows)
+         {
+-            foreach (DataRow data in table.Rows)
+-            {
+-                if (data["Entry"] is not CargoEntry entry) continue;
+-                foreach (var (column, target) in RawTargets(entry))
+-                {
+-                    var row = _massRows[CargoMassStore.Key(target)];
+-                    data[column] = row.Draft is null ? DBNull.Value : decimal.Parse(row.Draft, CultureInfo.InvariantCulture);
+-                }
+-                data["Loose weight (kg)"] = (object?)PreviewTotal(entry, "Loose") ?? DBNull.Value;
+-                data["Packed weight (kg)"] = (object?)PreviewTotal(entry, "Packed") ?? DBNull.Value;
+-            }
+-            foreach (DataGridViewRow gridRow in _cargo.Rows)
+-                foreach (DataGridViewColumn column in _cargo.Columns)
+-                    if (IsRawMassColumn(column.Name)) gridRow.Cells[column.Index].ReadOnly = CellMassRow(gridRow.Index, column.Index) is null;
++            if (data["Entry"] is not CargoEntry entry) continue;
++            data["Loose weight (kg)"] = (object?)PreviewTotal(entry, "Loose") ?? DBNull.Value;
++            data["Packed weight (kg)"] = (object?)PreviewTotal(entry, "Packed") ?? DBNull.Value;
+         }
+-        finally { _bindingMass = false; }
+         _cargo.Invalidate(); ShowProperties();
+     }
+     private void FormatMass(object? sender, DataGridViewCellFormattingEventArgs e)
+     {
+-        if (CellMassRow(e.RowIndex, e.ColumnIndex) is not { } row) return;
+-        string Display(string? value) => value is null ? "Inherited" : decimal.Parse(value, CultureInfo.InvariantCulture).ToString("0.############################", CultureInfo.CurrentCulture);
+-        var key = CargoMassStore.Key(row.Target);
+-        var changed = !CargoMassStore.Equal(row.Draft, row.Current);
+-        var staged = _stagedMass.TryGetValue(key, out var edit) && CargoMassStore.Equal(edit.After, row.Draft);
+-        e.CellStyle!.BackColor = changed ? Color.LightGoldenrodYellow
+-            : row.HasOriginal && !CargoMassStore.Equal(row.Current, row.Original) ? Color.Honeydew : AppColors.Get("Surface");
+-        if (!_cargo[e.ColumnIndex, e.RowIndex].IsInEditMode)
+-        {
+-            e.Value = row.Draft is null ? "" : Display(row.Draft);
+-            if (row.HasOriginal && !CargoMassStore.Equal(row.Draft, row.Original)) e.Value = $"{Display(row.Draft)} ({Display(row.Original)})";
+-            e.FormattingApplied = true;
+-        }
+-        _cargo[e.ColumnIndex, e.RowIndex].ToolTipText = $"{row.Target.RelativeFile}\n{row.Target.BodyPath}/@Mass\nModelFrame: {row.Target.ModelFrame}\nOriginal raw: {(row.HasOriginal ? Display(row.Original) : "Unavailable")}\nIn files: {Display(row.Current)}\nPreview: {Display(row.Draft)}\nState: {(changed ? staged ? "Staged" : "Draft" : "In files")}\nBlank removes this local Mass attribute. Other rows sharing this file/body change together.";
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || MassRole(_cargo.Columns[e.ColumnIndex].Name) is not { } role
++            || _cargo.Rows[e.RowIndex].DataBoundItem is not DataRowView data || data["Entry"] is not CargoEntry entry) return;
++        var rows = entry.MassTargets.Where(target => target.Role == role).Select(target => _massRows[CargoMassStore.Key(target)]).ToArray();
++        var changed = rows.Any(row => !CargoMassStore.Equal(row.Draft, row.Current));
++        var applied = rows.Any(row => row.HasOriginal && !CargoMassStore.Equal(row.Current, row.Original));
++        e.CellStyle!.BackColor = changed ? Color.LightGoldenrodYellow : applied ? Color.Honeydew : AppColors.Get("Surface");
++        var preview = PreviewTotal(entry, role);
++        var original = PreviewTotal(entry, role, original: true);
++        string Display(decimal? value) => value?.ToString("0.############################", CultureInfo.CurrentCulture) ?? "Unresolved";
++        e.Value = preview.HasValue ? Display(preview) : "";
++        if (original.HasValue && preview != original) e.Value = $"{Display(preview)} ({Display(original)})";
++        e.FormattingApplied = true;
++        _cargo[e.ColumnIndex, e.RowIndex].ToolTipText = $"Double-click, or press Enter/F2, to edit {rows.Length} raw body mass value(s).\nPreview total: {Display(preview)} kg\nOriginal total: {Display(original)} kg\nEach popup row identifies its exact body and source file. OK changes the preview; Stage and Apply are still required.";
+     }
+     internal void InvalidateCatalog() { _loadedWorkspace = null; }
+     internal void ExportPreview(string destination)
+     {
+         if (_loadedWorkspace != _getWorkspacePath().Trim()) return;
+-        if (!CommitMass()) throw new InvalidDataException("Finish editing cargo masses before sharing.");
+         CargoMassStore.Save(destination, MassEdits());
+     }
+     internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => _loadedWorkspace is null || _loadedWorkspace != _getWorkspacePath().Trim() ? [] : MassEdits().Select(edit =>
+diff --git a/investigation/cargo-popup/before/README.md b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+index 7734955..715339d 100644
+--- a/investigation/cargo-popup/before/README.md
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/README.md
+@@ -24,7 +24,7 @@ The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+-The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, loose weight (per cargo unit), packed weight (sum of addon physics body masses), and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and attributes from the cargo type, packed addon, matching loose models and referenced loose body templates. Loose models are matched by cargo type and slot count; static scenery is excluded. For logs, loose weight is one individual log and packed weight is the complete load. Missing or unresolved weights and differing loose-model weights remain blank. Simple loose body mass templates are resolved; full file inheritance and complex body template hierarchies remain unresolved. To increase both weights, multiply every packed body mass and the matching loose model body masses by the same factor; prefer a local Mass override over changing a shared template. **Reload cargo** refreshes the workspace data after external edits and discards unstaged previews. The Loose/Packed weight totals stay read-only; edit the adjacent Loose/Packed raw mass columns directly. Each editable cell targets one exact XML body and shows its source file and indexed body path in the tooltip. Values accept 0–1,000,000 kg, including decimals; blank removes the local Mass attribute. Template-based cargo receives a local body override, leaving shared templates unchanged. Cargo rows sharing a source body share the same preview. Changed raw cells display new (original) values, amber for preview/staged and green for applied changes. Stage changes persists an explicit snapshot; only Start -> Apply pending changes writes the updated overlay. Revert unstaged edits restores the staged snapshot, Revert staged changes clears it, and Reset selected / Reset to original values previews preserved raw originals, including attribute absence. Global reset and staging include filtered rows. Apply checks every body identity and expected raw value before writing any cargo file and retains staged changes on conflict. Shared presets include cargo previews/staged edits.
++The **Game data → Trucks-Cargo** sub-tab lists cargo types and carrier variants from the active workspace, including DLC and sparse workspace updates. Use the shared double-Shift search for cargo names, types, variants, content packs and properties; click column headers to sort. The table shows the defined cargo length, loose weight (per cargo unit), packed weight (sum of addon physics body masses), and cargo value. Log cargo length represents carrier slots; body mass can include carrier parts. Blank numeric values mean the value is not explicitly defined. Select a row for its localized description and attributes from the cargo type, packed addon, matching loose models and referenced loose body templates. Loose models are matched by cargo type and slot count; static scenery is excluded. For logs, loose weight is one individual log and packed weight is the complete load. Missing or unresolved weights and differing loose-model weights remain blank. Simple loose body mass templates are resolved; full file inheritance and complex body template hierarchies remain unresolved. To increase both weights, multiply every packed body mass and the matching loose model body masses by the same factor; prefer a local Mass override over changing a shared template. **Reload cargo** refreshes the workspace data after external edits and discards unstaged previews. The main table has one Loose and one Packed weight column. Double-click either cell, or press Enter/F2, to open its body-mass popup. Each popup row shows the exact indexed XML body path, model frame and source file; only the raw Mass value is editable. OK updates the preview and Cancel discards all popup edits. The popup also offers Reset to original values; staging and Apply remain separate. Values accept 0–1,000,000 kg, including decimals; blank removes the local Mass attribute. Template-based cargo receives a local body override, leaving shared templates unchanged. Cargo rows sharing a source body share the same preview. Changed popup values and main-table totals display new (original) values, amber for preview/staged and green for applied changes. Stage changes persists an explicit snapshot; only Start -> Apply pending changes writes the updated overlay. Revert unstaged edits restores the staged snapshot, Revert staged changes clears it, and Reset selected / Reset to original values previews preserved raw originals, including attribute absence. Global reset and staging include filtered rows. Apply checks every body identity and expected raw value before writing any cargo file and retains staged changes on conflict. Shared presets include cargo previews/staged edits.
+ 
+ The **Game data → Regions-Trucks** sub-tab reads truck placements from `[scene]/data_for_ssl.bin` inside installed `level_*.pak` files, or from extracted `level_*/[scene]/data_for_ssl.bin` folders. It detects common Steam install locations; **Map folder** can be changed manually. Select one or more region tiles in the top row to populate the table below. Selected tiles are highlighted. The **Obtainable** and **Mission** checkboxes independently control those truck groups; unverified rows always remain visible for review. Double-tap **Shift** to open the same search overlay as Tier List: at least three characters highlight matches and scrolls to the first; **Enter** selects a match. **Esc**, clicking elsewhere, switching windows, or leaving the page closes the overlay. Search covers all visible table values, hover details, evidence, source paths and region tile text; Tier List also searches tier/group names and descriptions. Search does not hide rows. Each placement remains a separate row, so collectible and mission-only copies of the same model are distinguishable.
+ 
+diff --git a/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassDialog.cs b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassDialog.cs
+new file mode 100644
+index 0000000..842b4d8
+--- /dev/null
++++ b/SnowRunnerTools-master/src/SnowPakTool.Desktop/CargoMassDialog.cs
+@@ -0,0 +1,120 @@
++using System.Globalization;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class CargoMassDialog : Form
++{
++    private readonly DataGridView _bodies = new()
++    {
++        Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
++        SelectionMode = DataGridViewSelectionMode.CellSelect, EditMode = DataGridViewEditMode.EditOnEnter,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
++        RowTemplate = { Height = 26 }
++    };
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill };
++    internal Dictionary<string, string?> Values { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
++
++    internal CargoMassDialog(string cargo, string role, IReadOnlyList<CargoMassRow> rows)
++    {
++        Text = $"{cargo} — {role.ToLowerInvariant()} body masses";
++        StartPosition = FormStartPosition.CenterParent;
++        Size = new Size(1180, 580); MinimumSize = new Size(800, 360);
++        MinimizeBox = false; ShowInTaskbar = false;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.Controls.Add(new Label
++        {
++            AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 8),
++            Text = "Edit each body's raw Mass (kg). Values show new (original). Blank restores inheritance; entering a value creates a local override.\nOK updates the cargo preview. Stage changes and Start → Apply pending changes are still required."
++        }, 0, 0);
++        layout.Controls.Add(_bodies, 0, 1);
++        layout.Controls.Add(_status, 0, 2);
++        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 8, 0, 0) };
++        var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel, CausesValidation = false };
++        var ok = new Button { Text = "OK", AutoSize = true };
++        var reset = new Button { Text = "Reset to original values", AutoSize = true, CausesValidation = false };
++        buttons.Controls.Add(cancel); buttons.Controls.Add(ok); buttons.Controls.Add(reset);
++        layout.Controls.Add(buttons, 0, 3); Controls.Add(layout);
++        AcceptButton = ok; CancelButton = cancel;
++        _bodies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Body", HeaderText = "Body / Mass attribute", Width = 360, ReadOnly = true });
++        _bodies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Frame", HeaderText = "Model frame", Width = 170, ReadOnly = true });
++        _bodies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mass", HeaderText = "Raw mass (kg)", Width = 180, ValueType = typeof(string) });
++        _bodies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "Source file", Width = 390, ReadOnly = true });
++        foreach (var row in rows)
++        {
++            var index = _bodies.Rows.Add(row.Target.BodyPath + "/@Mass", row.Target.ModelFrame, Input(row.Draft), row.Target.RelativeFile);
++            var gridRow = _bodies.Rows[index]; gridRow.Tag = row;
++            gridRow.Cells["Body"].ToolTipText = row.Target.BodyPath + "/@Mass";
++            gridRow.Cells["Source"].ToolTipText = row.Target.RelativeFile;
++        }
++        _bodies.BackgroundColor = _bodies.DefaultCellStyle.BackColor = AppColors.Get("Surface");
++        _bodies.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow");
++        _bodies.DefaultCellStyle.SelectionBackColor = AppColors.Get("SelectionBlue");
++        _bodies.DefaultCellStyle.SelectionForeColor = SystemColors.ControlText;
++        _bodies.CellFormatting += FormatMass;
++        _bodies.CellValidating += (_, e) =>
++        {
++            if (e.RowIndex < 0 || _bodies.Columns[e.ColumnIndex].Name != "Mass") return;
++            if (!TryMass(e.FormattedValue, out var value))
++            { e.Cancel = true; _status.Text = "Enter a mass from 0 to 1,000,000 kg, or leave blank for inheritance."; }
++            else _status.Text = "";
++        };
++        _bodies.EditingControlShowing += (_, e) =>
++        {
++            if (_bodies.CurrentCell is not { OwningColumn.Name: "Mass" } cell || e.Control is not TextBox text) return;
++            text.Text = Convert.ToString(cell.Value, CultureInfo.CurrentCulture) ?? ""; text.SelectAll();
++        };
++        _bodies.DataError += (_, e) => { e.ThrowException = false; _status.Text = "Enter a valid raw mass in kg."; };
++        reset.Click += (_, _) =>
++        {
++            _bodies.CancelEdit();
++            foreach (DataGridViewRow gridRow in _bodies.Rows)
++                if (gridRow.Tag is CargoMassRow { HasOriginal: true } row) gridRow.Cells["Mass"].Value = Input(row.Original);
++            _bodies.Invalidate(); _status.Text = "Original raw masses restored in this popup. Choose OK to update the preview.";
++        };
++        ok.Click += (_, _) =>
++        {
++            if (!_bodies.EndEdit()) return;
++            var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
++            foreach (DataGridViewRow gridRow in _bodies.Rows)
++            {
++                if (gridRow.Tag is not CargoMassRow row || !TryMass(gridRow.Cells["Mass"].Value, out var value))
++                { _status.Text = "Enter a mass from 0 to 1,000,000 kg, or leave blank for inheritance."; return; }
++                values[CargoMassStore.Key(row.Target)] = CargoMassStore.Equal(value, row.Draft) ? row.Draft : value;
++            }
++            Values = values; DialogResult = DialogResult.OK;
++        };
++        Shown += (_, _) => { if (_bodies.Rows.Count > 0) _bodies.CurrentCell = _bodies.Rows[0].Cells["Mass"]; };
++    }
++
++    private static string Input(string? value) => value is null ? "" : decimal.Parse(value, CultureInfo.InvariantCulture).ToString(CultureInfo.CurrentCulture);
++    private static string Display(string? value) => value is null ? "Inherited" : Input(value);
++    private static bool TryMass(object? input, out string? value)
++    {
++        var text = Convert.ToString(input, CultureInfo.CurrentCulture)?.Trim() ?? "";
++        value = null;
++        if (text.Length == 0) return true;
++        if (!decimal.TryParse(text, NumberStyles.Number, CultureInfo.CurrentCulture, out var number) || number < 0 || number > 1000000) return false;
++        value = number.ToString(CultureInfo.InvariantCulture); return true;
++    }
++    private void FormatMass(object? sender, DataGridViewCellFormattingEventArgs e)
++    {
++        if (e.RowIndex < 0 || _bodies.Columns[e.ColumnIndex].Name != "Mass" || _bodies.Rows[e.RowIndex].Tag is not CargoMassRow row
++            || !TryMass(_bodies[e.ColumnIndex, e.RowIndex].Value, out var value)) return;
++        e.CellStyle!.BackColor = !CargoMassStore.Equal(value, row.Current) ? Color.LightGoldenrodYellow
++            : row.HasOriginal && !CargoMassStore.Equal(row.Current, row.Original) ? Color.Honeydew : AppColors.Get("Surface");
++        if (!_bodies[e.ColumnIndex, e.RowIndex].IsInEditMode)
++        {
++            e.Value = value is null ? "" : Display(value);
++            if (row.HasOriginal && !CargoMassStore.Equal(value, row.Original)) e.Value = $"{Display(value)} ({Display(row.Original)})";
++            e.FormattingApplied = true;
++        }
++        _bodies[e.ColumnIndex, e.RowIndex].ToolTipText = $"Original raw: {(row.HasOriginal ? Display(row.Original) : "Unavailable")}\nIn files: {Display(row.Current)}\nInherited mass: {row.Target.InheritedMass?.ToString(CultureInfo.CurrentCulture) ?? "Unresolved"}\nBlank removes this local Mass attribute. Cargo variants sharing this source body change together.";
++    }
++}

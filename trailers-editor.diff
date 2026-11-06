@@ -1,0 +1,259 @@
+diff --git a/.checks/TrailerBaseline/MainForm.cs b/src/SnowPakTool.Desktop/Application/MainForm.cs
+index 5386085..00fa707 100644
+--- a/.checks/TrailerBaseline/MainForm.cs
++++ b/src/SnowPakTool.Desktop/Application/MainForm.cs
+@@ -10,6 +10,7 @@ internal sealed class MainForm : Form
+     private readonly TextBox _workspacePath = new() { Dock = DockStyle.Fill };
+     private readonly ExperienceEditorTab _experienceTab;
+     private readonly VariousEditorTab _variousTab;
++    private readonly TrailersTab _trailersTab;
+     private readonly OwnedContentTab _ownedContentTab;
+     private readonly CustomGroupWipTab _customGroupWipTab;
+     private readonly CustomGroupWipTab _tierListTab;
+@@ -56,6 +57,7 @@ internal sealed class MainForm : Form
+             try { _workspacePath.Text = WorkspaceLayout.Migrate(_workspacePath.Text).Root; }
+             catch (Exception ex) { AppendLog("Workspace layout could not be upgraded: " + ex.Message); }
+         }
++        _trailersTab = new TrailersTab(() => _workspacePath.Text.Trim());
+         _variousTab = new VariousEditorTab(() => _workspacePath.Text.Trim());
+         _experienceTab = new ExperienceEditorTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+         _ownedContentTab = new OwnedContentTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+@@ -168,7 +170,7 @@ internal sealed class MainForm : Form
+             ApplyMapChangesAsync, () => _regionsTrucksTab.RefreshChangesAsync());
+         _startChanges.ChangesApplied += async () =>
+         {
+-            _variousTab.WorkspaceUpdated();
++            _variousTab.WorkspaceUpdated(); _trailersTab.WorkspaceUpdated();
+             if (!_sharedPresetApplied) return;
+             try { await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim(), forceReload: true); }
+             catch (Exception ex) { AppendLog("Preset applied; workspace refresh reported: " + ex.Message); }
+@@ -211,6 +213,8 @@ internal sealed class MainForm : Form
+         editorTabs.TabPages.Add(experiencePage);
+         var variousPage = Page("Various", "Various", _variousTab);
+         editorTabs.TabPages.Add(variousPage);
++        var trailersPage = Page("Trailers", "Trailers", _trailersTab);
++        editorTabs.TabPages.Add(trailersPage);
+         var editorsPage = Page("Editors", "Editors", editorTabs);
+         var regionsTrucksPage = Page("Map trucks", "MapTrucks", _regionsTrucksTab);
+         var trucksCargoPage = Page("Cargo", "Cargo", _trucksCargoTab);
+@@ -243,6 +247,7 @@ internal sealed class MainForm : Form
+         _startChanges.PendingCountChanged += ShowPendingCount;
+         _experienceTab.StagingChanged += RefreshPendingCount;
+         _variousTab.StagingChanged += RefreshPendingCount;
++        _trailersTab.StagingChanged += RefreshPendingCount;
+         _trucksCargoTab.StagingChanged += RefreshPendingCount;
+         void LoadTierRegions(string workspace)
+         {
+@@ -289,6 +294,7 @@ internal sealed class MainForm : Form
+                     else _regionProgressionTab.RefreshRegions();
+                 }
+                 else if (selectedPage == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
++                else if (selectedPage == trailersPage) _trailersTab.EnsureLoaded();
+                 else if (selectedPage == variousPage) _variousTab.EnsureLoaded();
+                 else if (selectedPage == experiencePage) _experienceTab.EnsureLoaded();
+                 else if (selectedPage == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
+@@ -426,7 +432,7 @@ internal sealed class MainForm : Form
+             AppendLog($"Workspace merge: {mergeStats.Added} added, {mergeStats.Replaced} replaced, {mergeStats.Unchanged} unchanged.");
+             await WorkspaceDataCache.PreloadAsync(workspace, forceReload: true);
+             _experienceTab.WorkspaceUpdated();
+-            _variousTab.WorkspaceUpdated();
++            _variousTab.WorkspaceUpdated(); _trailersTab.WorkspaceUpdated();
+             _ownedContentTab.WorkspaceUpdated();
+             _truckEditTab.WorkspaceUpdated();
+             if (_startChanges is not null) await _startChanges.RefreshAsync();
+@@ -454,6 +460,7 @@ internal sealed class MainForm : Form
+                 _trucksCargoTab.ExportPreview(temporary);
+                 _variousTab.ExportPreview(temporary);
+                 TireIceStore.Apply(temporary);
++                _trailersTab.ExportPreview(temporary); TrailerStore.Apply(temporary);
+                 TruckPropertiesStore.Apply(temporary);
+                 FrameAddonFuelStore.Apply(temporary);
+                 CargoMassStore.Apply(temporary);
+@@ -478,7 +485,7 @@ internal sealed class MainForm : Form
+             var preset = SharedPreset.Read(dialog.FileName);
+             var editorChanges = _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
+                 .Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(FrameAddonFuelStore.Pending(workspace))
+-                .Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(_variousTab.PresetPreviewChanges()).Concat(_trucksCargoTab.PresetPreviewChanges())
++                .Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(TrailerStore.Pending(workspace)).Concat(_trailersTab.PresetPreviewChanges()).Concat(_variousTab.PresetPreviewChanges()).Concat(_trucksCargoTab.PresetPreviewChanges())
+                 .Concat(AddonExplorationStore.Pending(workspace)).Concat(UpgradeChanges.Pending(workspace))
+                 .Concat(_truckPropertiesTab.PresetPreviewChanges()).Concat(_truckEditTab.PresetPreviewChanges())
+                 .Concat(_experienceTab.PresetPreviewChanges()).ToArray();
+@@ -538,7 +545,7 @@ internal sealed class MainForm : Form
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => (SharedPreset.HasPending(workspace) ? SharedPreset.Pending(workspace) : _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace)).Concat(UpgradeChanges.Pending(workspace)).Concat(FrameAddonFuelStore.Pending(workspace)).Concat(CargoMassStore.Pending(workspace)).Concat(TireIceStore.Pending(workspace)).Concat(TrailerStore.Pending(workspace)).Concat(AddonExplorationStore.Pending(workspace)))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -556,7 +563,8 @@ internal sealed class MainForm : Form
+         if (UpgradeChanges.Pending(workspace).Any()) UpgradeChanges.Apply(workspace);
+         if (FrameAddonFuelStore.Pending(workspace).Any()) _truckEditTab.ApplyFrameAddonFuelChanges(workspace);
+         if (CargoMassStore.Pending(workspace).Any()) { CargoMassStore.Apply(workspace); _trucksCargoTab.InvalidateCatalog(); }
+-        if (TireIceStore.Pending(workspace).Any()) { TireIceStore.Apply(workspace); _variousTab.WorkspaceUpdated(); }
++        if (TrailerStore.Pending(workspace).Any()) { TrailerStore.Apply(workspace); _trailersTab.WorkspaceUpdated(); }
++        if (TireIceStore.Pending(workspace).Any()) { TireIceStore.Apply(workspace); _variousTab.WorkspaceUpdated(); _trailersTab.WorkspaceUpdated(); }
+         if (AddonExplorationStore.Pending(workspace).Any()) _truckEditTab.ApplyAddonExplorationChanges(workspace);
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+diff --git a/.checks/TrailerBaseline/SharedPreset.cs b/src/SnowPakTool.Desktop/Presets/SharedPreset.cs
+index dcf1f75..b0c8c94 100644
+--- a/.checks/TrailerBaseline/SharedPreset.cs
++++ b/src/SnowPakTool.Desktop/Presets/SharedPreset.cs
+@@ -169,7 +169,7 @@ internal static class SharedPreset
+     private static string InputStamp(string workspace, string preferences)
+     {
+         var files = Files(WorkspaceOriginals.GetUpdatedRoot(workspace))
+-            .Concat(new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "various", "winches", "upgrade-randomization", "region-maps" }
++            .Concat(new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "trailers", "various", "winches", "upgrade-randomization", "region-maps" }
+                 .SelectMany(p => Files(WorkspaceOriginals.GetMetadataPath(workspace, p))))
+             .Concat(PlanningFiles.Select(p => Path.Combine(preferences, p)))
+             .Append(WorkspaceOriginals.GetMetadataPath(workspace, "progression-settings.json"))
+@@ -195,7 +195,7 @@ internal static class SharedPreset
+         {
+             CopyTree(WorkspaceOriginals.GetOriginalRoot(workspace), Path.Combine(temporary, "initial.pak", "original_files"));
+             CopyTree(WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(temporary, "initial.pak", "updated"));
+-            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "various", "winches", "upgrade-randomization" })
++            foreach (var relative in new[] { "truck-properties", "frame-addon-fuel", "cargo-mass", "trailers", "various", "winches", "upgrade-randomization" })
+                 CopyTree(WorkspaceOriginals.GetMetadataPath(workspace, relative), Path.Combine(temporary, relative));
+             var pending = PendingTruckReplacements.Load(workspace);
+             var savedMaps = TruckReplacementStore.SavedMaps(workspace).ToArray();
+@@ -395,7 +395,7 @@ internal static class SharedPreset
+                 var safe = SafePath(root, Relative(root, file));
+                 if (targets.Add(safe)) Prepare(safe, null);
+             }
+-            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json", "cargo-mass/pending-changes.json", "various/pending-changes.json",
++            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json", "cargo-mass/pending-changes.json", "trailers/pending-changes.json", "various/pending-changes.json",
+                 "winches/pending-changes.json", "upgrade-randomization/staged.json", "upgrade-randomization/draft.json",
+                 "upgrade-randomization/addon-exploration.json" })
+             {
+diff --git a/src/SnowPakTool.Desktop/Editors/Trailers/TrailerStore.cs b/src/SnowPakTool.Desktop/Editors/Trailers/TrailerStore.cs
+new file mode 100644
+index 0000000..0c6cad2
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/Editors/Trailers/TrailerStore.cs
+@@ -0,0 +1,46 @@
++using System.Text.Json;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record TrailerEdit(string File, string Path, string Before, string After);
++internal static class TrailerStore
++{
++    internal static string PendingPath(string w) => WorkspaceOriginals.GetMetadataPath(w, "trailers", "pending-changes.json");
++    internal static bool IsTrailer(string file) => file.Replace('\\', '/').Contains("/classes/trucks/trailers/", StringComparison.OrdinalIgnoreCase)
++        && file.EndsWith(".xml", StringComparison.OrdinalIgnoreCase);
++    internal static IEnumerable<string> Files(string w) => WorkspaceOriginals.EnumerateCurrentFiles(w, "[media]", "*.xml").Where(IsTrailer);
++    internal static XElement Parse(string text) => XElement.Parse("<Source>" + text + "</Source>", LoadOptions.PreserveWhitespace);
++    internal static string PathOf(XElement node) => node.Parent?.Name == "Source" ? node.Name + "[1]"
++        : PathOf(node.Parent!) + "/" + node.Name + "[" + (node.ElementsBeforeSelf(node.Name).Count() + 1) + "]";
++    internal static Dictionary<string, XAttribute> Attributes(XElement root) => root.Descendants().SelectMany(e => e.Attributes())
++        .Where(a => !a.Name.LocalName.StartsWith('_') && a.Name.LocalName != "Type")
++        .ToDictionary(a => PathOf(a.Parent!) + "/@" + a.Name, a => a);
++    internal static List<TrailerEdit> Load(string w) => File.Exists(PendingPath(w)) ? JsonSerializer.Deserialize<List<TrailerEdit>>(File.ReadAllText(PendingPath(w))) ?? [] : [];
++    internal static void Save(string w, List<TrailerEdit> edits) => TruckPropertiesStore.WriteAtomic(PendingPath(w), JsonSerializer.Serialize(edits));
++    internal static IEnumerable<WorkspaceChange> Changes(string w, IEnumerable<TrailerEdit> edits) => edits.Select(e => new WorkspaceChange(WorkspaceChange.Pending,
++        WorkspaceOriginals.GetCurrentPath(w, e.File), e.Path, e.Before, e.After));
++    internal static IEnumerable<WorkspaceChange> Pending(string w) => Changes(w, Load(w));
++    internal static void Apply(string w)
++    {
++        var outputs = Load(w).GroupBy(e => e.File).Select(g =>
++        {
++            if (!IsTrailer(g.Key) || g.Key.Replace('\\', '/').Split('/').Any(p => p is ".." or ".") || g.Key.Contains(':')) throw new InvalidDataException("Invalid trailer path.");
++            var source = WorkspaceOriginals.GetCurrentPath(w, g.Key);
++            var root = Parse(File.ReadAllText(source)); var attributes = Attributes(root);
++            foreach (var e in g)
++            {
++                if (!attributes.TryGetValue(e.Path, out var a) || a.Value != e.Before && a.Value != e.After)
++                    throw new InvalidDataException("Trailer property changed since staging: " + e.File + " " + e.Path);
++                a.Value = e.After;
++            }
++            return (source, text: string.Concat(root.Nodes().Select(n => n.ToString(SaveOptions.DisableFormatting))));
++        }).ToArray();
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(w, output.source);
++            TruckPropertiesStore.WriteAtomic(path, output.text); WorkspaceDataCache.InvalidateFile(path);
++        }
++        Save(w, []);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/Editors/Trailers/TrailersTab.cs b/src/SnowPakTool.Desktop/Editors/Trailers/TrailersTab.cs
+new file mode 100644
+index 0000000..8825f09
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/Editors/Trailers/TrailersTab.cs
+@@ -0,0 +1,71 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed class TrailersTab : UserControl
++{
++    private readonly Func<string> _workspace;
++    private readonly DataGridView _files = Grid(), _properties = Grid();
++    private readonly Label _status = new() { AutoSize = true };
++    private readonly Dictionary<(string File, string Path), TrailerEdit> _draft = [];
++    private string? _loaded;
++    private bool _binding;
++    internal event Action? StagingChanged;
++    private static DataGridView Grid() => new() { Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowTemplate = { Height = 26 } };
++    public TrailersTab(Func<string> workspace)
++    {
++        _workspace = workspace;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), RowCount = 4, ColumnCount = 1 };
++        layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize));
++        layout.RowStyles.Add(new(SizeType.Percent, 35)); layout.RowStyles.Add(new(SizeType.Percent, 65));
++        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
++        void Button(string title, Action action) { var b = new Button { Text = title, AutoSize = true }; tools.Controls.Add(b); b.Click += (_, _) => Run(action); }
++        Button("Reload trailers", Reload);
++        Button("Stage changes", () => { _properties.EndEdit(); TrailerStore.Save(_workspace(), _draft.Values.ToList()); StagingChanged?.Invoke(); _status.Text = $"Staged {_draft.Count} properties. Apply pending changes from Start."; });
++        Button("Revert unstaged edits", Reload);
++        Button("Revert staged changes", () => { TrailerStore.Save(_workspace(), []); Reload(); StagingChanged?.Invoke(); });
++        layout.Controls.Add(tools, 0, 0); layout.Controls.Add(_status, 0, 1); layout.Controls.Add(_files, 0, 2); layout.Controls.Add(_properties, 0, 3); Controls.Add(layout);
++        _files.Columns.Add("Trailer", "Trailer ID"); _files.Columns.Add("Source", "Source file"); _files.ReadOnly = true;
++        foreach (var name in new[] { "Property", "Current", "Original", "Preview" }) _properties.Columns.Add(name, name);
++        foreach (DataGridViewColumn c in _properties.Columns) c.ReadOnly = c.Name != "Preview";
++        TableHeaderBehavior.Attach(_files); TableHeaderBehavior.Attach(_properties);
++        _files.CurrentCellChanged += (_, _) => Run(ShowProperties);
++        _properties.CellEndEdit += (_, e) => Run(() =>
++        {
++            if (_binding || _files.CurrentRow is null) return;
++            var file = (string)_files.CurrentRow.Cells["Source"].Value!; var row = _properties.Rows[e.RowIndex];
++            var path = (string)row.Cells["Property"].Value!; var before = (string)row.Cells["Current"].Value!;
++            var after = Convert.ToString(row.Cells["Preview"].Value) ?? "";
++            if (before == after) _draft.Remove((file, path)); else _draft[(file, path)] = new(file, path, before, after);
++            _status.Text = $"{_draft.Count} preview changes. Edit explicit XML values; templates and inherited values are not expanded. Stage, then apply from Start.";
++        });
++    }
++    internal void WorkspaceUpdated() => _loaded = null;
++    internal void EnsureLoaded() { if (_loaded != _workspace()) Run(Reload); }
++    private void Run(Action action) { try { action(); } catch (Exception ex) { _status.Text = ex.Message; } }
++    private void Reload()
++    {
++        _binding = true;
++        try
++        {
++            _files.Rows.Clear(); _properties.Rows.Clear(); _draft.Clear();
++            if (!Directory.Exists(_workspace())) { _status.Text = "Choose an extracted workspace on Start."; return; }
++            foreach (var e in TrailerStore.Load(_workspace())) _draft[(e.File, e.Path)] = e;
++            foreach (var file in TrailerStore.Files(_workspace()).Order()) _files.Rows.Add(System.IO.Path.GetFileNameWithoutExtension(file), WorkspaceOriginals.GetRelativePath(_workspace(), file));
++            _loaded = _workspace(); _status.Text = $"{_files.Rows.Count} trailers. Edit Preview values, stage, then apply from Start. Structural/template references are read-only.";
++        }
++        finally { _binding = false; }
++        ShowProperties();
++    }
++    private void ShowProperties()
++    {
++        if (_binding) return;
++        _properties.EndEdit(); _properties.Rows.Clear();
++        if (_files.CurrentRow?.Cells["Source"].Value is not string file) return;
++        var current = TrailerStore.Attributes(TrailerStore.Parse(File.ReadAllText(WorkspaceOriginals.GetCurrentPath(_workspace(), file))));
++        var original = TrailerStore.Attributes(TrailerStore.Parse(File.ReadAllText(WorkspaceOriginals.GetOriginalReadPath(_workspace(), file))));
++        foreach (var (path, a) in current)
++            _properties.Rows.Add(path, a.Value, original.TryGetValue(path, out var o) ? o.Value : "Not present", _draft.TryGetValue((file, path), out var edit) ? edit.After : a.Value);
++    }
++    internal void ExportPreview(string destination) { if (_loaded == _workspace()) TrailerStore.Save(destination, _draft.Values.ToList()); }
++    internal IEnumerable<WorkspaceChange> PresetPreviewChanges() => _loaded == _workspace() ? TrailerStore.Changes(_workspace(), _draft.Values) : [];
++}

@@ -1,0 +1,105 @@
+--- a/src/SnowPakTool.Desktop/MissionTruckRandomizer.cs
++++ b/src/SnowPakTool.Desktop/MissionTruckRandomizer.cs
+@@ -8,8 +8,8 @@
+ {
+     internal static double Weight(double percentile, MissionTruckDifficulty difficulty) => difficulty switch
+     {
+-        MissionTruckDifficulty.Easy => Math.Exp(-3 * percentile),
+-        MissionTruckDifficulty.Hard => Math.Exp(3 * percentile),
++        MissionTruckDifficulty.Easy => 3 - 2 * percentile,
++        MissionTruckDifficulty.Hard => 1 + 2 * percentile,
+         _ => 1
+     };
+ 
+@@ -48,7 +48,13 @@
+         var resetKeys = pending.Where(change => change.ResetOriginal).Select(change => change.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var pendingKeys = pending.Where(change => !change.ResetOriginal).Select(change => change.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+         var pendingOffsets = pending.Where(change => !change.ResetOriginal).Select(change => change.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+-        var uses = assignments.Values.GroupBy(item => item.Target.Code, StringComparer.OrdinalIgnoreCase)
++        // Merge by placement: a saved assignment and its pending draft/staged copy count once.
++        var globalTargets = assignments.Values.Where(item => !resetKeys.Contains(item.PlacementKey))
++            .ToDictionary(item => item.PlacementKey, item => item.Target.Code, StringComparer.OrdinalIgnoreCase);
++        foreach (var change in pending.Where(change => !change.ResetOriginal)) globalTargets[change.Original.StablePlacementKey] = change.Target.Code;
++        foreach (var entry in catalog.Entries.Where(entry => entry.TruckChanged && !resetKeys.Contains(entry.StablePlacementKey)))
++            globalTargets.TryAdd(entry.StablePlacementKey, entry.TruckCode);
++        var uses = globalTargets.Values.GroupBy(code => code, StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+         var regions = catalog.Entries.Where(entry => ownedRegions.Contains(entry.RegionCode) && entry.Availability == "Mission/task only")
+             .GroupBy(entry => entry.RegionCode, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase).ToArray();
+@@ -104,9 +110,12 @@
+                     && Configuration(item.Truck.Code, category).HasValue).ToArray();
+                 if (candidates.Length == 0)
+                 { skipped++; Detail($"{label}: unchanged — no different enabled truck has usable tires and readable mass."); continue; }
++                // Global coverage leads; local variety breaks ties without restarting the pool per region.
++                var globalMinimum = candidates.Min(item => counts.GetValueOrDefault(item.Truck.Code));
++                candidates = candidates.Where(item => counts.GetValueOrDefault(item.Truck.Code) == globalMinimum).ToArray();
+                 var minimumUses = candidates.Min(item => regionalUses.GetValueOrDefault(item.Truck.Code));
+                 candidates = candidates.Where(item => regionalUses.GetValueOrDefault(item.Truck.Code) == minimumUses).ToArray();
+-                double SelectionWeight(CustomTruck truck) => Weight(percentiles[truck.Code], difficulty) / Math.Pow(1 + counts.GetValueOrDefault(truck.Code), 0.25);
++                double SelectionWeight(CustomTruck truck) => Weight(percentiles[truck.Code], difficulty);
+                 var roll = random.NextDouble() * candidates.Sum(item => SelectionWeight(item.Truck));
+                 var candidate = candidates[^1];
+                 foreach (var item in candidates) { roll -= SelectionWeight(item.Truck); if (roll <= 0) { candidate = item; break; } }
+@@ -114,8 +123,9 @@
+                 planned.Add((entry.FileEntry ?? entry, candidate.Truck, configuration));
+                 regionalUses[candidate.Truck.Code] = minimumUses + 1;
+                 counts[candidate.Truck.Code] = counts.GetValueOrDefault(candidate.Truck.Code) + 1;
+-                Detail($"{label}: selected using {difficulty} vehicle-weight bias; original class, truck tier and addon requirements were not used."
+-                    + (minimumUses > 0 ? " Regional reuse was necessary; a least-used model was selected." : " Selected a model not yet represented in this region."));
++                Detail($"{label}: selected from a broad weight mix with {difficulty} bias; original class, truck tier and addon requirements were not used."
++                    + (globalMinimum > 0 ? " Global reuse was necessary; a least-used model across all regions was selected." : " Selected a model not yet used in saved assignments or drafts across all regions.")
++                    + (minimumUses > 0 ? " Regional reuse was necessary after global balancing." : " This model was not yet represented in this region."));
+                 var actual = equipment.ConfiguredTireCategory(configuration);
+                 if (fallback) { fallbacks++; Detail($"{label}: tire category {TireLabel(category)} → {actual} (requested category unsupported; nearest compatible category used)."); }
+                 Detail($"{label}: requested {TireLabel(category)} tires from region difficulty with variance; planned {actual}, smallest size and first variant, with replacement default equipment.");
+--- a/README.md
++++ b/README.md
+@@ -14,9 +14,9 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-**Randomizer → Truck randomization → Missions** uses the same editable rule list, compact add/edit/remove glyphs, run button, Stage changes button, default-hidden detailed logs and region completion messages as Obtainable. Its saved **Easy / Moderate / Hard** selector controls vehicle weight only: Easy favors lighter models, Moderate gives equal model weights, and Hard favors heavier models. Vehicle weight is the sum of bare vehicle physics bodies, resolving shared/local body templates and inherited definitions; cargo, frame addons and truck tier/class labels do not determine weight. Equal masses share a weight percentile, with a smooth bias that keeps all weights possible. The pool uses enabled trucks, including unranked models, across all classes. Original mission addon requirements are ignored and replacement default equipment is used.
++**Randomizer → Truck randomization → Missions** uses the same editable rule list, compact add/edit/remove glyphs, run button, Stage changes button, default-hidden detailed logs and region completion messages as Obtainable. Its saved **Easy / Moderate / Hard** selector controls vehicle weight only: Easy favors lighter models, Moderate gives equal model weights, and Hard favors heavier models. Vehicle weight is the sum of bare vehicle physics bodies, resolving shared/local body templates and inherited definitions; cargo, frame addons and truck tier/class labels do not determine weight. Equal masses share a weight percentile, with a broad, linear bias capped at 3:1 between the favored and opposite ends of the weight range (previously about 20:1). All weights retain substantial chances in every mode. The pool uses enabled trucks, including unranked models, across all classes. Original mission addon requirements are ignored and replacement default equipment is used.
+ 
+-Mission tires use **region difficulty only**, independently of finalized progression and the weight selector: D favors Highway, C All-terrain, B/A Offroad, and S Mudtires, with a 20% adjacent-category variation draw clamped at the endpoints. Unsupported categories fall back to the nearest supported category; use the smallest supported size and first variant. Regions without a difficulty tier and vehicles with unreadable mass are reported and skipped. Selection prefers models not yet represented in the region, then least-used models, counting existing assignments and drafts. Saved assignments stay fixed across mode/ownership changes, and mission rolls do not consume the obtainable HEAVY_DUTY exception allowance. Existing empty Missions rule lists receive these defaults once; custom notes are preserved and later intentional empty lists stay empty. Rule prose remains editable notes; it does not change the algorithm.
++Mission tires use **region difficulty only**, independently of finalized progression and the weight selector: D favors Highway, C All-terrain, B/A Offroad, and S Mudtires, with a 20% adjacent-category variation draw clamped at the endpoints. Unsupported categories fall back to the nearest supported category; use the smallest supported size and first variant. Regions without a difficulty tier and vehicles with unreadable mass are reported and skipped. Selection prioritizes models unused across all regions, then globally least-used models, with regional variety as a tie-breaker. Existing randomization assignments, pending draft/staged replacements and applied manual edits visible in the catalog all count toward usage; a placement represented in both an assignment and a draft counts once. Reset drafts release their prior model usage. This global count carries between regions and across runs, including later ownership changes. Saved assignments stay fixed across mode/ownership changes, and mission rolls do not consume the obtainable HEAVY_DUTY exception allowance. Existing empty Missions rule lists receive these defaults once; custom notes are preserved and later intentional empty lists stay empty. Former unedited default mission weight/variety notes migrate to the broader weight mix and global variety rules; custom notes are retained. Rule prose remains editable notes; it does not change the algorithm.
+ 
+ Only mission-only map placements in owned regions are processed; obtainable and unverified placements are excluded. Original task IDs and reward/removal scripts remain unchanged. Results and original/current comparisons appear in **Randomizer → Map trucks**, with the existing reset actions. Randomization saves a draft only. **Stage changes** in either pane or Map trucks stages all map drafts; **Start → Apply** writes staged maps with the original archives preserved. Both randomization buttons are disabled during a run or staging operation. Mission logs hide replacement identities; optional detail entries reveal tire fallbacks in their original order.
+ 
+--- a/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
+@@ -36,6 +36,12 @@
+             rules.MissionRulesInitialized = true;
+             Save(rules);
+         }
++        var missionNotesChanged = false;
++        var missionRule3 = rules.Missions.IndexOf("Keep a mixture of light and heavy vehicles based on actual vehicle physics mass: Easy favors lighter vehicles, Moderate is balanced, and Hard favors heavier vehicles. All weights remain possible in every mode.");
++        if (missionRule3 >= 0) { rules.Missions[missionRule3] = TruckRandomizationTab.DefaultMissionRules[3]; missionNotesChanged = true; }
++        var missionRule4 = rules.Missions.IndexOf("Prefer different models within each region. Use models not yet represented before repeating, then choose among the least-used models while retaining the selected weight bias.");
++        if (missionRule4 >= 0) { rules.Missions[missionRule4] = TruckRandomizationTab.DefaultMissionRules[4]; missionNotesChanged = true; }
++        if (missionNotesChanged) Save(rules);
+         return rules;
+     }
+ 
+--- a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
++++ b/src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+@@ -17,8 +17,8 @@
+         "Randomize mission-only trucks in owned regions using enabled trucks. Keep saved assignments fixed when ownership or difficulty changes.",
+         "Choose freely across truck classes and tiers. Ignore the original truck's addon requirements and use replacement default equipment. Preserve the mission's existing reward/removal behavior.",
+         "Choose supported tires using the region difficulty tier, with variation toward neighboring categories. Use the nearest supported category, smallest size and first variant.",
+-        "Keep a mixture of light and heavy vehicles based on actual vehicle physics mass: Easy favors lighter vehicles, Moderate is balanced, and Hard favors heavier vehicles. All weights remain possible in every mode.",
+-        "Prefer different models within each region. Use models not yet represented before repeating, then choose among the least-used models while retaining the selected weight bias."
++        "Keep a broad mixture of light and heavy vehicles based on actual physics mass. Easy modestly favors lighter vehicles, Moderate is balanced, and Hard modestly favors heavier vehicles. The weight bias is limited to 3:1 so every mode retains substantial variety.",
++        "Prefer different models across all regions. Use models not yet assigned anywhere before repeating, then choose the least-used models globally. Count saved assignments and drafts once per placement, and use regional variety as a tie-breaker."
+     ];
+ 
+     private readonly Func<MissionTruckDifficulty, IProgress<RandomizationLogEntry>, Task>? _runMissions;
+@@ -215,7 +215,7 @@
+             actions.Controls.Add(_missionShowDetails);
+             actions.Controls.Add(new Label
+             {
+-                Text = "Easy favors light vehicles; Hard favors heavy vehicles. Tires use region difficulty with variance. Review/reset in Randomizer → Map trucks; stage here or there, then apply from Start.",
++                Text = "Broad weight mix: Easy leans light, Hard leans heavy. Prefer different models across all regions. Tires use region difficulty with variance. Review/reset in Randomizer → Map trucks; stage here or there, then apply from Start.",
+                 AutoSize = true, Margin = new Padding(0, 7, 0, 6), MaximumSize = new Size(400, 0)
+             });
+             layout.Controls.Add(actions, 0, 2);

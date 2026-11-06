@@ -1,0 +1,386 @@
+diff --git a/src/SnowPakTool.Desktop/WorkspaceOriginals.cs b/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
+index 83fc5a5..1ce5aed 100644
+--- a/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
++++ b/src/SnowPakTool.Desktop/WorkspaceOriginals.cs
+@@ -3,12 +3,22 @@ namespace SnowPakTool.Desktop;
+ /// <summary>Resolves the immutable original tree and sparse edited overlay for a workspace.</summary>
+ internal static class WorkspaceOriginals
+ {
+-    private const string MetadataDirectory = ".snowpaktool";
+     private const string LegacyOriginalsDirectory = "originals";
+ 
+-    public static string GetOriginalRoot(string workspace) => Path.Combine(GetWorkspaceRoot(workspace), "original_files");
++    public static string GetOriginalRoot(string workspace)
++    {
++        var root = GetWorkspaceRoot(workspace); var grouped = Path.Combine(root, "initial.pak", "original_files");
++        if (Directory.Exists(grouped)) return grouped;
++        var legacy = Path.Combine(root, "original_files");
++        return Directory.Exists(legacy) ? legacy : Path.Combine(InitialPakRoot(workspace), "original_files");
++    }
+     public static string GetUpdatedRoot(string workspace)
+     {
++        var root = GetWorkspaceRoot(workspace);
++        var initial = InitialPakRoot(workspace);
++        var legacyUpdated = Path.Combine(root, "updated");
++        if (!Directory.Exists(Path.Combine(initial, "updated")) && Directory.Exists(legacyUpdated)) return legacyUpdated;
++        if (!initial.Equals(root, StringComparison.OrdinalIgnoreCase)) return Path.Combine(initial, "updated");
+         var full = Path.GetFullPath(workspace);
+         var childUpdated = Path.Combine(full, "updated");
+         return !string.Equals(Path.GetFileName(full), "updated", StringComparison.OrdinalIgnoreCase) && Directory.Exists(childUpdated)
+@@ -16,17 +26,33 @@ internal static class WorkspaceOriginals
+             : full;
+     }
+ 
+-    private static string GetWorkspaceRoot(string workspace)
++    public static string GetWorkspaceRoot(string workspace)
+     {
+-        var full = Path.GetFullPath(workspace);
+-        return string.Equals(Path.GetFileName(full), "updated", StringComparison.OrdinalIgnoreCase)
+-            ? Path.GetDirectoryName(full)!
+-            : full;
++        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
++        if (Path.GetFileName(full).Equals("updated", StringComparison.OrdinalIgnoreCase)
++            || Path.GetFileName(full).Equals("original_files", StringComparison.OrdinalIgnoreCase)
++            || (Path.GetFileName(full).Equals("original_unpacked", StringComparison.OrdinalIgnoreCase) && !Directory.Exists(full))) full = Path.GetDirectoryName(full)!;
++        if (Path.GetFileName(full).Equals("initial.pak", StringComparison.OrdinalIgnoreCase)) full = Path.GetDirectoryName(full)!;
++        return full;
++    }
++
++    private static string InitialPakRoot(string workspace)
++    {
++        var root = GetWorkspaceRoot(workspace);
++        var grouped = Path.Combine(root, "initial.pak");
++        if (Directory.Exists(grouped)) return grouped;
++        // Existing legacy/flat workspaces remain readable until explicitly migrated.
++        if (Directory.Exists(Path.Combine(root, "original_files")) || Directory.Exists(Path.Combine(root, "updated"))
++            || Directory.Exists(Path.Combine(root, "[media]")) || Directory.Exists(Path.Combine(root, "[ps]"))) return root;
++        return grouped;
+     }
+ 
+     public static string GetMetadataPath(string workspace, params string[] pathParts)
+     {
+-        var current = Path.Combine(new[] { GetWorkspaceRoot(workspace), MetadataDirectory }.Concat(pathParts).ToArray());
++        var root = GetWorkspaceRoot(workspace);
++        var current = Path.Combine(new[] { root }.Concat(pathParts).ToArray());
++        var oldMetadata = Path.Combine(new[] { root, ".snowpaktool" }.Concat(pathParts).ToArray());
++        if (!File.Exists(current) && !Directory.Exists(current) && (File.Exists(oldMetadata) || Directory.Exists(oldMetadata))) return oldMetadata;
+         var legacy = Path.Combine(new[] { GetOriginalRoot(workspace) }.Concat(pathParts).ToArray());
+         if (!File.Exists(current) && File.Exists(legacy))
+         {
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index 13638ac..43d9d3a 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -39,6 +39,11 @@ internal sealed class MainForm : Form
+         StartPosition = FormStartPosition.CenterScreen;
+         _pakPath.Text = UserPreferences.LoadLastPakPath();
+         _workspacePath.Text = UserPreferences.LoadLastWorkspacePath();
++        if (!string.IsNullOrWhiteSpace(_workspacePath.Text))
++        {
++            try { _workspacePath.Text = WorkspaceLayout.Migrate(_workspacePath.Text).Root; }
++            catch (Exception ex) { AppendLog("Workspace layout could not be upgraded: " + ex.Message); }
++        }
+         _experienceTab = new ExperienceEditorTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+         _ownedContentTab = new OwnedContentTab(() => _workspacePath.Text.Trim(), _ownedRegionState);
+         _customGroupWipTab = new CustomGroupWipTab(_ownedContentTab.GetAvailableCustomGroupingTrucks);
+@@ -235,7 +240,8 @@ internal sealed class MainForm : Form
+         if (Directory.Exists(_workspacePath.Text)) dialog.SelectedPath = _workspacePath.Text;
+         if (dialog.ShowDialog(this) == DialogResult.OK)
+         {
+-            _workspacePath.Text = dialog.SelectedPath;
++            try { _workspacePath.Text = WorkspaceLayout.Migrate(dialog.SelectedPath).Root; }
++            catch (Exception ex) { AppendLog("Workspace layout could not be upgraded: " + ex.Message); return; }
+             RememberPaths();
+             if (_startChanges is not null) _ = _startChanges.RefreshAsync();
+         }
+@@ -537,6 +543,9 @@ internal sealed class MainForm : Form
+                 var relative = Path.GetRelativePath(root, source);
+                 if (relative.StartsWith("originals" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                     relative.StartsWith(".snowpaktool" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
++                    relative.StartsWith("region-maps" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
++                    relative.StartsWith("layout-backups" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
++                    relative.Equals("progression-settings.json", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(relative, "originals", StringComparison.OrdinalIgnoreCase)) continue;
+                 var destination = SafeDestination(mergedWorkspace, relative);
+                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+diff --git a/src/SnowPakTool.Desktop/README.md b/src/SnowPakTool.Desktop/README.md
+index 6ea45b2..1ee3674 100644
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -52,14 +52,33 @@ Packing keeps `[strings]` as top-level PAK content; only `[ps]` and `[ps_common]
+ 
+ Small improvements: Engines uses a short one-line description; Custom tires include their underlying category. The shared search uses Tab/Shift+Tab to cycle focus through matches, wrapping at either end. Farming Tractor is an app-only class for Ankatra 1160, Futom 7290RA, Kirovets K-700 and K-7M; XML TruckType values are preserved. The Start tab has a bottom activity bar that animates while unpacking/merging or packing, and resets on completion, cancellation or error. Replacement comparisons hide hood-ornament and miscellaneous addon categories and the requested technical fields, with only Compatible families and scale under Wheels.
+ 
+-Replacement outputs are stored separately under the workspace root: `.snowpaktool/region-maps/updated/level_*.pak` (or `level_*/[scene]/data_for_ssl.bin` for extracted maps). The first original is kept under `.snowpaktool/region-maps/backups/<map>/original.pak` or `original.bin`; further saves also preserve a timestamped copy of the preceding edited version. Input archives, original extracted maps and player saves are not overwritten. These map outputs are separate from the initial.pak build in the Start PAK section and are not installed into the game automatically. The catalog prefers saved maps belonging to the selected map folder and workspace. Save checks the scanned metadata hash, exact placement boundary and transform, verifies the patch by re-reading placements, verifies backup bytes, stages archive changes in a temporary file, re-reads the written metadata and checks the full source file hash before an atomic output replacement. In-game behavior has not been validated by the automated checks.
++Replacement outputs are stored separately under the workspace root: `region-maps/updated/level_*.pak` (or `level_*/[scene]/data_for_ssl.bin` for extracted maps). The first original is kept under `region-maps/backups/<map>/original.pak` or `original.bin`; further saves also preserve a timestamped copy of the preceding edited version. Input archives, original extracted maps and player saves are not overwritten. These map outputs are separate from the initial.pak build in the Start PAK section and are not installed into the game automatically. The catalog prefers saved maps belonging to the selected map folder and workspace. Save checks the scanned metadata hash, exact placement boundary and transform, verifies the patch by re-reading placements, verifies backup bytes, stages archive changes in a temporary file, re-reads the written metadata and checks the full source file hash before an atomic output replacement. In-game behavior has not been validated by the automated checks.
+ 
+ The [official truck placement documentation](https://expeditions-guides.saber.games/map_modding/creating_a_map/trucks/adding_trucks/) describes placement IDs as objective references and the vehicle defaults/upgrades used by this replacement behavior.
+ 
+ ## Start: PAK and map changes
+ 
+-The first tab is **Start**, with separate **PAK** and **Map files** sections. Both show before/after values and distinguish **In files** (green) from **Pending** (amber). The baseline for default game values is the workspace's preserved `original_files` tree; map changes use the preserved original map backup. The dashboard refreshes when Start is opened, after Start actions, or via **Refresh changes**. Search and column sorting work in both change tables.
++The first tab is **Start**, with separate **PAK** and **Map files** sections. Both show before/after values and distinguish **In files** (green) from **Pending** (amber). The baseline for default game values is the workspace's preserved `initial.pak/original_files` tree; map changes use the preserved original map backup. The dashboard refreshes when Start is opened, after Start actions, or via **Refresh changes**. Search and column sorting work in both change tables.
+ 
+ The PAK section lists actual changes in edited workspace files, including XML attribute changes, and unsaved changes in the rank XP, engine compatibility/properties and winch compatibility/properties editors. **Apply pending PAK edits** uses the editors' existing validation and save methods; successful edits move from Pending to In files. **Pack to new PAK…** saves pending editor edits before building a new archive and refuses to overwrite the selected input PAK. Files already saved from other editor tabs appear as In files.
+ 
+-Truck choices from the replacement popup are persisted in `.snowpaktool/region-maps/pending-replacements.json`, independently of edited maps. Regions-Trucks previews these choices with a Pending state and retains the original file identity for later application. Pending changes can be revised in the popup or discarded on Start. **Apply pending map changes** is the only UI action that writes replacement map files. It validates the source metadata, processes same-map edits in descending binary-offset order, saves each map once with original/previous backups, and clears only the successfully committed plans. Stale plans remain pending for review. Outputs remain separate map copies; no source archives, preserved originals or player saves are overwritten.
+\ No newline at end of file
++Truck choices from the replacement popup are persisted in `region-maps/pending-replacements.json`, independently of edited maps. Regions-Trucks previews these choices with a Pending state and retains the original file identity for later application. Pending changes can be revised in the popup or discarded on Start. **Apply pending map changes** is the only UI action that writes replacement map files. It validates the source metadata, processes same-map edits in descending binary-offset order, saves each map once with original/previous backups, and clears only the successfully committed plans. Stale plans remain pending for review. Outputs remain separate map copies; no source archives, preserved originals or player saves are overwritten.
++## Workspace layout
++
++Choose the workspace root in Start. Initial.pak data and map data are separated:
++
++```text
++workspace/
++  initial.pak/
++    original_files/
++    updated/
++  region-maps/
++    pending-replacements.json
++    updated/
++    backups/
++  progression-settings.json
++```
++
++The `initial.pak` entry above is a folder, not the source game archive. The app resolves original/edited initial.pak files there, while map outputs, map backups, pending replacements and progression settings live directly under the workspace root. Metadata is excluded from packed game archives.
++
++Older saved selections such as `workspace/updated` or `workspace/initial.pak/updated` are normalized to the workspace root. On opening or browsing to an older workspace, the app moves the old `.snowpaktool` contents to the root and groups the old `original_files` and `updated` folders under `initial.pak`. Existing conflicting destination data is retained under `layout-backups` before the active legacy data is moved. Stored metadata paths are remapped if necessary, retaining a copy of the prior JSON. Repeating the migration leaves the completed layout unchanged.
+\ No newline at end of file
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 6e3e28b..57742a3 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -26,6 +26,7 @@
+     <Compile Include="../../src/SnowPakTool.Desktop/RegionTileButton.cs" Link="RegionTileButton.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/SsoDataReader.cs" Link="SsoDataReader.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceLayout.cs" Link="WorkspaceLayout.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+     <Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs" />
+   </ItemGroup>
+diff --git a/.checks/RegionsTrucksRegression/Program.cs b/.checks/RegionsTrucksRegression/Program.cs
+index 5346746..7c3ac2d 100644
+--- a/.checks/RegionsTrucksRegression/Program.cs
++++ b/.checks/RegionsTrucksRegression/Program.cs
+@@ -11,6 +11,7 @@ internal static class Program
+     {
+         PopupRegression.Run();
+         SharedSearchRegression.Run();
++        WorkspaceLayoutRegression();
+         var workspace = Path.GetFullPath(args[0]);
+         var maps = Path.GetFullPath(args[1]);
+         var parsed = SsoDataReader.Parse("// comment\n obj = { uiDesc = \"braces { inside }\" nested = [ { truckId = \"A\" }, { truckId = \"B\" } ] }");
+@@ -345,7 +346,7 @@ internal static class Program
+         try { TruckReplacementStore.Patch(File.ReadAllBytes(bin), unnamed with { BinaryOffset = unnamed.BinaryOffset + 1 }, target); }
+         catch (InvalidDataException) { invalidRejected = true; }
+         Check(invalidRejected, "Invalid placement boundaries are rejected");
+-        var overlayRoot = Path.Combine(workspace, ".snowpaktool", "region-maps", "updated"); Directory.CreateDirectory(overlayRoot);
++        var overlayRoot = WorkspaceOriginals.GetMetadataPath(workspace, "region-maps", "updated"); Directory.CreateDirectory(overlayRoot);
+         File.Copy(saved.OutputPath, Path.Combine(overlayRoot, "level_us_01_01.pak"), overwrite: true);
+         var reloaded = RegionTruckCatalogService.Load(workspace, maps, new Dictionary<string, string>(), new Dictionary<string, string>(), new RegionTruckAvailabilityStore(Path.Combine(run, "availability.json")));
+         Check(reloaded.Entries.Single(entry => entry.PlacementId == "AWARD").Source.StartsWith(overlayRoot), "Region catalog loads saved maps ahead of input archives");
+@@ -398,6 +399,36 @@ internal static class Program
+         Console.WriteLine("PASS: replacement saving, byte-identical backups, repeat revisions, task/discovery identity, stale rejection, overlay reload and unrelated archive content.");
+     }
+ 
++    private static void WorkspaceLayoutRegression()
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "layout-" + Guid.NewGuid().ToString("N"));
++        var original = Path.Combine(root, "original_files", "[media]", "classes", "trucks", "test.xml");
++        var edited = Path.Combine(root, "updated", "[media]", "classes", "trucks", "test.xml");
++        Directory.CreateDirectory(Path.GetDirectoryName(original)!); Directory.CreateDirectory(Path.GetDirectoryName(edited)!);
++        File.WriteAllText(original, "default truck"); File.WriteAllText(edited, "edited truck");
++        var oldMaps = Path.Combine(root, ".snowpaktool", "region-maps"); Directory.CreateDirectory(Path.Combine(oldMaps, "updated"));
++        var map = Path.Combine(oldMaps, "updated", "level_us_01_01.pak"); File.WriteAllBytes(map, [1, 2, 3, 4]);
++        var plan = Path.Combine(oldMaps, "pending-replacements.json");
++        File.WriteAllText(plan, JsonSerializer.Serialize(new { Source = map, Xml = edited, Values = new[] { "unchanged", original } }));
++        File.WriteAllText(Path.Combine(root, ".snowpaktool", "progression-settings.json"), "{\"value\":7}");
++        Directory.CreateDirectory(Path.Combine(root, "region-maps")); File.WriteAllText(Path.Combine(root, "region-maps", "pending-replacements.json"), "{\"preserve\":true}");
++        var result = WorkspaceLayout.Migrate(Path.Combine(root, "updated"));
++        Check(result.Root == root && !Directory.Exists(Path.Combine(root, ".snowpaktool")) && !Directory.Exists(Path.Combine(root, "original_files"))
++            && !Directory.Exists(Path.Combine(root, "updated")), "Layout migration removes the old wrapper and root-level initial.pak folders");
++        Check(File.ReadAllText(WorkspaceOriginals.GetOriginalPath(root, "[media]/classes/trucks/test.xml")) == "default truck"
++            && File.ReadAllText(WorkspaceOriginals.GetCurrentPath(root, "[media]/classes/trucks/test.xml")) == "edited truck", "Grouped initial.pak baseline and edits are preserved");
++        Check(File.ReadAllBytes(Path.Combine(root, "region-maps", "updated", "level_us_01_01.pak")).SequenceEqual(new byte[] { 1, 2, 3, 4 })
++            && File.Exists(Path.Combine(root, "progression-settings.json")), "Map data and settings are lifted into workspace root");
++        var newPlan = File.ReadAllText(Path.Combine(root, "region-maps", "pending-replacements.json"));
++        Check(!newPlan.Contains(".snowpaktool") && newPlan.Contains("initial.pak")
++            && Directory.EnumerateFiles(Path.Combine(root, "layout-backups"), "pending-replacements.json", SearchOption.AllDirectories).Any(file => File.ReadAllText(file).Contains("preserve")),
++            "Pending paths are remapped and conflicting metadata is retained in layout backups");
++        Check(WorkspaceOriginals.GetWorkspaceRoot(Path.Combine(root, "initial.pak", "updated")) == root
++            && WorkspaceOriginals.GetUpdatedRoot(Path.Combine(root, "updated")) == Path.Combine(root, "initial.pak", "updated"), "Old and new saved workspace selections resolve to the grouped layout");
++        Check(WorkspaceLayout.Migrate(root).Moves.Count == 0, "Layout migration is safe to repeat");
++        Console.WriteLine("PASS: workspace layout migration, metadata path remapping, conflict preservation, content integrity and repeat migration.");
++    }
++
+     private static void StartPanelRegression(string workspace)
+     {
+         var pendingPak = true;
+diff --git a/src/SnowPakTool.Desktop/WorkspaceLayout.cs b/src/SnowPakTool.Desktop/WorkspaceLayout.cs
+new file mode 100644
+index 0000000..59761a8
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/WorkspaceLayout.cs
+@@ -0,0 +1,118 @@
++using System.Security.Cryptography;
++using System.Text.Json.Nodes;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record WorkspaceLayoutMove(string Source, string Destination);
++internal sealed record WorkspaceLayoutResult(string Root, IReadOnlyList<WorkspaceLayoutMove> Moves, IReadOnlyList<string> RewrittenMetadata);
++
++internal static class WorkspaceLayout
++{
++    public static WorkspaceLayoutResult Migrate(string workspace)
++    {
++        var root = WorkspaceOriginals.GetWorkspaceRoot(workspace);
++        var moves = new List<WorkspaceLayoutMove>(); var rewritten = new List<string>();
++        if (!Directory.Exists(root)) return new(root, moves, rewritten);
++        var initial = Path.Combine(root, "initial.pak");
++        if (File.Exists(initial)) throw new IOException("The initial.pak workspace folder conflicts with a file: " + initial);
++        var metadata = Path.Combine(root, ".snowpaktool");
++        var metadataJson = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        if (Directory.Exists(metadata))
++            foreach (var file in Directory.EnumerateFiles(metadata, "*.json", SearchOption.AllDirectories)) metadataJson.Add(Path.Combine(root, Path.GetRelativePath(metadata, file)));
++        var maps = Path.Combine(root, "region-maps");
++        if (Directory.Exists(maps)) foreach (var file in Directory.EnumerateFiles(maps, "*.json", SearchOption.AllDirectories)) metadataJson.Add(file);
++        metadataJson.Add(Path.Combine(root, "progression-settings.json"));
++        var mappings = new[] { (metadata, root), (Path.Combine(root, "original_files"), Path.Combine(initial, "original_files")),
++            (Path.Combine(root, "updated"), Path.Combine(initial, "updated")) };
++        var backupRoot = Path.Combine(root, "layout-backups", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff"));
++
++        void Check(string path)
++        {
++            var full = Path.GetFullPath(path);
++            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("Layout migration path is outside the workspace: " + full);
++            for (var parent = full; parent is not null && !parent.Equals(root, StringComparison.OrdinalIgnoreCase); parent = Path.GetDirectoryName(parent))
++                if ((File.Exists(parent) || Directory.Exists(parent)) && (File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0)
++                    throw new IOException("Layout migration does not follow linked paths: " + parent);
++        }
++
++        bool EqualFiles(string first, string second)
++        {
++            if (new FileInfo(first).Length != new FileInfo(second).Length) return false;
++            using var a = File.OpenRead(first); using var b = File.OpenRead(second);
++            return SHA256.HashData(a).AsSpan().SequenceEqual(SHA256.HashData(b));
++        }
++
++        void Move(string source, string destination)
++        {
++            Check(source); Check(destination);
++            if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0) throw new IOException("Layout migration does not follow linked paths: " + source);
++            if (Directory.Exists(source))
++            {
++                if (!Directory.Exists(destination) && !File.Exists(destination))
++                {
++                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!); Directory.Move(source, destination);
++                    moves.Add(new(source, destination)); return;
++                }
++                if (File.Exists(destination)) PreserveConflict(destination);
++                Directory.CreateDirectory(destination);
++                foreach (var item in Directory.EnumerateFileSystemEntries(source).ToArray()) Move(item, Path.Combine(destination, Path.GetFileName(item)));
++                Directory.Delete(source, recursive: false); return;
++            }
++            if (File.Exists(destination) && EqualFiles(source, destination))
++            { File.Delete(source); moves.Add(new(source, destination)); return; }
++            if (File.Exists(destination) || Directory.Exists(destination)) PreserveConflict(destination);
++            Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Move(source, destination);
++            moves.Add(new(source, destination));
++        }
++
++        void PreserveConflict(string destination)
++        {
++            var backup = Path.Combine(backupRoot, Path.GetRelativePath(root, destination));
++            Check(destination); Check(backup); Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
++            if (Directory.Exists(destination)) Directory.Move(destination, backup); else File.Move(destination, backup);
++            moves.Add(new(destination, backup));
++        }
++
++        if (Directory.Exists(metadata))
++        {
++            foreach (var item in Directory.EnumerateFileSystemEntries(metadata).ToArray()) Move(item, Path.Combine(root, Path.GetFileName(item)));
++            Directory.Delete(metadata, recursive: false);
++        }
++        foreach (var name in new[] { "original_files", "updated" })
++        {
++            var source = Path.Combine(root, name);
++            if (Directory.Exists(source)) Move(source, Path.Combine(initial, name));
++        }
++        foreach (var file in metadataJson.Where(File.Exists))
++        {
++            var node = JsonNode.Parse(File.ReadAllText(file)); var changed = false;
++            JsonNode? Rewrite(JsonNode? value)
++            {
++                if (value is JsonObject obj)
++                { foreach (var key in obj.Select(pair => pair.Key).ToArray()) { var before = obj[key]; var after = Rewrite(before); if (!ReferenceEquals(before, after)) obj[key] = after; } }
++                else if (value is JsonArray array)
++                { for (var i = 0; i < array.Count; i++) { var before = array[i]; var after = Rewrite(before); if (!ReferenceEquals(before, after)) array[i] = after; } }
++                else if (value is JsonValue scalar && scalar.TryGetValue<string>(out var text) && Path.IsPathRooted(text))
++                    foreach (var (oldPath, newPath) in mappings)
++                    {
++                        var normalized = text.Replace('/', Path.DirectorySeparatorChar);
++                        if (normalized.Equals(oldPath, StringComparison.OrdinalIgnoreCase) || normalized.StartsWith(oldPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
++                        { changed = true; return JsonValue.Create(newPath + normalized[oldPath.Length..]); }
++                    }
++                return value;
++            }
++            Rewrite(node);
++            if (changed)
++            {
++                var backup = Path.Combine(backupRoot, "metadata", Path.GetRelativePath(root, file));
++                Check(backup); Directory.CreateDirectory(Path.GetDirectoryName(backup)!); File.Copy(file, backup, overwrite: false);
++                var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
++                try { File.WriteAllText(temporary, node!.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); File.Move(temporary, file, overwrite: true); }
++                finally { if (File.Exists(temporary)) File.Delete(temporary); }
++                rewritten.Add(file);
++            }
++        }
++        return new(root, moves, rewritten);
++    }
++}
+diff --git a/.checks/WorkspaceLayoutMigration/WorkspaceLayoutMigration.csproj b/.checks/WorkspaceLayoutMigration/WorkspaceLayoutMigration.csproj
+new file mode 100644
+index 0000000..2a46b7c
+--- /dev/null
++++ b/.checks/WorkspaceLayoutMigration/WorkspaceLayoutMigration.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>
+diff --git a/.checks/WorkspaceLayoutMigration/Program.cs b/.checks/WorkspaceLayoutMigration/Program.cs
+new file mode 100644
+index 0000000..62bc896
+--- /dev/null
++++ b/.checks/WorkspaceLayoutMigration/Program.cs
+@@ -0,0 +1,28 @@
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++if (args.Length != 3 || args[0] != "--apply") throw new ArgumentException("Usage: --apply <workspace-root> <report-path>");
++var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(args[1]));
++if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
++string Hash(string path) { using var input = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(input)); }
++var mappings = new[] { (".snowpaktool", ""), ("original_files", "initial.pak/original_files"), ("updated", "initial.pak/updated") };
++var before = mappings.SelectMany(pair =>
++{
++    var source = Path.Combine(root, pair.Item1); var destination = Path.Combine(root, pair.Item2);
++    return !Directory.Exists(source) ? Enumerable.Empty<(string Source, string Destination, string Hash)>()
++        : Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories).Select(file => (Source: file, Destination: Path.Combine(destination, Path.GetRelativePath(source, file)), Hash: Hash(file)));
++}).ToArray();
++var assembly = Assembly.Load("SnowPakTool.Desktop");
++var result = assembly.GetType("SnowPakTool.Desktop.WorkspaceLayout")!.GetMethod("Migrate")!.Invoke(null, [root])!;
++var rewritten = ((IEnumerable<string>)result.GetType().GetProperty("RewrittenMetadata")!.GetValue(result)!).ToHashSet(StringComparer.OrdinalIgnoreCase);
++foreach (var file in before)
++{
++    if (!File.Exists(file.Destination)) throw new IOException("A migrated file is missing: " + file.Destination);
++    if (!rewritten.Contains(file.Destination) && file.Hash != Hash(file.Destination)) throw new IOException("Migrated file content changed: " + file.Destination);
++}
++File.WriteAllText(args[2], JsonSerializer.Serialize(new { Migration = JsonSerializer.SerializeToElement(result, result.GetType()), VerifiedFileCount = before.Length, Files = before },
++    new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }));
++Console.WriteLine($"Migrated workspace: {root}");
++Console.WriteLine($"Verified byte-identical content for {before.Length - rewritten.Count} files; remapped {rewritten.Count} metadata documents.");
++Console.WriteLine($"Report: {Path.GetFullPath(args[2])}");

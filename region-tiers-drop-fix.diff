@@ -1,0 +1,49 @@
+--- RegionTierListStore.cs
++++ RegionTierListStore.cs
+@@ -8,7 +8,7 @@
+     private static readonly string StateFile = Path.Combine(
+         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+         "SnowPakTool.Desktop", "region-tiers.json");
+-    private static readonly string[] Names = ["S", "A", "B", "C", "D"];
++    private static readonly string[] Names = ["S", "A", "B", "C"];
+ 
+     private sealed class RegionTierState
+     {
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -420,6 +420,15 @@
+         return (panel, tiles, description, header);
+     }
+ 
++    internal static DataObject CreateTileDragData(Panel tile)
++    {
++        // Controls are otherwise registered under their runtime subtype, which
++        // cannot be retrieved by the Panel format used by all drop targets.
++        var data = new DataObject();
++        data.SetData(typeof(Panel), tile);
++        return data;
++    }
++
+     private static void AttachTileDragHandlers(Control control, Panel tile, FlowLayoutPanel? groupList)
+     {
+         Point mouseDown = Point.Empty;
+@@ -437,7 +446,7 @@
+             {
+                 preview.Show();
+                 preview.FollowCursor();
+-                tile.DoDragDrop(tile, DragDropEffects.Move);
++                tile.DoDragDrop(CreateTileDragData(tile), DragDropEffects.Move);
+             }
+             finally
+             {
+--- README.md
++++ README.md
+@@ -20,7 +20,7 @@
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-The **Tier lists** tab contains **Truck** and **Region** sub-tabs. The **Region** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
++The **Tier lists** tab contains **Truck** and **Region** sub-tabs. The **Region** sub-tab ranks all regions found in the workspace in fixed S, A, B, and C tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+ 

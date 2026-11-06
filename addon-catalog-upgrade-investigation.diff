@@ -1,0 +1,610 @@
+diff --git a/src/SnowPakTool.Desktop/TruckEditTab.cs b/src/SnowPakTool.Desktop/TruckEditTab.cs
+index baf9948..ac12fee 100644
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -15,6 +15,7 @@ internal sealed class TruckEditTab : UserControl
+     private readonly Func<string> _getWorkspacePath;
+     private readonly OwnedContentTab _ownedContent;
+     private readonly EngineEditTab _engineEditTab;
++    private readonly AddonsTab _addonsTab;
+     private bool _pagesHostedExternally;
+     private readonly TabControl _subTabs = new() { Dock = DockStyle.Fill };
+     private readonly DataGridView _winchGrid = new()
+@@ -76,6 +77,7 @@ internal sealed class TruckEditTab : UserControl
+         _getWorkspacePath = getWorkspacePath;
+         _ownedContent = ownedContent;
+         _engineEditTab = new EngineEditTab(getWorkspacePath, ownedContent);
++        _addonsTab = new AddonsTab(getWorkspacePath) { Dock = DockStyle.Fill };
+         BuildLayout();
+         _winchHeaders = TableHeaderBehavior.Attach(_winchGrid);
+         _winchHeaders.Changed += UpdateWinchVisibleCount;
+@@ -195,7 +197,7 @@ internal sealed class TruckEditTab : UserControl
+         winchesPage.Controls.Add(winchContent);
+         _engineEditTab.Dock = DockStyle.Fill;
+         enginesPage.Controls.Add(_engineEditTab);
+-        addonsPage.Controls.Add(CreatePlaceholder("Addon editing will be added here."));
++        addonsPage.Controls.Add(_addonsTab);
+         _subTabs.TabPages.Add(winchesPage);
+         _subTabs.TabPages.Add(enginesPage);
+         _subTabs.TabPages.Add(addonsPage);
+@@ -204,6 +206,7 @@ internal sealed class TruckEditTab : UserControl
+             if (_pagesHostedExternally) return;
+             if (_subTabs.SelectedTab == winchesPage) EnsureLoaded();
+             if (_subTabs.SelectedTab == enginesPage) _engineEditTab.EnsureLoaded();
++            if (_subTabs.SelectedTab == addonsPage) _addonsTab.EnsureLoaded();
+         };
+         Controls.Add(_subTabs);
+     }
+@@ -221,6 +224,7 @@ internal sealed class TruckEditTab : UserControl
+     {
+         if (page.Name == "Winches") EnsureLoaded();
+         else if (page.Name == "Engines") _engineEditTab.EnsureLoaded();
++        else if (page.Name == "Addons") _addonsTab.EnsureLoaded();
+     }
+ 
+     private Control CreatePlaceholder(string text)
+diff --git a/README.md b/README.md
+index b44db6c..6df0c11 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,8 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++**Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
++
+ **Randomizer → Upgrades** prepares the upgrade workflow with one full-width rule pane, matching Truck randomization's add/edit/remove glyphs, automatically saved notes, Randomize / Stage changes buttons, detailed-log toggle and message area. Rules start empty and save separately from truck rules; an intentionally empty list remains empty. **Randomizer → Map upgrades** matches Map trucks' region tiles, map-folder Browse / Reload controls, region selection buttons, reset/staging controls, sortable/filterable table and resizable details split. Region tiles load from workspace metadata. Upgrade placement reading, replacement, randomization, reset and staging are not implemented yet; their action buttons remain disabled. Browse selects a folder and Reload refreshes workspace region metadata; neither scans upgrade placements or writes game files. Redistribution rules will be defined separately.
+ 
+ **Start → PAK** groups truck XML changes into one brief row per truck and state, using the localized truck name. The summary shows up to three readable field/value changes (for example fuel capacity, price, unlock rank, engine or winch compatibility), followed by a count of further changes. Hover for every original field, before/after value and source path. Pending and applied summaries retain their distinct colors. Rank XP, shared engine/winch definitions, addon files and other general edits remain separate entries. Grouping affects display only; Apply and pending counts still use the full underlying edit list.
+diff --git a/src/SnowPakTool.Desktop/AddonCatalogService.cs b/src/SnowPakTool.Desktop/AddonCatalogService.cs
+new file mode 100644
+index 0000000..beca56a
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/AddonCatalogService.cs
+@@ -0,0 +1,172 @@
++using System.Globalization;
++using System.Xml;
++using System.Xml.Linq;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record UpgradeMapReference(string Map, string Zone, int Index, string UpgradeId, string Source);
++internal sealed record AddonCatalogProperty(string Source, string Property, string Value);
++internal sealed record AddonCatalogEntry(string Name, string Type, string Category, string Id, string Family,
++    string Content, decimal? Price, decimal? UnlockRank, string Exploration, string Description, string Source,
++    IReadOnlyList<UpgradeMapReference> MapReferences, IReadOnlyList<AddonCatalogProperty> Properties);
++internal sealed record AddonCatalog(IReadOnlyList<AddonCatalogEntry> Entries,
++    IReadOnlyList<UpgradeMapReference> MapReferences, IReadOnlyList<string> Warnings);
++
++internal static class AddonCatalogService
++{
++    private sealed record Definition(string Path, string Relative, XElement Root, XElement Xml);
++
++    public static AddonCatalog Load(string workspace, IReadOnlyDictionary<string, string> names)
++    {
++        var warnings = new List<string>();
++        var references = ReadMapReferences(workspace, warnings);
++        var referencesById = references.GroupBy(item => item.UpgradeId, StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => (IReadOnlyList<UpgradeMapReference>)group.ToArray(), StringComparer.OrdinalIgnoreCase);
++        var definitions = new List<Definition>();
++        foreach (var path in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[media]", "*.xml"))
++        {
++            var relative = WorkspaceOriginals.GetRelativePath(workspace, path).Replace('\\', '/');
++            if (!new[] { "trucks", "engines", "gearboxes", "suspensions", "winches", "wheels" }
++                    .Any(folder => relative.Contains("/classes/" + folder + "/", StringComparison.OrdinalIgnoreCase))) continue;
++            try
++            {
++                var root = new XElement("Root");
++                using var reader = XmlReader.Create(new StringReader(WorkspaceDataCache.ReadAllText(path)),
++                    new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment, DtdProcessing = DtdProcessing.Prohibit });
++                while (!reader.EOF)
++                {
++                    if (reader.NodeType != XmlNodeType.Element) { reader.Read(); continue; }
++                    root.Add(XNode.ReadFrom(reader));
++                }
++                var xml = root.Elements().FirstOrDefault(element => !element.Name.LocalName.StartsWith('_'));
++                if (xml is not null) definitions.Add(new(path, relative, root, xml));
++            }
++            catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
++            { warnings.Add($"{relative}: {ex.Message}"); }
++        }
++        var byPath = definitions.ToDictionary(item => Path.GetFullPath(item.Path), StringComparer.OrdinalIgnoreCase);
++        var byName = definitions.GroupBy(item => Path.GetFileNameWithoutExtension(item.Path), StringComparer.OrdinalIgnoreCase)
++            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
++        var entries = new List<AddonCatalogEntry>();
++        foreach (var definition in definitions)
++        {
++            var kind = definition.Xml.Name.LocalName;
++            if (kind == "TruckAddon") Add(definition.Xml, "Addon", Path.GetFileNameWithoutExtension(definition.Path));
++            else
++                foreach (var variant in definition.Xml.Descendants().Where(element => element.Name.LocalName is
++                             "Engine" or "Gearbox" or "SuspensionSet" or "Winch" or "TruckTire"))
++                {
++                    var id = (string?)variant.Attribute("Name");
++                    if (!string.IsNullOrEmpty(id)) Add(variant, variant.Name.LocalName == "SuspensionSet" ? "Suspension" :
++                        variant.Name.LocalName == "TruckTire" ? "Tire" : variant.Name.LocalName, id);
++                }
++
++            void Add(XElement xml, string type, string id)
++            {
++                // Follow file parents for explicitly defined metadata. Shared/local template
++                // expansion and complete installation compatibility are deliberately not inferred.
++                var chain = new List<(Definition Definition, XElement Xml)> { (definition, xml) };
++                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { definition.Path };
++                var current = definition;
++                while ((string?)current.Root.Element("_parent")?.Attribute("File") is { Length: > 0 } parent)
++                {
++                    var local = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(current.Path)!, parent + ".xml"));
++                    if (!byPath.TryGetValue(local, out var next))
++                    {
++                        var code = Path.GetFileNameWithoutExtension(parent);
++                        if (!byName.TryGetValue(code, out var candidates) || candidates.Length != 1)
++                        { warnings.Add($"{current.Relative}: missing or ambiguous parent {parent}."); break; }
++                        next = candidates[0];
++                    }
++                    if (!seen.Add(next.Path)) { warnings.Add($"{definition.Relative}: cyclic file parent."); break; }
++                    var inherited = type == "Addon" ? next.Xml : next.Xml.Descendants()
++                        .FirstOrDefault(element => element.Name == xml.Name && (string?)element.Attribute("Name") == id);
++                    if (inherited is null) break;
++                    chain.Add((next, inherited));
++                    current = next;
++                }
++                string? Field(string path, string attribute)
++                {
++                    foreach (var item in chain)
++                    {
++                        XElement? node = item.Xml;
++                        var blocked = (string?)node.Attribute("_noinherit") == "true";
++                        foreach (var part in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
++                        {
++                            node = node?.Element(part);
++                            blocked |= (string?)node?.Attribute("_noinherit") == "true";
++                        }
++                        if ((string?)node?.Attribute(attribute) is { } value) return value;
++                        if (blocked) return null;
++                    }
++                    return null;
++                }
++                string Label(string? key, string fallback) => key is null ? fallback : names.TryGetValue(key, out var value) ? value : key;
++                var properties = new List<AddonCatalogProperty>();
++                foreach (var item in chain)
++                {
++                    Collect(item.Definition.Relative, item.Xml, "", properties);
++                    if (item.Definition.Root.Element("_parent") is { } parent) Collect(item.Definition.Relative, parent, "", properties);
++                    if (item.Definition.Root.Element("_templates") is { } templates) Collect(item.Definition.Relative, templates, "", properties);
++                }
++                var parts = definition.Relative.Split('/');
++                var dlc = Array.FindIndex(parts, part => part.Equals("_dlc", StringComparison.OrdinalIgnoreCase));
++                entries.Add(new(Label(Field("GameData/UiDesc", "UiName"), id), type, Field("GameData", "Category") ?? "",
++                    id, type == "Addon" ? Field("GameData/InstallSocket", "Type") ?? "" : Path.GetFileNameWithoutExtension(definition.Path),
++                    dlc >= 0 && dlc + 1 < parts.Length ? parts[dlc + 1] : "Base game",
++                    Number(Field("GameData", "Price")), Number(Field("GameData", "UnlockByRank")), Field("GameData", "UnlockByExploration") ?? "",
++                    Label(Field("GameData/UiDesc", "UiDesc"), ""), definition.Relative,
++                    referencesById.GetValueOrDefault(id) ?? [], properties));
++            }
++        }
++        var known = entries.Select(entry => entry.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        foreach (var group in referencesById.Where(pair => !known.Contains(pair.Key)))
++        {
++            warnings.Add($"Upgrade ID '{group.Key}' is referenced by level settings but has no catalog definition.");
++            entries.Add(new(group.Key, "Unresolved map upgrade", "", group.Key, "", "Unknown", null, null, "", "No definition found in this workspace.", "", group.Value, []));
++        }
++        return new(entries.OrderBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase).ThenBy(entry => entry.Id)
++            .ThenBy(entry => entry.Source).ToArray(), references, warnings.Distinct().ToArray());
++    }
++
++    internal static IReadOnlyList<UpgradeMapReference> ReadMapReferences(string workspace, List<string> warnings)
++    {
++        var result = new List<UpgradeMapReference>();
++        foreach (var path in WorkspaceOriginals.EnumerateCurrentFiles(workspace, "[ps]", "*.sso")
++                     .Where(path => Path.GetFileName(path).StartsWith("level_", StringComparison.OrdinalIgnoreCase)))
++        {
++            var relative = WorkspaceOriginals.GetRelativePath(workspace, path);
++            try
++            {
++                var root = SsoDataReader.Parse(WorkspaceDataCache.ReadAllText(path));
++                if (!root.Members.TryGetValue("zoneDesc", out var zones)) continue;
++                foreach (var (zone, settings) in zones.Members)
++                {
++                    if (!settings.Members.TryGetValue("props", out var props)
++                        || !props.Members.TryGetValue("ZonePropertyUpgradesGiver", out var giver)
++                        || !giver.Members.TryGetValue("upgrades", out var upgrades)) continue;
++                    for (var index = 0; index < upgrades.Items.Count; index++)
++                    {
++                        var id = upgrades.Items[index].Text;
++                        if (string.IsNullOrWhiteSpace(id)) { warnings.Add($"{relative}: {zone} upgrade {index} has no scalar ID."); continue; }
++                        result.Add(new(Path.GetFileNameWithoutExtension(path), zone, index, id, relative));
++                    }
++                }
++            }
++            catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException)
++            { warnings.Add($"{relative}: {ex.Message}"); }
++        }
++        return result;
++    }
++
++    private static decimal? Number(string? value) => decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ? number : null;
++
++    private static void Collect(string source, XElement element, string parent, List<AddonCatalogProperty> result)
++    {
++        var siblings = element.Parent?.Elements(element.Name).ToArray();
++        var suffix = siblings is { Length: > 1 } ? $"[{Array.IndexOf(siblings, element) + 1}]" : "";
++        var path = parent + element.Name.LocalName + suffix;
++        foreach (var attribute in element.Attributes()) result.Add(new(source, path + "/@" + attribute.Name, attribute.Value));
++        foreach (var child in element.Elements()) Collect(source, child, path + "/", result);
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/AddonsTab.cs b/src/SnowPakTool.Desktop/AddonsTab.cs
+new file mode 100644
+index 0000000..22612b6
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -0,0 +1,153 @@
++using System.Data;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class AddonsTab : UserControl
++{
++    private readonly Func<string> _getWorkspacePath;
++    private readonly Label _status = new() { AutoSize = true, Padding = new Padding(4, 6, 4, 4) };
++    private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
++    private readonly DataGridView _addons = CreateGrid();
++    private readonly DataGridView _properties = CreateGrid();
++    private AddonCatalog? _catalog;
++    private string? _loadedWorkspace;
++    private bool _loading;
++    private readonly Button _reload = new() { Text = "Reload addons", AutoSize = true };
++
++    public AddonsTab(Func<string> getWorkspacePath)
++    {
++        _getWorkspacePath = getWorkspacePath;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
++        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
++        var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
++        toolbar.Controls.Add(new Label { Text = "Addons", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Padding = new Padding(0, 5, 12, 0) });
++        toolbar.Controls.Add(_reload);
++        layout.Controls.Add(toolbar, 0, 0);
++        layout.Controls.Add(_status, 0, 1);
++        layout.Controls.Add(_addons, 0, 2);
++        layout.Controls.Add(_description, 0, 3);
++        layout.Controls.Add(_properties, 0, 4);
++        Controls.Add(layout);
++        _properties.Columns.Add("Property", "Selected addon / upgrade property");
++        _properties.Columns.Add("Value", "Value");
++        _properties.Columns.Add("Source", "Source file");
++        _properties.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
++        TableHeaderBehavior.Attach(_addons);
++        TableHeaderBehavior.Attach(_properties);
++        _addons.CurrentCellChanged += (_, _) => ShowProperties();
++        _addons.DataBindingComplete += (_, _) => ShowProperties();
++        _reload.Click += async (_, _) => await LoadAsync(force: true);
++        AppColors.Changed += RefreshColors;
++        Disposed += (_, _) => AppColors.Changed -= RefreshColors;
++        RefreshColors(this, EventArgs.Empty);
++    }
++
++    public void EnsureLoaded() => _ = EnsureLoadedAsync();
++
++    public Task EnsureLoadedAsync() => LoadAsync(force: false);
++
++    private async Task LoadAsync(bool force)
++    {
++        if (_loading || IsDisposed) return;
++        var workspace = _getWorkspacePath().Trim();
++        if (!force && string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase)) return;
++        _catalog = null;
++        _loadedWorkspace = null;
++        _addons.DataSource = null;
++        _properties.Rows.Clear();
++        _description.Clear();
++        if (workspace.Length == 0 || !Directory.Exists(workspace))
++        {
++            _status.Text = "Choose an extracted workspace on the Start tab to list addons and upgrades.";
++            return;
++        }
++        _loading = true;
++        _reload.Enabled = false;
++        _status.Text = "Reading addon/component definitions and level upgrade rewards…";
++        try
++        {
++            if (force) await WorkspaceDataCache.PreloadAsync(workspace, forceReload: true);
++            else await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++            var names = WorkspaceDataCache.GetLocalizedNames(workspace);
++            var catalog = await Task.Run(() => AddonCatalogService.Load(workspace, names));
++            if (IsDisposed || !string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) return;
++            _catalog = catalog;
++            _loadedWorkspace = workspace;
++            ApplyFilter();
++        }
++        catch (Exception ex) { if (!IsDisposed) _status.Text = $"Could not load addons: {ex.Message}"; }
++        finally
++        {
++            _loading = false;
++            if (!IsDisposed)
++            {
++                _reload.Enabled = true;
++                if (!string.Equals(workspace, _getWorkspacePath().Trim(), StringComparison.OrdinalIgnoreCase)) await LoadAsync(force: false);
++            }
++        }
++    }
++
++    private void ApplyFilter()
++    {
++        if (_catalog is null) return;
++        var visible = _catalog.Entries;
++        var table = new DataTable();
++        foreach (var column in new[] { "Addon / upgrade", "Type", "Category", "ID", "ID scope", "Socket / family", "Content", "Exploration unlock", "Referenced maps", "Source file" }) table.Columns.Add(column);
++        foreach (var column in new[] { "Price", "Unlock rank", "Map reward entries" }) table.Columns.Add(column, typeof(decimal));
++        table.Columns.Add("Entry", typeof(AddonCatalogEntry));
++        foreach (var entry in visible)
++            table.Rows.Add(entry.Name, entry.Type, entry.Category, entry.Id, entry.Type == "Tire" ? "Local tire name" : entry.Type == "Unresolved map upgrade" ? "Unresolved reward ID" : "Global upgrade ID", entry.Family, entry.Content, entry.Exploration,
++                string.Join(", ", entry.MapReferences.Select(item => item.Map).Distinct(StringComparer.OrdinalIgnoreCase)), entry.Source,
++                (object?)entry.Price ?? DBNull.Value, (object?)entry.UnlockRank ?? DBNull.Value, (decimal)entry.MapReferences.Count, entry);
++        _addons.DataSource = table;
++        _addons.Columns["Entry"]!.Visible = false;
++        foreach (DataGridViewColumn column in _addons.Columns)
++        {
++            column.Width = column.Name switch { "Addon / upgrade" => 210, "ID" or "Socket / family" => 260, "Referenced maps" or "Source file" => 300, _ => 125 };
++            if (column.ValueType == typeof(decimal)) column.DefaultCellStyle.Format = "N0";
++        }
++        _status.Text = $"{visible.Count} addon/component definitions · {_catalog.MapReferences.Count} level-setting reward entries. "
++            + "Read-only catalog. Header funnels filter columns; map references do not verify physical zones.";
++        if (_catalog.Warnings.Count > 0) _status.Text += $" {_catalog.Warnings.Count} warnings (see details).";
++        ShowProperties();
++    }
++
++    private void ShowProperties()
++    {
++        _properties.Rows.Clear();
++        _description.Clear();
++        if (_addons.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not AddonCatalogEntry entry) return;
++        _description.Text = entry.Description + Environment.NewLine
++            + "Metadata follows explicit file parents; shared/local templates are shown below without expansion. Blank = not resolved. Socket/family identifies definitions, not guaranteed truck compatibility. Tire names are local to their wheel family and are not automatically treated as global reward IDs."
++            + (_catalog?.Warnings.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, _catalog.Warnings) : "");
++        foreach (var reference in entry.MapReferences)
++            _properties.Rows.Add($"Map reward: {reference.Map} / {reference.Zone} / upgrades[{reference.Index}]", reference.UpgradeId, reference.Source);
++        foreach (var property in entry.Properties) _properties.Rows.Add(property.Property, property.Value, property.Source);
++        TableHeaderBehavior.Refresh(_properties);
++    }
++
++    private void RefreshColors(object? sender, EventArgs e)
++    {
++        foreach (var grid in new[] { _addons, _properties })
++        {
++            grid.BackgroundColor = grid.DefaultCellStyle.BackColor = AppColors.Get("Surface");
++            grid.AlternatingRowsDefaultCellStyle.BackColor = AppColors.Get("AlternateRow");
++            grid.DefaultCellStyle.SelectionBackColor = AppColors.Get("SelectionBlue");
++            grid.DefaultCellStyle.SelectionForeColor = SystemColors.ControlText;
++        }
++    }
++
++    private static DataGridView CreateGrid() => new()
++    {
++        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
++        SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
++        Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
++        ColumnHeadersDefaultCellStyle = { Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold) },
++        RowTemplate = { Height = 26 }
++    };
++}
+diff --git a/upgrade-map-investigation.md b/upgrade-map-investigation.md
+new file mode 100644
+index 0000000..0319fe3
+--- /dev/null
++++ b/upgrade-map-investigation.md
+@@ -0,0 +1,69 @@
++# Upgrade storage and replacement investigation
++
++Investigated 4 November 2026 against the current workspace and installed SnowRunner archives. Installed archives and workspace game data were read only. Findings describe this data snapshot, not a guarantee about other game versions or mods.
++
++## Findings
++
++Upgrade pickups link two separate resources by **zone ID**:
++
++| Resource | Role | Observed example |
++| --- | --- | --- |
++| `level_us_01_01.pak` → `[scene]/data_for_ssl.bin` | Compiled map scene, including the pickup zone's identity and map presentation; physical location stays with this scene | `US_01_01_UPGRADE_CK_SUSPENSION` |
++| `initial.pak` → extracted `[ps]/level_us_01_01.sso` | Zone settings: `zoneDesc.<zone>.props.ZonePropertyUpgradesGiver.upgrades[]` lists awarded component IDs | `chevrolet_ck1500_suspension_high` |
++| `initial.pak` → `[media]/classes/...` and `[media]/_dlc/...` | Part definitions, localized names, price, exploration/rank unlock flags, installation sockets/component families | `classes/suspensions/s_chevrolet_ck1500.xml`, variant `Name="chevrolet_ck1500_suspension_high"` |
++
++The map archive also has a `level_us_01_01_brands.desc_block` resource description referencing `<ps>:level_us_01_01.sso`. The actual extracted zone reward settings are in the workspace's initial-PAK script tree. The visible upgrade wreck/props and scene zone identity are not the reward definition.
++
++For Black River, the level settings contain seven upgrade givers. Examples:
++
++| Zone ID | Reward ID | Definition kind |
++| --- | --- | --- |
++| `US_01_01_UPGRADE_CK_SUSPENSION` | `chevrolet_ck1500_suspension_high` | Named suspension variant |
++| `US_01_01_UPGRADE_SCOUT_OLD_ENGINE` | `us_scout_old_engine_ck1500` | Named engine variant |
++| `US_01_01_UPGRADE_G_SCOUT_OFFROAD` | `g_scout_offroad` | Named gearbox variant |
++| `US_01_01_UPGRADE_FLEESTAR_ALLWHEELS` | `international_fleetstar_f2070a_transferbox_allwheels` | TruckAddon file ID; AWD category |
++
++File IDs and variant IDs must be distinguished. An engine container such as `e_us_scout_old_ck1500.xml` is not the ID that the pickup awards. Its contained Engine's `Name` is the reward ID. TruckAddon pickups such as AWD use the addon filename without `.xml`. A suspension-looking zone name does not impose the reward's component type: the explicit upgrades list controls the award. Zone names should remain stable during redistribution.
++
++## Inventory and scene checks
++
++The catalog built from the active workspace overlay contains 6,091 parsed addon/component definitions, plus one unresolved reward row. Breakdown: 5,182 TruckAddons, 139 engines, 88 gearboxes, 220 suspension variants, 15 winches and 447 tires. Tire `Name` values are local to a wheel family; the catalog labels that scope and does not equate them to global pickup reward IDs.
++
++The current level scripts contain **166 reward entries in 166 zones across 56 maps**, with 166 distinct reward IDs. Every zone ID matched an exact null-terminated, uint16-length-prefixed string in that installed map's `data_for_ssl.bin`. The archive lookup used the exact map name, with `_crop` as a filename fallback. This proves the identity link, not complete decoding of zone geometry. Coordinates, rotation, discovery visibility and trigger shapes have not been decoded or changed by this work.
++
++165 reward IDs resolve directly to catalog definitions. `wheels_extend_kirovets_k7m_tire_1`, referenced in `level_ru_08_03.sso`, remains unresolved: the corresponding wheel-family file declares a TruckTire with `Name="tire"`, rather than that exact global reward ID. Do not invent an alias or include this item in an automatic replacement pool until the game's tire-unlock mapping is understood.
++
++The catalog reports six additional source-data warnings: two XML files with undeclared `region` prefixes, a trailer XML with a duplicate attribute, and three cosmetic addons whose named parent definitions are unavailable/ambiguous in the workspace. These are surfaced instead of silently inventing metadata. Local/shared XML templates are shown as source properties without expansion. Explicit file-parent metadata is followed, including inherited AWD install sockets and `_noinherit` boundaries. Full vehicle installation compatibility is not calculated.
++
++## Is replacement possible?
++
++**Yes: replacing the reward at an existing pickup is supported by the data structure and the official zone specification.** Keep the zone ID and scene unchanged and replace the appropriate string in its `upgrades` list. Swapping these lists across maps reorganizes the rewards while preserving pickup locations. A zone can list multiple rewards; future persistence must identify a reward by source file + zone ID + array position, not just by current reward ID.
++
++An isolated copy of Black River's extracted settings was changed from `chevrolet_ck1500_suspension_high` to `us_scout_old_engine_2` at the same zone. The production reader reparsed the changed file and checked that all seven reward entries remain, the selected zone awards the new ID, and the workspace source stays unchanged. This demonstrates a cross-category reference change at the settings level. It has **not** been packed, loaded or collected in the game, so runtime behavior remains to be verified on a disposable game setup/save.
++
++For these reward swaps, the write target is the **initial PAK's level SSO settings**, through the existing cache-block/PAK pipeline. The truck scene binary writer is not the appropriate writer. Physically relocating, adding or removing pickup zones is a separate operation requiring more scene-format work.
++
++A future writer should:
++
++1. Preserve source hashes, original reward IDs, zone IDs, array order and unrelated script text. Use an exact parsed/scoped edit rather than replacing an ID everywhere in a file.
++2. Retain drafts/staged edits and conflict checks independently from truck replacements, then apply the changed level settings through Start's PAK workflow.
++3. Preserve a complete reward pool when redistributing so exploration-locked parts remain discoverable. Check ownership, content availability and component definitions; avoid unresolved IDs.
++4. Review `UnlockByExploration`, rank locks and any content-specific lock/unlock settings. Replacing the pickup reference alone does not rewrite those independent restrictions or vehicle compatibility.
++5. Verify behavior in a new/disposable save and separately assess existing-save collected/unlocked state. This investigation did not inspect or alter saves and does not establish how already-collected zones behave after a change.
++
++## UI delivered
++
++Editors → Addons now uses Cargo's table, description and source-properties layout. It loads in the background and provides Reload addons, shared sortable/filterable headers, localized names, definition type/category, scoped IDs, socket/family, content, explicit/inherited price/rank/exploration metadata and referenced maps. Selecting a row lists the precise map, zone, array index and SSO source alongside XML properties and their source files. This catalog is read only; no upgrade randomization or staging has been enabled.
++
++## Reproducible evidence
++
++- `.checks/AddonResearch/Program.cs`: real-workspace inventory, inherited AWD metadata, map-reference joins, isolated replacement check and UI rendering.
++- `.checks/AddonResearch/bin/Release/net10.0-windows/inventory.json`: detailed inventory and warnings.
++- `.checks/AddonResearch/InspectScenes.py` and `scene-links.json`: read-only scene/zone matching, with offsets and archive paths.
++- `.checks/AddonResearch/bin/Release/net10.0-windows/replacement-proof/[ps]/level_us_01_01.sso`: isolated replacement sample only.
++
++Official references:
++
++- [UpgradesGiver zones](https://expeditions-guides.saber.games/map_modding/creating_a_map/zones/snowrunner_zones/upgrades_giver_zones/): the upgrades list contains IDs of the awards; multiple awards are supported.
++- [How to identify IDs of truck parts](https://expeditions-guides.saber.games/map_modding/creating_a_map/trucks/how_to_identify_ids_of_truck_parts/): part definitions and IDs live in initial.pak, including DLC definitions.
++- [Locking and unlocking trucks and upgrades](https://expeditions-guides.saber.games/map_modding/creating_a_map/other_map_settings/content_settings/locking_and_unlocking_trucks_and_upgrades/): content locks and level-based availability are separate settings to consider.
+diff --git a/.checks/AddonResearch/Program.cs b/.checks/AddonResearch/Program.cs
+new file mode 100644
+index 0000000..5132e5b
+--- /dev/null
++++ b/.checks/AddonResearch/Program.cs
+@@ -0,0 +1,78 @@
++using System.Collections;
++using System.Reflection;
++using System.Text.Json;
++
++internal static class Program
++{
++    static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    static object P(object value, string name) => value.GetType().GetProperty(name)!.GetValue(value)!;
++    static object F(object value, string name) => value.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(value)!;
++    static object? Call(object value, string name, params object[] args) => value.GetType().GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(value, args);
++    static object[] Items(object value) => ((IEnumerable)value).Cast<object>().ToArray();
++    static void Check(bool value, string label) { if (!value) throw new Exception(label); }
++
++    [STAThread] static void Main()
++    {
++        Application.SetHighDpiMode(HighDpiMode.SystemAware);
++        var workspace = @"S:\snowrunner_Shenanigans\AI\workspace";
++        using var canvas = new Panel { Size = new Size(1100, 850) };
++        using var tab = (Control)Activator.CreateInstance(T("AddonsTab"), new Func<string>(() => workspace))!;
++        tab.Dock = DockStyle.Fill;
++        canvas.Controls.Add(tab); canvas.CreateControl(); tab.CreateControl();
++        var start = DateTime.UtcNow;
++        var load = (Task)Call(tab, "EnsureLoadedAsync")!;
++        while (!load.IsCompleted) { Application.DoEvents(); Thread.Sleep(10); }
++        load.GetAwaiter().GetResult();
++        var catalog = F(tab, "_catalog");
++        Check(catalog is not null, ((Label)F(tab, "_status")).Text);
++        var entries = Items(P(catalog!, "Entries"));
++        var references = Items(P(catalog!, "MapReferences"));
++        var warnings = Items(P(catalog!, "Warnings"));
++        Console.WriteLine($"Loaded {entries.Length} definitions, {references.Length} refs, {warnings.Length} warnings.");
++        foreach (var warning in warnings.Take(8)) Console.WriteLine(warning);
++        var engine = entries.Single(e => (string)P(e, "Id") == "us_scout_old_engine_ck1500");
++        Console.WriteLine($"CK engine type {P(engine, "Type")}, refs {Items(P(engine, "MapReferences")).Length}");
++        Check((string)P(engine, "Type") == "Engine" && Items(P(engine, "MapReferences")).Any(r => (string)P(r, "Zone") == "US_01_01_UPGRADE_SCOUT_OLD_ENGINE"), "variant ID joins exact map zone");
++        var awd = entries.Single(e => (string)P(e, "Id") == "international_fleetstar_f2070a_transferbox_allwheels");
++        Check((string)P(awd, "Family") == "FleetstarF2070aTransferBox", "AWD inherits install socket from file parent");
++        Check(Items(P(awd, "Properties")).Any(p => ((string)P(p, "Source")).Contains("transferbox_default")), "inherited property provenance retained");
++        Check(references.Count(r => (string)P(r, "Map") == "level_us_01_01") == 7, "Black River contains seven upgrade rewards");
++        // Change only an upgrade token in an isolated copy, then read it through
++        // the production reader. The real workspace and installed archives stay untouched.
++        var proof = Path.Combine(AppContext.BaseDirectory, "replacement-proof");
++        Directory.CreateDirectory(Path.Combine(proof, "[ps]"));
++        var source = Path.Combine(workspace, "initial.pak", "original_files", "[ps]", "level_us_01_01.sso");
++        var original = File.ReadAllText(source);
++        var replacement = original.Replace("\"chevrolet_ck1500_suspension_high\"", "\"us_scout_old_engine_2\"", StringComparison.Ordinal);
++        Check(replacement != original && original.Split("\"chevrolet_ck1500_suspension_high\"").Length == 2, "exactly one source reward token");
++        File.WriteAllText(Path.Combine(proof, "[ps]", "level_us_01_01.sso"), replacement);
++        var proofWarnings = new List<string>();
++        var proofReferences = Items(T("AddonCatalogService").GetMethod("ReadMapReferences", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, new object[] { proof, proofWarnings })!);
++        Check(proofWarnings.Count == 0 && proofReferences.Length == 7, "isolated changed level remains readable with all zones");
++        Check(proofReferences.Single(r => (string)P(r, "Zone") == "US_01_01_UPGRADE_CK_SUSPENSION") is { } changed && (string)P(changed, "UpgradeId") == "us_scout_old_engine_2", "cross-category replacement resolves through the same existing zone");
++        Check(File.ReadAllText(source) == original, "workspace input unchanged");
++        var grid = (DataGridView)F(tab, "_addons");
++        Check(grid.ReadOnly && grid.Rows.Count == entries.Length, "read-only catalog is fully bound");
++        var index = grid.Rows.Cast<DataGridViewRow>().Single(r => (string)r.Cells["ID"].Value == "international_fleetstar_f2070a_transferbox_allwheels").Index;
++        grid.CurrentCell = grid.Rows[index].Cells[0];
++        canvas.PerformLayout(); Application.DoEvents();
++        Check(((DataGridView)F(tab, "_properties")).Rows.Cast<DataGridViewRow>().Any(r => Convert.ToString(r.Cells[0].Value)!.StartsWith("Map reward:")), "selected details show map source and zone");
++        using (var bitmap = new Bitmap(canvas.Width, canvas.Height)) { canvas.DrawToBitmap(bitmap, new Rectangle(Point.Empty, canvas.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, "addons.png")); }
++        var summary = new
++        {
++            Definitions = entries.Length,
++            Types = entries.GroupBy(e => (string)P(e, "Type")).ToDictionary(g => g.Key, g => g.Count()),
++            RewardEntries = references.Length,
++            Zones = references.Select(r => P(r, "Map") + "|" + P(r, "Zone")).Distinct().Count(),
++            Maps = references.Select(r => P(r, "Map")).Distinct().Count(),
++            UniqueRewardIds = references.Select(r => P(r, "UpgradeId")).Distinct().Count(),
++            Warnings = warnings,
++            References = references,
++            Entries = entries.Select(e => new { Id = P(e,"Id"), Type = P(e,"Type"), Name = P(e,"Name"), Source = P(e,"Source"), Family = P(e,"Family"), Exploration = P(e,"Exploration") })
++        };
++        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "inventory.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
++        Console.WriteLine($"PASS real catalog: {entries.Length} definitions, {references.Length} rewards, {summary.Zones} zones, {summary.Maps} maps, {summary.UniqueRewardIds} distinct reward IDs, {warnings.Length} warnings. Loaded and rendered in {(DateTime.UtcNow-start).TotalSeconds:F1}s.");
++        foreach (var warning in warnings.Take(15)) Console.WriteLine(warning);
++    }
++}
+diff --git a/.checks/AddonResearch/AddonResearch.csproj b/.checks/AddonResearch/AddonResearch.csproj
+new file mode 100644
+index 0000000..05e367c
+--- /dev/null
++++ b/.checks/AddonResearch/AddonResearch.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Release/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup></Project>
+diff --git a/.checks/AddonResearch/InspectScenes.py b/.checks/AddonResearch/InspectScenes.py
+new file mode 100644
+index 0000000..446d483
+--- /dev/null
++++ b/.checks/AddonResearch/InspectScenes.py
+@@ -0,0 +1,43 @@
++"""Read installed scene archives; write only research results under .checks."""
++from pathlib import Path
++import collections
++import json
++import struct
++import zipfile
++
++root = Path(__file__).resolve().parent
++inventory = json.loads((root / 'bin/Release/net10.0-windows/inventory.json').read_text(encoding='utf-8'))
++client = Path('S:/SteamLibrary/steamapps/common/SnowRunner/preload/paks/client')
++groups = collections.defaultdict(list)
++for reference in inventory['References']:
++    groups[reference['Map']].append(reference)
++results = []
++for name, references in sorted(groups.items()):
++    source = client / (name + '.pak')
++    if not source.exists():
++        source = client / (name + '_crop.pak')
++    if not source.exists():
++        results.append({'Map': name, 'Status': 'No installed archive', 'Zones': [r['Zone'] for r in references]})
++        continue
++    with zipfile.ZipFile(source) as archive:
++        entry = next((e for e in archive.namelist() if e.replace('\\', '/') == '[scene]/data_for_ssl.bin'), None)
++        if entry is None:
++            results.append({'Map': name, 'Status': 'No scene entry'})
++            continue
++        data = archive.read(entry)
++    zones = []
++    for reference in references:
++        encoded = reference['Zone'].encode('ascii') + b'\0'
++        needle = struct.pack('<H', len(encoded)) + encoded
++        zones.append({'Zone': reference['Zone'], 'UpgradeId': reference['UpgradeId'], 'SceneStringOffset': data.find(needle), 'Occurrences': data.count(needle)})
++    results.append({'Map': name, 'Archive': str(source), 'Status': 'Read', 'Zones': zones})
++output = root / 'scene-links.json'
++output.write_text(json.dumps(results, indent=2), encoding='utf-8')
++read = [r for r in results if r['Status'] == 'Read']
++checked = [z for r in read for z in r['Zones']]
++print(f"Read {len(read)}/{len(results)} referenced map scenes. Matched {sum(z['SceneStringOffset'] >= 0 for z in checked)}/{len(checked)} exact length-prefixed zone IDs.")
++for result in results:
++    if result['Status'] != 'Read': print(result)
++    else:
++        for zone in result['Zones']:
++            if zone['SceneStringOffset'] < 0: print('Unmatched', result['Map'], zone['Zone'])

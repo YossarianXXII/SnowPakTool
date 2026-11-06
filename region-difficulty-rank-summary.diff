@@ -1,0 +1,112 @@
+--- MainForm.cs
++++ MainForm.cs
+@@ -127,7 +127,7 @@
+         var tierListsPage = new TabPage("Tier lists");
+         var tierListTabs = new TabControl { Dock = DockStyle.Fill };
+         var tierListPage = new TabPage("Truck");
+-        var regionTierListPage = new TabPage("Region");
++        var regionTierListPage = new TabPage("Region Difficulty");
+         var truckEditPage = new TabPage("Truck edit");
+         var gameDataPage = new TabPage("Game data");
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -49,7 +49,7 @@
+ 
+         var intro = new Label
+         {
+-            Text = _regionList ? "Drag regions into tiers or back to Unsorted." : _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
++            Text = _regionList ? "Rank regions by difficulty from S (hardest) to C (easiest). Drag regions into tiers or back to Unsorted." : _tierList ? "Drag trucks into tiers or back to Unsorted." : "Here you can make custom classes. These can be used instead of the games classes in some customization.",
+             AutoSize = true,
+             Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f, FontStyle.Bold),
+             Padding = new Padding(4, 4, 4, 10)
+--- ExperienceEditorTab.cs
++++ ExperienceEditorTab.cs
+@@ -834,12 +834,15 @@
+     public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
+     {
+         if (!string.Equals(_loadedWorkspace, workspace, StringComparison.OrdinalIgnoreCase) || _rankSettingsPath is null || _loadedValues is null) yield break;
+-        for (var i = 0; i < Math.Min(_grid.Rows.Count, _loadedValues.Count); i++)
+-        {
+-            var value = Convert.ToString(_grid.Rows[i].Cells["UpdatedXP"].Value, CultureInfo.InvariantCulture) ?? "";
+-            var before = _loadedValues[i].ToString(CultureInfo.InvariantCulture);
+-            if (value != before) yield return new(WorkspaceChange.Pending, _rankSettingsPath, $"Rank {i + 2} XP", before, value);
+-        }
++        if (!IsDirty) yield break;
++        if (!TryReadGridValues(out var values))
++        {
++            yield return new(WorkspaceChange.Pending, _rankSettingsPath, RankProgressionChanges.Property,
++                RankProgressionChanges.Summary(_loadedValues), "Invalid XP values — review Experience / Ranks");
++            yield break;
++        }
++        var change = RankProgressionChanges.Create(WorkspaceChange.Pending, _rankSettingsPath, _loadedValues, values);
++        if (change is not null) yield return change;
+     }
+ 
+     public void SavePendingChanges() => SaveSettings();
+--- WorkspaceChangeAudit.cs
++++ WorkspaceChangeAudit.cs
+@@ -33,6 +33,18 @@
+                         if (rows.Count > count) continue;
+                     }
+                     catch (System.Xml.XmlException) { }
++                }
++                if (Path.GetFileName(path).Equals("rank_settings.sso", StringComparison.OrdinalIgnoreCase))
++                {
++                    var beforeText = File.ReadAllText(original); var afterText = File.ReadAllText(path);
++                    if (RankProgressionChanges.TryRead(beforeText, out var oldRanks) &&
++                        RankProgressionChanges.TryRead(afterText, out var newRanks))
++                    {
++                        var rankChange = RankProgressionChanges.Create(WorkspaceChange.InFiles, relative, oldRanks, newRanks);
++                        if (rankChange is not null) rows.Add(rankChange);
++                        // Other settings in this file still need their own audit entry.
++                        if (RankProgressionChanges.WithoutValues(beforeText) == RankProgressionChanges.WithoutValues(afterText)) continue;
++                    }
+                 }
+                 if (new[] { ".sso", ".str", ".txt", ".xml" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+                 {
+--- README.md
++++ README.md
+@@ -20,7 +20,7 @@
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-The **Tier lists** tab contains **Truck** and **Region** sub-tabs. The **Region** sub-tab ranks all regions found in the workspace in fixed S, A, B, and C tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
++The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, and C tiers, from hardest to easiest. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+ 
+--- /dev/null
++++ RankProgressionChanges.cs
+@@ -0,0 +1,31 @@
++using System.Globalization;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal static class RankProgressionChanges
++{
++    public const string Property = "Rank progression (rankExp)";
++    private static readonly Regex Array = new(@"\brankExp\s*=\s*\[(?<body>.*?)\]", RegexOptions.Singleline);
++
++    public static string Summary(IReadOnlyList<int> values) =>
++        $"{values.Count} steps; {values.Sum(value => (long)value).ToString("N0", CultureInfo.InvariantCulture)} XP total";
++
++    public static WorkspaceChange? Create(string state, string target, IReadOnlyList<int> before, IReadOnlyList<int> after) =>
++        before.SequenceEqual(after) ? null : new(state, target, Property, Summary(before), Summary(after));
++
++    public static bool TryRead(string text, out List<int> values)
++    {
++        values = [];
++        var match = Array.Match(text);
++        if (!match.Success) return false;
++        foreach (var token in match.Groups["body"].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
++        {
++            if (!int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) || value < 0) return false;
++            values.Add(value);
++        }
++        return true;
++    }
++
++    public static string WithoutValues(string text) => Array.Replace(text, "rankExp = []", 1);
++}

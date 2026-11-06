@@ -1,0 +1,46 @@
+--- a/src/SnowPakTool.Desktop/TruckCellHoverPreview.cs
++++ b/src/SnowPakTool.Desktop/TruckCellHoverPreview.cs
+@@ -10,18 +10,26 @@
+         StartPosition = FormStartPosition.Manual;
+         AutoScaleDimensions = new SizeF(96, 96);
+         AutoScaleMode = AutoScaleMode.Dpi;
+-        ClientSize = new Size(354, 290);
++        ClientSize = new Size(386, 290);
+         BackColor = SystemColors.Control;
+-        AccessibleName = "Current and original truck comparison";
++        AccessibleName = "Original to current truck comparison";
+         var current = new CustomTruck(entry.TruckCode, entry.Truck, entry.Class);
+         var original = new CustomTruck(entry.BaselineTruckCode, entry.BaselineTruck,
+             string.IsNullOrEmpty(entry.OriginalClass) ? entry.FileEntry?.Class ?? entry.Class : entry.OriginalClass);
+-        AddTile(entry.FileEntry is null ? "Current" : "Current (pending)", current, 8);
+-        AddTile("Original", original, 180);
++        AddTile("Original", original, 8);
++        var arrowFont = new Font("Segoe MDL2 Assets", 20f);
++        Disposed += (_, _) => arrowFont.Dispose();
+         Controls.Add(new Label
+         {
+-            Text = $"Current ID: {current.Code}{Environment.NewLine}Original ID: {original.Code}",
+-            Location = new Point(8, 250), Size = new Size(338, 34), AutoEllipsis = true
++            Text = "\uE72A", Font = arrowFont, TextAlign = ContentAlignment.MiddleCenter,
++            Location = new Point(174, 26), Size = new Size(38, 210),
++            AccessibleName = "Replaced by", TabStop = false
++        });
++        AddTile(entry.FileEntry is null ? "Current" : "Current (pending)", current, 212);
++        Controls.Add(new Label
++        {
++            Text = $"Original ID: {original.Code}{Environment.NewLine}Current ID: {current.Code}",
++            Location = new Point(8, 250), Size = new Size(370, 34), AutoEllipsis = true
+         });
+     }
+ 
+--- a/README.md
++++ b/README.md
+@@ -32,7 +32,7 @@
+ 
+ Map truck replacements are queued in the popup and written from **Start → Map files**. The map writer updates both scene size boundaries, preserves the PAK entry order and each entry's compression method, and copies unrelated ZIP records unchanged. Original maps and previous edited versions remain backed up under `workspace/region-maps/backups`. **Repair saved maps** rebuilds outputs produced by the older writer using their original archive layout, while retaining the selected trucks. Repair verifies the unchanged scene payload and unrelated archive contents before replacing a workspace output; it never writes installed game files. Reload and review any pending replacements after repairing their source map.
+ 
+-Regions-Trucks uses `workspace/region-maps/backups/<map>/original.pak` (or `original.bin`) as the baseline whenever present. Saved workspace maps override that baseline and pending replacements override the displayed rows. Deleting an updated map therefore restores the backed-up placements on reload or when returning to the tab. Maps without a workspace backup are read from the selected map folder. Workspace backups and updates can also be used without the installed map folder. Truck cells that differ from the preserved original placement are highlighted: yellow for pending replacements and green for applied replacements. Hovering a truck cell shows the current and original truck tiles side by side with their IDs, including after repeated replacements and reloads. The preview follows sorted rows and closes when scrolling or leaving the cell; equipment tooltips remain available. Restoring the original model clears the change highlight.
++Regions-Trucks uses `workspace/region-maps/backups/<map>/original.pak` (or `original.bin`) as the baseline whenever present. Saved workspace maps override that baseline and pending replacements override the displayed rows. Deleting an updated map therefore restores the backed-up placements on reload or when returning to the tab. Maps without a workspace backup are read from the selected map folder. Workspace backups and updates can also be used without the installed map folder. Truck cells that differ from the preserved original placement are highlighted: yellow for pending replacements and green for applied replacements. Hovering a truck cell shows the original truck tile on the left and current truck tile on the right, with a right-pointing glyph arrow between them and their IDs below, including after repeated replacements and reloads. The preview follows sorted rows and closes when scrolling or leaving the cell; equipment tooltips remain available. Restoring the original model clears the change highlight.
+ 
+ As an example, here's how to increase first and third person FOV slider ranges (they're normally limited to 130 max):
+ 

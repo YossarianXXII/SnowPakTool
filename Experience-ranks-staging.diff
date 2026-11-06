@@ -1,0 +1,277 @@
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -132,7 +132,9 @@
+     private bool _loadingProgressionSettings;
+     private static Color BaseGameRegionColor => AppColors.Get("BaseGameRegion");
+     private readonly Button _reloadButton = new() { Text = "Reload", AutoSize = true };
+-    private readonly Button _saveButton = new() { Text = "Save rank XP", AutoSize = true, Enabled = false };
++    private readonly Button _saveButton = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
++    private readonly Button _revertUnstaged = new() { Text = "Revert unstaged edits", AutoSize = true, Enabled = false };
++    private readonly Button _revertStaged = new() { Text = "Revert staged changes", AutoSize = true, Enabled = false };
+     private string? _loadedWorkspace;
+     private string? _rankSettingsPath;
+     private string? _loadedFileText;
+@@ -140,6 +142,7 @@
+     private readonly RankXpStageStore _rankStageStore;
+     private StagedRankXp? _stagedRank;
+     private bool _isLoading;
++    internal event Action? StagingChanged;
+ 
+     public ExperienceEditorTab(Func<string> getWorkspacePath, OwnedRegionState ownedRegionState)
+         : this(getWorkspacePath, ownedRegionState, new RankXpStageStore()) { }
+@@ -176,6 +179,8 @@
+         };
+         _reloadButton.Click += (_, _) => LoadWorkspaceSettings(confirmDiscard: true);
+         _saveButton.Click += (_, _) => SaveSettings();
++        _revertUnstaged.Click += (_, _) => RestoreRankPreview();
++        _revertStaged.Click += (_, _) => RevertStagedRankChanges();
+         _grid.CellValueChanged += (_, _) => UpdateDirtyState();
+         _grid.CurrentCellDirtyStateChanged += (_, _) =>
+         {
+@@ -190,6 +195,8 @@
+         var actionTips = new ToolTip();
+         actionTips.SetToolTip(_reloadButton, "Reload rank XP and region data from the selected workspace. Unsaved edits require confirmation.");
+         actionTips.SetToolTip(_saveButton, "Stage the Updated XP values in saved preferences. Start → Apply pending changes writes them to the workspace.");
++        actionTips.SetToolTip(_revertUnstaged, "Restore the staged XP snapshot, or current file values when nothing is staged.");
++        actionTips.SetToolTip(_revertStaged, "Clear staged XP changes and restore the preview to current file values. Game files are not changed.");
+         actionTips.SetToolTip(_selectAllRegions, "Include or exclude every region in the XP budget and progression graphs.");
+         actionTips.SetToolTip(_selectOwnedRegions, "Include only regions marked as owned in the Owned Content tab.");
+         _selectOwnedRegions.Click += (_, _) => SelectOwnedRegions();
+@@ -262,6 +269,7 @@
+             row.DefaultCellStyle.SelectionBackColor = BaseGameRegionColor;
+         }
+         _experienceGraph.Invalidate();
++        RefreshRankChangeColors();
+         Invalidate(true);
+     }
+ 
+@@ -377,10 +385,13 @@
+ 
+         var columnDivider = new Panel { Width = ColumnDividerWidth, Dock = DockStyle.Fill, BackColor = SystemColors.ControlDark, Margin = new Padding(0) };
+ 
+-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
++        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(12, 6, 12, 6) };
+         actions.Controls.Add(_reloadButton);
+         actions.Controls.Add(_saveButton);
++        actions.Controls.Add(_revertUnstaged);
++        actions.Controls.Add(_revertStaged);
+         actions.Controls.Add(_status);
++        actions.SizeChanged += (_, _) => _status.MaximumSize = new Size(Math.Max(240, actions.ClientSize.Width - actions.Padding.Horizontal), 0);
+ 
+         _contentLayout = new TableLayoutPanel { Dock = DockStyle.None, AutoSize = false, Padding = new Padding(18), ColumnCount = 3, RowCount = 5 };
+         _contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, LeftColumnWidth));
+@@ -398,12 +409,16 @@
+         _contentLayout.Controls.Add(_leftColumn, 0, 3);
+         _contentLayout.Controls.Add(columnDivider, 1, 3);
+         _contentLayout.Controls.Add(_graphsSection, 2, 3);
+-        _contentLayout.Controls.Add(actions, 0, 4);
+-        _contentLayout.SetColumnSpan(actions, 3);
+         _contentScrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+         _contentScrollHost.Controls.Add(_contentLayout);
+         _contentScrollHost.Resize += (_, _) => ResizeContentLayout();
+-        Controls.Add(_contentScrollHost);
++        var editorLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
++        editorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        editorLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        editorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        editorLayout.Controls.Add(actions, 0, 0);
++        editorLayout.Controls.Add(_contentScrollHost, 0, 1);
++        Controls.Add(editorLayout);
+         ResizeContentLayout();
+         SetEditorEnabled(false);
+     }
+@@ -802,7 +817,7 @@
+             UpdateEditorContentLayout();
+             SetEditorEnabled(true);
+             UpdateDirtyState();
+-            if (_stagedRank is null) _status.Text = $"Loaded {values.Count} rank steps from {path}. Preview changes require Save rank XP before Start can apply them.";
++            if (_stagedRank is null) _status.Text = $"Loaded {values.Count} rank steps. Preview changes, then Stage changes → Start → Apply pending changes.";
+         }
+         catch (Exception ex)
+         {
+@@ -868,7 +883,7 @@
+         if (!RankProgressionChanges.TryRead(currentText, out var currentValues))
+             throw new InvalidDataException("Could not read rankExp from the workspace file.");
+         if (!currentValues.SequenceEqual(staged.Values) && currentText != staged.SourceText)
+-            throw new InvalidOperationException("rank_settings.sso changed since rank XP was staged. Reload Experience / Ranks and press Save rank XP again before applying.");
++            throw new InvalidOperationException("rank_settings.sso changed since rank XP was staged. Reload Experience / Ranks and stage the values again before applying.");
+         var updatedText = currentText;
+         if (!currentValues.SequenceEqual(staged.Values))
+         {
+@@ -891,6 +906,7 @@
+ 
+     private void SaveSettings()
+     {
++        if (PresetBrowseMode.IsReadOnly(this)) return;
+         if (_rankSettingsPath is null || _loadedFileText is null) return;
+         if (!_grid.EndEdit()) return;
+         if (!TryReadGridValues(out var values))
+@@ -904,7 +920,7 @@
+             var currentText = File.ReadAllText(_rankSettingsPath, Encoding.UTF8);
+             if (!string.Equals(currentText, _loadedFileText, StringComparison.Ordinal))
+             {
+-                MessageBox.Show(this, "rank_settings.sso changed on disk since it was loaded. Reload it before saving to avoid overwriting those changes.", "File changed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
++                MessageBox.Show(this, "rank_settings.sso changed on disk since it was loaded. Reload it before staging to avoid overwriting those changes.", "File changed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                 return;
+             }
+ 
+@@ -913,11 +929,40 @@
+             UpdateDirtyState();
+             _status.Text = _stagedRank is null ? "Rank XP matches the workspace; no changes are staged." :
+                 $"Staged {values.Count} rank XP values. Use Start → Apply pending changes to write them to the workspace.";
++            StagingChanged?.Invoke();
+         }
+         catch (Exception ex)
+         {
+-            MessageBox.Show(this, $"Could not save rank settings: {ex.Message}", "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+-        }
++            MessageBox.Show(this, $"Could not stage rank XP: {ex.Message}", "Stage failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
++        }
++    }
++
++    private void RestoreRankPreview()
++    {
++        if (PresetBrowseMode.IsReadOnly(this) || _rankSettingsPath is null) return;
++        var values = _stagedRank?.Values ?? _loadedValues;
++        if (values.Count != _grid.Rows.Count) { _status.Text = "Reload rank XP before reverting the preview."; return; }
++        _grid.CancelEdit(); _isLoading = true;
++        try
++        {
++            var rows = RankRows;
++            for (var i = 0; i < values.Count; i++) { rows[i].Cells["UpdatedXP"].Value = values[i]; rows[i].ErrorText = ""; }
++        }
++        finally { _isLoading = false; }
++        UpdateDirtyState();
++    }
++
++    private void RevertStagedRankChanges()
++    {
++        if (PresetBrowseMode.IsReadOnly(this) || _loadedWorkspace is null || _rankSettingsPath is null) return;
++        try
++        {
++            _rankStageStore.Clear(_loadedWorkspace); _stagedRank = null;
++            RestoreRankPreview();
++            _status.Text = "Staged rank XP cleared. Preview restored to current file values; workspace files were not changed.";
++            StagingChanged?.Invoke();
++        }
++        catch (Exception ex) { MessageBox.Show(this, "Could not revert staged rank XP: " + ex.Message, "Revert failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+     }
+ 
+     private void ValidateExperienceCell(object? sender, DataGridViewCellValidatingEventArgs e)
+@@ -938,9 +983,32 @@
+     {
+         UpdateLevel30Total();
+         _experienceGraph.Invalidate();
+-        _saveButton.Enabled = _rankSettingsPath is not null && IsDirty;
+-        if (IsDirty && _rankSettingsPath is not null) _status.Text = "Preview XP changes. Press Save rank XP to stage them for Start → Apply.";
++        var dirty = IsDirty;
++        _saveButton.Enabled = _revertUnstaged.Enabled = _rankSettingsPath is not null && dirty;
++        _revertStaged.Enabled = _rankSettingsPath is not null && _stagedRank is not null;
++        RefreshRankChangeColors();
++        if (dirty && _rankSettingsPath is not null) _status.Text = _stagedRank is null
++            ? "Unstaged XP preview. Stage changes, then use Start → Apply pending changes."
++            : "Rank XP is staged. New preview edits are unstaged until you stage again.";
+         else if (_stagedRank is not null) _status.Text = "Rank XP staged. Use Start → Apply pending changes.";
++        else if (_rankSettingsPath is not null) _status.Text = "No staged XP changes. Edit the preview, then Stage changes.";
++    }
++
++    private void RefreshRankChangeColors()
++    {
++        var rows = RankRows;
++        for (var i = 0; i < rows.Length && i < _loadedValues.Count; i++)
++        {
++            var row = rows[i]; var cell = row.Cells["UpdatedXP"];
++            var valid = int.TryParse(Convert.ToString(cell.Value, CultureInfo.InvariantCulture), out var value);
++            var staged = _stagedRank is not null && i < _stagedRank.Values.Count ? (int?)_stagedRank.Values[i] : null;
++            var state = !valid ? "Invalid preview" : value != _loadedValues[i] ? staged == value ? "Staged" : "Unstaged preview"
++                : Convert.ToInt32(row.Cells["OriginalXP"].Value, CultureInfo.InvariantCulture) != value ? "In files" : "Unchanged";
++            var color = !valid || value != _loadedValues[i] ? AppColors.Get("EngineMatch") : state == "In files" ? AppColors.Get("DAF8E0")
++                : AppColors.Get(row.Index % 2 == 0 ? "Surface" : "AlternateRow");
++            cell.Style.BackColor = cell.Style.SelectionBackColor = color;
++            cell.ToolTipText = $"{state}. In files: {_loadedValues[i]:N0} XP" + (staged is null ? "" : $"; staged: {staged:N0} XP");
++        }
+     }
+ 
+     private void UpdateLevel30Total()
+@@ -1564,6 +1632,7 @@
+     {
+         _grid.Enabled = enabled;
+         _saveButton.Enabled = false;
++        _revertUnstaged.Enabled = _revertStaged.Enabled = false;
+         _reloadButton.Enabled = true;
+     }
+ 
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -227,6 +227,7 @@
+             catch { /* Preserve the last known count; Start reports detailed read errors. */ }
+         }
+         _startChanges.PendingCountChanged += ShowPendingCount;
++        _experienceTab.StagingChanged += RefreshPendingCount;
+         void LoadTierRegions(string workspace)
+         {
+             var regionNames = WorkspaceDataCache.GetLocalizedNames(workspace);
+--- a/README.md
++++ b/README.md
+@@ -59,7 +59,7 @@
+ 
+ The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization** and **Map trucks**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts with the five mission randomization rules. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Randomizer â†’ Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start â†’ Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is available in the matching Missions pane. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.
+ 
+-A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The region checklist and graphs follow the saved Region progression order, refreshed whenever the editor is opened; regions absent from that order append in the usual release order. Local sorting/dragging and the old separately saved XP region order no longer override it. Included-region selections, curve controls and staged rank XP are preserved. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. Save rank XP saves an explicit snapshot in per-workspace app preferences. Start â†’ Apply pending changes writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until saved again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
++A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The region checklist and graphs follow the saved Region progression order, refreshed whenever the editor is opened; regions absent from that order append in the usual release order. Local sorting/dragging and the old separately saved XP region order no longer override it. Included-region selections, curve controls and staged rank XP are preserved. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider. Opening the tab, restoring control settings, or adjusting the preview does not stage any file changes. **Stage changes** saves an explicit snapshot in per-workspace app preferences. A fixed toolbar keeps Stage changes, Reload, Revert unstaged edits and Revert staged changes visible while the large graphs and tables scroll. Revert unstaged edits restores the staged snapshot (or current file values); Revert staged changes clears the snapshot and restores the preview to current file values without changing game files. Changed XP cells are amber while previewed/staged and green after Apply; tooltips distinguish those states. Start â†’ Apply pending changes writes only that snapshot to the workspace, preserving the original; later preview edits are excluded until staged again. Staged XP survives restarts and is listed on Start even before the rank tab is opened. Apply staged rank XP before packing.
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+--- a/src/SnowPakTool.Desktop/README.md
++++ b/src/SnowPakTool.Desktop/README.md
+@@ -20,7 +20,7 @@
+ 
+ Choose `initial.pak`, select a workspace folder, and click **Unpack / merge PAK + cache block**. The app remembers the last selected PAK and workspace paths between launches. Existing workspace files are compared with the files being unpacked: identical files are skipped. Before applying any replacements, the app lists every differing file in one table. Choose the incoming PAK version or keep the workspace version for each row, select **Take all changes in new file** to use every PAK version, or open **View changes** to edit a file before applying it. Canceling review leaves existing workspace files unchanged. Binary conflicts can be selected, but cannot be edited in the text pane. After unpacking, click **Pack to new PAK…** and choose an output filename. If that file already exists, the save dialog asks before replacing it; the completed archive is written to a temporary file before replacing the selected output.
+ 
+-The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected workspace. Its calculated progression uses an exponential curve, with controls for curve steepness and a slider that reduces the selected-region XP budget in 5,000 XP steps. The displayed exponential formula updates with each steepness adjustment. Generated XP values are rounded to the nearest 100 XP. The region checklist and graphs follow the saved Region progression order and refresh on return to the editor. Unlisted regions append in release order; change the route in Randomizer -> Region progression. Region selections, XP controls and staged values remain independent of that order. Each graph has a corner button to swap the region-order and level axes. The app restores the last window size when reopened.
++The **Experience / Ranks** tab reads `[ps]/rank_settings.sso` from the selected workspace. Use the fixed **Stage changes** toolbar to snapshot the current XP preview; the values survive restarts and appear as pending on Start. Only **Start → Apply pending changes** writes that snapshot. Later preview edits are excluded until staged again. **Revert unstaged edits** restores the snapshot or file values, and **Revert staged changes** clears the snapshot and restores file values in the preview. Amber/green XP highlights and hover details distinguish preview, staged and applied values. Its calculated progression uses an exponential curve, with controls for curve steepness and a slider that reduces the selected-region XP budget in 5,000 XP steps. The displayed exponential formula updates with each steepness adjustment. Generated XP values are rounded to the nearest 100 XP. The region checklist and graphs follow the saved Region progression order and refresh on return to the editor. Unlisted regions append in release order; change the route in Randomizer -> Region progression. Region selections, XP controls and staged values remain independent of that order. Each graph has a corner button to swap the region-order and level axes. The app restores the last window size when reopened.
+ 
+ The desktop project references the original `SnowPakTool` project and calls its `CacheBlockReader`, `CacheBlockWriter`, and `ZipPakHelper` classes. It targets .NET 10 Windows Forms.
+ 
+--- a/.checks/RankStaging/Program.cs
++++ b/.checks/RankStaging/Program.cs
+@@ -8,7 +8,7 @@
+  static object? Static(string type,string name,params object?[] args)=>T(type).GetMethod(name,BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic)!.Invoke(null,args);
+  static object Field(object obj,string name)=>obj.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance)!.GetValue(obj)!;
+  static void Set(object obj,string name,object value)=>obj.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(obj,value);
+- static void Check(bool ok,string name){if(!ok)throw new Exception(name);}
++ static void Check(bool ok,string name){if(!ok)throw new Exception(name);Console.WriteLine("PASS "+name);}
+  static List<object> Rows(object? value)=>((IEnumerable)value!).Cast<object>().ToList();
+  static List<int> Values(object staged)=>(List<int>)staged.GetType().GetProperty("Values")!.GetValue(staged)!;
+  static string Text(object row,string name)=>(string)row.GetType().GetProperty(name)!.GetValue(row)!;
+@@ -55,6 +55,30 @@
+    using(var fresh=Editor(workspace,store))
+    {Invoke(fresh,"EnsureLoaded");Check((string)Field(fresh,"_loadedFileText")==result,"reload sees applied file rather than stale cache");Check(Rows(Invoke(fresh,"PendingChanges",workspace)).Count==0,"default preview after Apply does not re-stage");}
+   }
++  using(var editor=Editor(workspace,store))
++  using(var form=new Form {Size=new Size(1120,920),ShowInTaskbar=false,StartPosition=FormStartPosition.Manual,Location=new Point(-20000,-20000)})
++  {
++   editor.Dock=DockStyle.Fill;form.Controls.Add(editor);Invoke(editor,"EnsureLoaded");form.Show();Application.DoEvents();
++   var grid=(DataGridView)Field(editor,"_grid");var stage=(Button)Field(editor,"_saveButton");var revertPreview=(Button)Field(editor,"_revertUnstaged");var revertStage=(Button)Field(editor,"_revertStaged");
++   Check(stage.Text=="Stage changes"&&stage.Visible,"explicit Stage changes action is visible on opening the editor");
++   var scroll=(ScrollableControl)Field(editor,"_contentScrollHost");var toolbarY=stage.PointToScreen(Point.Empty).Y;scroll.AutoScrollPosition=new Point(200,500);Application.DoEvents();
++   Check(stage.Visible&&stage.PointToScreen(Point.Empty).Y==toolbarY,"staging toolbar stays visible while graphs and tables scroll");
++   var fileBefore=File.ReadAllText(updated);var valuesBefore=(List<int>)Field(editor,"_loadedValues");
++   grid.Rows[0].Cells["UpdatedXP"].Value=valuesBefore[0]+100;Invoke(editor,"UpdateDirtyState");
++   Check(stage.Enabled&&revertPreview.Enabled&&!revertStage.Enabled&&Rows(Invoke(editor,"PendingChanges",workspace)).Count==0,"new XP preview enables staging without creating pending changes");
++   var notifications=0;editor.GetType().GetEvent("StagingChanged",BindingFlags.Instance|BindingFlags.NonPublic)!.GetAddMethod(true)!.Invoke(editor,new object[]{(Action)(()=>notifications++)});
++   stage.PerformClick();var staged=Invoke(store,"Load",workspace)!;
++   Check(Values(staged)[0]==valuesBefore[0]+100&&notifications==1&&!stage.Enabled&&revertStage.Enabled&&File.ReadAllText(updated)==fileBefore,"Stage button persists snapshot and reports it without writing workspace files");
++   Check(grid.Rows[0].Cells["UpdatedXP"].ToolTipText.StartsWith("Staged"),"rank cell tooltip identifies the staged snapshot");
++   grid.Rows[0].Cells["UpdatedXP"].Value=valuesBefore[0]+900;
++   Check(Values(Invoke(store,"Load",workspace)!)[0]==valuesBefore[0]+100&&grid.Rows[0].Cells["UpdatedXP"].ToolTipText.StartsWith("Unstaged"),"later previews stay distinct from the saved stage");
++   revertPreview.PerformClick();Check(Convert.ToInt32(grid.Rows[0].Cells["UpdatedXP"].Value)==valuesBefore[0]+100&&!stage.Enabled,"revert unstaged restores the saved snapshot");
++   revertStage.PerformClick();Check(Invoke(store,"Load",workspace) is null&&Convert.ToInt32(grid.Rows[0].Cells["UpdatedXP"].Value)==valuesBefore[0]&&notifications==2&&File.ReadAllText(updated)==fileBefore,"revert staged clears pending intent and restores file values without file edits");
++   grid.Rows[0].Cells["UpdatedXP"].Value=valuesBefore[0]+200;stage.PerformClick();
++   var browse=(IDisposable)Activator.CreateInstance(T("PresetBrowseMode"),new object[]{new Control[]{editor}})!;
++   try{Invoke(browse,"SetReadOnly",true);Check(!stage.Enabled&&!revertPreview.Enabled&&!revertStage.Enabled,"shared preset browsing disables XP stage and revert actions");Invoke(editor,"RevertStagedRankChanges");Check(Invoke(store,"Load",workspace) is not null,"read-only mode also guards direct staged-revert entry point");}finally{browse.Dispose();}
++   using(var bitmap=new Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new Rectangle(Point.Empty,form.Size));bitmap.Save(Path.Combine(AppContext.BaseDirectory,"experience-staging-toolbar.png"));}
++  }
+   Console.WriteLine("PASS rank XP: preview/navigation never stage, explicit Save persists only preferences, restart before tab load, exact snapshot Apply, original/unrelated-data preservation, invalid later previews, workspace isolation, external-edit conflicts, no-op and invalid staging, applied-file cache refresh.");
+  }
+ }

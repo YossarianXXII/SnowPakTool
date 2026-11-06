@@ -1,0 +1,13 @@
+--- a/SMALL_CHANGE_QUEUE.md
++++ b/SMALL_CHANGE_QUEUE.md
+@@ -1,8 +1,8 @@
+ # Small change queue
+ 
+-Queued requests (0 of 10):
++Queued requests (1 of 10):
+ 
+-None.
++- In Start → PAK, summarize winch changes per winch, using the same brief summary style as per-truck changes.
+ 
+ Completed requests:
+ 

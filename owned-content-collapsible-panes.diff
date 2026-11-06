@@ -1,0 +1,190 @@
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index 065d1cd..742f1f5 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -26,11 +26,10 @@ internal sealed class OwnedContentTab : UserControl
+     private readonly CheckBox _selectAllTruckDlcs = new() { Text = "Select all", AutoSize = true };
+     private readonly CheckBox _selectAllOtherDlcs = new() { Text = "Select all", AutoSize = true };
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(4, 4, 4, 8), Text = "Select a workspace to load owned content." };
+-    private TableLayoutPanel? _secondarySections;
+-    private Panel? _otherDlcBody;
+-    private Button? _toggleOtherDlcButton;
++    private readonly TableLayoutPanel _dlcSections = new() { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Margin = Padding.Empty };
++    private readonly HashSet<int> _expandedDlcPanes = [];
++    private readonly ToolTip _paneTips = new();
+     private bool _updatingSelectAll;
+-    private bool _otherDlcCollapsed;
+     private string? _loadedWorkspace;
+     private ListSortDirection _regionSortDirection = ListSortDirection.Ascending;
+     private readonly Dictionary<DataGridView, ListSortDirection> _releaseDateSortDirections = new();
+@@ -42,6 +41,7 @@ internal sealed class OwnedContentTab : UserControl
+         _getWorkspacePath = getWorkspacePath;
+         _ownedRegionState = ownedRegionState;
+         BuildLayout();
++        Disposed += (_, _) => _paneTips.Dispose();
+         AppColors.Changed += (_, _) => RefreshPaletteColors();
+         _ownedRegionState.Changed += UpdateOwnedRegion;
+     }
+@@ -154,8 +154,16 @@ internal sealed class OwnedContentTab : UserControl
+         WireSelectAll(_regionGrid, _selectAllRegions);
+         WireSelectAll(_truckDlcGrid, _selectAllTruckDlcs);
+         WireSelectAll(_otherDlcGrid, _selectAllOtherDlcs);
+-        var regionSection = CreateOwnedSection("Region DLCs", _regionGrid, _selectAllRegions);
+-        var truckDlcSection = CreateOwnedSection("Truck DLCs", _truckDlcGrid, _selectAllTruckDlcs);
++        _dlcSections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        foreach (var weight in new[] { 45f, 35f, 20f })
++        {
++            _dlcSections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++            _dlcSections.RowStyles.Add(new RowStyle(SizeType.Percent, weight));
++        }
++        _dlcSections.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
++        AddOwnedSection("Region DLCs", _regionGrid, _selectAllRegions, 0, 45);
++        AddOwnedSection("Truck DLCs", _truckDlcGrid, _selectAllTruckDlcs, 2, 35);
++        AddOwnedSection("Other DLCs", _otherDlcGrid, _selectAllOtherDlcs, 4, 20);
+         var truckSection = new GroupBox { Text = "Truck list", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = new Padding(6) };
+         var truckPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+         truckPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+@@ -165,41 +173,17 @@ internal sealed class OwnedContentTab : UserControl
+         truckPanel.Controls.Add(_truckGrid, 0, 1);
+         truckSection.Controls.Add(truckPanel);
+ 
+-        _toggleOtherDlcButton = new Button { Text = "Hide", AutoSize = true, Anchor = AnchorStyles.Right };
+-        _toggleOtherDlcButton.Click += (_, _) => ToggleOtherDlcPanel();
+-        var otherHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, AutoSize = true, Margin = new Padding(8, 4, 8, 2) };
+-        otherHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+-        otherHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+-        otherHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+-        otherHeader.Controls.Add(new Label { Text = "Other DLCs", AutoSize = true, Anchor = AnchorStyles.Left, Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5f, FontStyle.Bold), Padding = new Padding(2, 5, 4, 0) }, 0, 0);
+-        otherHeader.Controls.Add(_selectAllOtherDlcs, 1, 0);
+-        otherHeader.Controls.Add(_toggleOtherDlcButton, 2, 0);
+-        _otherDlcBody = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(6, 2, 6, 6) };
+-        _otherDlcBody.Controls.Add(_otherDlcGrid);
+-
+-        _secondarySections = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
+-        _secondarySections.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+-        _secondarySections.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+-        _secondarySections.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        _secondarySections.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+-        _secondarySections.Controls.Add(truckDlcSection, 0, 0);
+-        _secondarySections.Controls.Add(otherHeader, 0, 1);
+-        _secondarySections.Controls.Add(_otherDlcBody, 0, 2);
+-
+-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2, Padding = new Padding(12) };
+-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 27));
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 69));
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+         layout.Controls.Add(_status, 0, 0);
+-        layout.SetColumnSpan(_status, 3);
+-        layout.Controls.Add(regionSection, 0, 1);
+-        layout.Controls.Add(_secondarySections, 1, 1);
+-        layout.Controls.Add(truckSection, 2, 1);
++        layout.SetColumnSpan(_status, 2);
++        layout.Controls.Add(_dlcSections, 0, 1);
++        layout.Controls.Add(truckSection, 1, 1);
+         Controls.Add(layout);
+     }
+-
+     private void ConfigureColumns()
+     {
+         _regionGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Owned", HeaderText = "Owned", FillWeight = 14, MinimumWidth = 54 });
+@@ -265,20 +249,51 @@ internal sealed class OwnedContentTab : UserControl
+         }
+     }
+ 
+-    private static GroupBox CreateOwnedSection(string title, DataGridView grid, CheckBox selectAll)
++    private void AddOwnedSection(string title, DataGridView grid, CheckBox selectAll, int headerRow, float weight)
+     {
+-        var section = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(8), Margin = new Padding(6) };
+-        var content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+-        content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+-        selectAll.Padding = new Padding(2, 0, 0, 4);
+-        content.Controls.Add(selectAll, 0, 0);
+-        content.Controls.Add(grid, 0, 1);
+-        section.Controls.Add(content);
+-        return section;
++        var bodyRow = headerRow + 1;
++        var body = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Margin = new Padding(6, 0, 6, 6) };
++        body.Controls.Add(grid);
++        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, AutoSize = true, Margin = new Padding(8, 2, 8, 2) };
++        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
++        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
++        header.Controls.Add(new Label { Text = title, AutoSize = true, Anchor = AnchorStyles.Left,
++            Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5f, FontStyle.Bold), Padding = new Padding(2, 4, 4, 4) }, 0, 0);
++        selectAll.Anchor = AnchorStyles.Right;
++        header.Controls.Add(selectAll, 1, 0);
++        var toggle = new LinkLabel { Text = "▾", Size = new Size(26, 26), TextAlign = ContentAlignment.MiddleCenter,
++            Anchor = AnchorStyles.Right, Margin = Padding.Empty, LinkBehavior = LinkBehavior.NeverUnderline,
++            LinkColor = SystemColors.ControlText, ActiveLinkColor = SystemColors.Highlight, VisitedLinkColor = SystemColors.ControlText,
++            Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 14f), AccessibleRole = AccessibleRole.PushButton, TabStop = true };
++        var collapsed = false;
++        void UpdateToggle()
++        {
++            toggle.Text = collapsed ? "▸" : "▾";
++            toggle.AccessibleName = (collapsed ? "Expand " : "Collapse ") + title;
++            toggle.AccessibleDescription = collapsed ? "Collapsed" : "Expanded";
++            _paneTips.SetToolTip(toggle, toggle.AccessibleName);
++        }
++        toggle.LinkClicked += (_, _) =>
++        {
++            collapsed = !collapsed;
++            _dlcSections.SuspendLayout();
++            body.Visible = !collapsed;
++            selectAll.Visible = !collapsed;
++            _dlcSections.RowStyles[bodyRow].SizeType = collapsed ? SizeType.Absolute : SizeType.Percent;
++            _dlcSections.RowStyles[bodyRow].Height = collapsed ? 0 : weight;
++            if (collapsed) _expandedDlcPanes.Remove(bodyRow); else _expandedDlcPanes.Add(bodyRow);
++            _dlcSections.RowStyles[6].SizeType = _expandedDlcPanes.Count == 0 ? SizeType.Percent : SizeType.Absolute;
++            _dlcSections.RowStyles[6].Height = _expandedDlcPanes.Count == 0 ? 100 : 0;
++            UpdateToggle();
++            _dlcSections.ResumeLayout(true);
++        };
++        UpdateToggle();
++        header.Controls.Add(toggle, 2, 0);
++        _dlcSections.Controls.Add(header, 0, headerRow);
++        _dlcSections.Controls.Add(body, 0, bodyRow);
++        _expandedDlcPanes.Add(bodyRow);
+     }
+-
+     private void WireSelectAll(DataGridView grid, CheckBox selectAll)
+     {
+         selectAll.CheckedChanged += (_, _) =>
+@@ -461,19 +476,6 @@ internal sealed class OwnedContentTab : UserControl
+         _updatingSelectAll = false;
+     }
+ 
+-    private void ToggleOtherDlcPanel()
+-    {
+-        _otherDlcCollapsed = !_otherDlcCollapsed;
+-        if (_otherDlcBody is null || _secondarySections is null || _toggleOtherDlcButton is null) return;
+-        _otherDlcBody.Visible = !_otherDlcCollapsed;
+-        _toggleOtherDlcButton.Text = _otherDlcCollapsed ? "Show" : "Hide";
+-        _secondarySections.RowStyles[0].SizeType = SizeType.Percent;
+-        _secondarySections.RowStyles[0].Height = _otherDlcCollapsed ? 100 : 58;
+-        _secondarySections.RowStyles[2].SizeType = _otherDlcCollapsed ? SizeType.Absolute : SizeType.Percent;
+-        _secondarySections.RowStyles[2].Height = _otherDlcCollapsed ? 0 : 42;
+-        _secondarySections.PerformLayout();
+-    }
+-
+     private static DataGridView CreateGrid()
+     {
+         var grid = new DataGridView
+diff --git a/README.md b/README.md
+index 358ee33..a091aab 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,8 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact.
++
+ Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
+ 
+ The **Randomizer** main tab contains **Region progression** first, followed by **Truck randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same soft background tints as the Region Difficulty tier panes (neutral gray for Unsorted) with contrasting text, and show larger, heavier circular position numbers in badges matching the header height, and read left to right then continue on the next row. They use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically and renumbers the badges. Previous randomization restores one prior order kept in memory for this session. Finalize saves and locks the current order, disabling Randomize, Previous, difficulty controls, and tile moves; it becomes Unlock to allow changes again. The finalized state survives restarts. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. The Obtainable pane can randomize owned obtainable placements after Region progression is finalized. It uses ranked owned trucks from the same app class, a progression-weighted truck tier draw, a repetition penalty, difficulty-weighted tire categories, and the smallest supported tire size/first variant. Regional variety counts saved assignments, pending edits, and new selections together. HEAVY_DUTY selections favor trucks within one target tier, widening by one tier when that offers less-used compatible models, then choose among the least-used regional models before applying progression weights. This prevents a lone low-tier candidate from being selected repeatedly while suitable alternatives exist. Other classes receive an additional strong regional repeat penalty. Necessary reuse and tier-band widening are explained in detailed logs. If the compatible nearby pool has fewer than three trucks or all its trucks have been used, there is an 18% chance of a similarly ranked OFFROAD substitute, capped at one per five saved HEAVY_DUTY assignments (the first opportunity is assignment five). The exception is one-way, still requires ownership and addon/tire compatibility, and is reported only in detailed logs. The cap includes persisted assignments across runs and ownership changes; existing assignments stay fixed. Required listed addons are preserved through compatible equivalents (including sideboard capacity); incompatible trucks are rejected and another candidate is tried. Unranked regions/trucks, unverified placements, missions, and unavailable configurations are not guessed. Saved assignments remain fixed across restarts and ownership changes. This pane shows region completion/error messages without revealing choices. Show detailed logs is off by default; enabling it reveals recorded placement messages in their original order, including tire-category variation, compatibility fallbacks, and rejected candidates, without naming replacement trucks. Actual trucks and equipment are shown in Game data → Map trucks. That tab has Reset truck to original, Reset selected regions to original, and Reset all to original buttons. Reset all covers every loaded placement across all regions regardless of selection or table filters. Reset clears assignments and previews restoration of the original model and exact map equipment. You can rerandomize a reset preview immediately, without applying the restoration first. Start → Apply map changes performs all map writes, carrying the chosen tires/addons through preview and Apply. Start also hides randomized replacement details so applying does not spoil the result. Old manual pending-change arrays are read and upgraded atomically when saved. Mission randomization is not configured. Editable rule text remains descriptive notes; editing prose does not change the implemented constraints.

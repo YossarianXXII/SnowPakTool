@@ -1,0 +1,713 @@
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+index 1318eeb..1541ef1 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+@@ -6,9 +6,15 @@ namespace SnowPakTool.Desktop;
+ 
+ internal sealed record TruckPropertySpec(string Element, string Attribute, string Label, decimal Step, decimal Minimum, decimal Maximum);
+ internal sealed record TruckPropertyEdit(string RelativeFile, string TruckName, string Attribute, decimal Before, decimal After);
+-internal sealed record TruckPropertyPreset(int Version, List<TruckPropertyEdit> Values);
++internal sealed record TruckCountryEdit(string RelativeFile, string TruckName, string Before, string After);
++internal sealed record TruckPropertyPreset(int Version, List<TruckPropertyEdit> Values, List<TruckCountryEdit>? Countries = null);
+ internal sealed record TruckPropertyRow(string RelativeFile, CustomTruck Truck, string Country, string DiffLock,
+-    Dictionary<string, decimal> Original, Dictionary<string, decimal> Current, Dictionary<string, decimal> Draft);
++    Dictionary<string, decimal> Original, Dictionary<string, decimal> Current, Dictionary<string, decimal> Draft,
++    string GameClass = "", bool RequiresExploration = false, string UnlockObjective = "", bool Locked = false,
++    string OriginalCountry = "")
++{
++    public string DraftCountry { get; set; } = Country;
++}
+ 
+ internal static class TruckPropertiesStore
+ {
+@@ -48,15 +54,25 @@ internal static class TruckPropertiesStore
+             var originalFile = WorkspaceOriginals.GetOriginalReadPath(workspace, relative);
+             var original = File.Exists(originalFile) ? Values(File.ReadAllText(originalFile)) : new(current);
+             result.Add(new(relative, new(code, names.GetValueOrDefault(key, code), TruckClasses.ForTruck(code, truckClass)),
+-                Read(text, "GameData", "Country"), Read(text, "TruckData", "DiffLockType"), original, current, new(current)));
++                Read(text, "GameData", "Country"), Read(text, "TruckData", "DiffLockType"), original, current, new(current),
++                truckClass, Read(text, "GameData", "UnlockByExploration").Equals("true", StringComparison.OrdinalIgnoreCase),
++                Read(text, "GameData", "UnlockByObjective"), Read(text, "GameData", "LockedUnconditionally").Equals("true", StringComparison.OrdinalIgnoreCase),
++                Read(File.Exists(originalFile) ? File.ReadAllText(originalFile) : text, "GameData", "Country")));
+         }
+         return result;
+     }
+ 
+     internal static List<TruckPropertyEdit> LoadPending(string workspace)
++    {
++        return LoadSnapshot(workspace).Values;
++    }
++
++    internal static TruckPropertyPreset LoadSnapshot(string workspace)
+     {
+         var path = PendingPath(workspace);
+-        return File.Exists(path) ? ReadEdits(File.ReadAllText(path)) : [];
++        if (!File.Exists(path)) return new(2, [], []);
++        var json = File.ReadAllText(path);
++        return json.TrimStart().StartsWith('[') ? new(2, ReadEdits(json), []) : ReadPresetSnapshot(json);
+     }
+ 
+     internal static List<TruckPropertyEdit> ReadEdits(string json)
+@@ -80,9 +96,12 @@ internal static class TruckPropertiesStore
+     }
+ 
+     internal static void SavePending(string workspace, List<TruckPropertyEdit> edits)
++        => SaveSnapshot(workspace, edits, []);
++
++    internal static void SaveSnapshot(string workspace, List<TruckPropertyEdit> edits, List<TruckCountryEdit> countries)
+     {
+-        var json = JsonSerializer.Serialize(edits, JsonOptions);
+-        ReadEdits(json);
++        var json = SerializeSnapshot(edits, countries);
++        ReadPresetSnapshot(json);
+         WriteAtomic(PendingPath(workspace), json);
+     }
+ 
+@@ -114,12 +133,23 @@ internal static class TruckPropertiesStore
+ 
+     internal static void Apply(string workspace)
+     {
+-        var pending = LoadPending(workspace);
++        var pending = LoadSnapshot(workspace);
++        var countries = pending.Countries ?? [];
+         // Validate every target before writing any output, preserving edits made by other editors.
+-        var outputs = pending.GroupBy(edit => edit.RelativeFile, StringComparer.OrdinalIgnoreCase).Select(group =>
++        var outputs = pending.Values.Select(edit => edit.RelativeFile).Concat(countries.Select(edit => edit.RelativeFile))
++            .Distinct(StringComparer.OrdinalIgnoreCase).Select(relative =>
+         {
+-            var path = WorkspaceOriginals.GetCurrentPath(workspace, group.Key);
+-            return (Path: path, Text: Patch(File.ReadAllText(path), group));
++            var path = WorkspaceOriginals.GetCurrentPath(workspace, relative);
++            var text = Patch(File.ReadAllText(path), pending.Values.Where(edit => edit.RelativeFile.Equals(relative, StringComparison.OrdinalIgnoreCase)));
++            foreach (var edit in countries.Where(edit => edit.RelativeFile.Equals(relative, StringComparison.OrdinalIgnoreCase)))
++            {
++                var root = Root(text); var tag = Tag(root.Value, "GameData"); var attribute = Attribute(tag.Value, "Country");
++                if (!attribute.Success || attribute.Groups["value"].Value != edit.Before && attribute.Groups["value"].Value != edit.After)
++                    throw new InvalidDataException($"{edit.TruckName}: store countries changed since staging. Reload and stage again.");
++                var value = attribute.Groups["value"]; var offset = root.Index + tag.Index + value.Index;
++                text = text.Remove(offset, value.Length).Insert(offset, edit.After);
++            }
++            return (Path: path, Text: text);
+         }).ToArray();
+         foreach (var output in outputs)
+         {
+@@ -131,10 +161,29 @@ internal static class TruckPropertiesStore
+     }
+ 
+     internal static string SerializePreset(List<TruckPropertyEdit> values) => JsonSerializer.Serialize(new TruckPropertyPreset(1, values), JsonOptions);
+-    internal static List<TruckPropertyEdit> ReadPreset(string json)
++    internal static string SerializeSnapshot(List<TruckPropertyEdit> values, List<TruckCountryEdit> countries) =>
++        JsonSerializer.Serialize(new TruckPropertyPreset(2, values, countries), JsonOptions);
++    internal static List<TruckPropertyEdit> ReadPreset(string json) => ReadPresetSnapshot(json).Values;
++
++    internal static TruckPropertyPreset ReadPresetSnapshot(string json)
+     {
+         var preset = JsonSerializer.Deserialize<TruckPropertyPreset>(json);
+-        if (preset?.Version != 1 || preset.Values is null) throw new InvalidDataException("Unsupported truck property preset.");
+-        return ReadEdits(JsonSerializer.Serialize(preset.Values));
++        if (preset?.Version is not (1 or 2) || preset.Values is null || preset.Version == 2 && preset.Countries is null)
++            throw new InvalidDataException("Unsupported truck property preset.");
++        var values = ReadEdits(JsonSerializer.Serialize(preset.Values));
++        var countries = preset.Countries ?? [];
++        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var edit in countries)
++        {
++            if (edit is null || string.IsNullOrWhiteSpace(edit.RelativeFile) || edit.TruckName is null || edit.Before is null || edit.After is null
++                || !keys.Add(edit.RelativeFile.Replace('\\', '/')))
++                throw new InvalidDataException("Invalid or duplicate store-country edit.");
++            // Reuse the strict truck path validation; only Country can be edited by this list.
++            ReadEdits(JsonSerializer.Serialize(new[] { new TruckPropertyEdit(edit.RelativeFile, edit.TruckName, "UnlockByRank", 1, 1) }));
++            var codes = edit.After.Split(',').Select(code => code.Trim()).ToArray();
++            if (codes.Length == 0 || codes.Any(code => !Regex.IsMatch(code, "^[A-Z]{2,8}$")) || codes.Distinct(StringComparer.Ordinal).Count() != codes.Length)
++                throw new InvalidDataException("Invalid store-country codes.");
++        }
++        return new(2, values, countries.Select(edit => edit with { RelativeFile = edit.RelativeFile.Replace('\\', '/') }).ToList());
+     }
+ }
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 681a9a5..d4f07d1 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -7,6 +7,10 @@ internal sealed class TruckPropertiesTab : UserControl
+ {
+     private readonly Func<string> _getWorkspace;
+     private readonly Func<Task<RegionTruckCatalog>> _getRegions;
++    private readonly Func<IReadOnlyList<CustomTruck>>? _getEnabledTrucks;
++    private readonly List<RadioButton> _unlockDifficultyOptions = [];
++    private ProgressionDifficulty _unlockDifficulty = ProgressionDifficulty.Normal;
++    private bool _loadingUnlockDifficulty;
+     private readonly DataGridView _grid = new()
+     {
+         Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+@@ -26,10 +30,13 @@ internal sealed class TruckPropertiesTab : UserControl
+     private Form? _hover;
+     private string _regionStatus = "";
+ 
+-    public TruckPropertiesTab(Func<string> getWorkspace, Func<Task<RegionTruckCatalog>> getRegions)
++    public TruckPropertiesTab(Func<string> getWorkspace, Func<Task<RegionTruckCatalog>> getRegions) : this(getWorkspace, getRegions, null) { }
++
++    public TruckPropertiesTab(Func<string> getWorkspace, Func<Task<RegionTruckCatalog>> getRegions, Func<IReadOnlyList<CustomTruck>>? getEnabledTrucks)
+     {
+         _getWorkspace = getWorkspace;
+         _getRegions = getRegions;
++        _getEnabledTrucks = getEnabledTrucks;
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+@@ -48,6 +55,7 @@ internal sealed class TruckPropertiesTab : UserControl
+             foreach (var row in _rows)
+                 foreach (var spec in TruckPropertiesStore.Specs)
+                     if (row.Draft.ContainsKey(spec.Attribute) && row.Original.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = value;
++            foreach (var row in _rows) row.DraftCountry = row.OriginalCountry;
+             ShowRows();
+         });
+         AddButton(toolbar, "Save preset…", SavePreset);
+@@ -70,6 +78,32 @@ internal sealed class TruckPropertiesTab : UserControl
+         _tips.SetToolTip(multiply, "Multiply the current displayed fuel capacities. Round to whole litres; repeated clicks multiply again. Individual cells remain editable. Stage changes to keep the result.");
+         var columns = AddButton(bulk, "Columns ▾", () => { });
+         columns.Click += (_, _) => _columnsMenu.Show(columns, new Point(0, columns.Height));
++        var unlockOptions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(12, 0, 4, 0) };
++        unlockOptions.Controls.Add(new Label { Text = "Unlock rank difficulty", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
++        foreach (var difficulty in new[] { ProgressionDifficulty.Easy, ProgressionDifficulty.Normal, ProgressionDifficulty.Hard })
++        {
++            var radio = new RadioButton { Text = difficulty.ToString(), AutoSize = true, Checked = difficulty == _unlockDifficulty, Margin = new Padding(0, 7, 8, 0) };
++            _tips.SetToolTip(radio, $"Soft cap about rank {TruckUnlockRankGenerator.SoftCap(difficulty)}. Easy has the widest variation, allowing better trucks earlier; Hard has later, tighter progression. Some can exceed the soft cap, up to rank 30.");
++            radio.CheckedChanged += (_, _) =>
++            {
++                if (_loadingUnlockDifficulty || !radio.Checked) return;
++                var previous = _unlockDifficulty;
++                try
++                {
++                    if (Ready()) TruckUnlockRankSettings.Save(_loadedWorkspace!, difficulty);
++                    _unlockDifficulty = difficulty;
++                }
++                catch (Exception ex)
++                {
++                    SetUnlockDifficulty(previous);
++                    _status.Text = "Could not save unlock-rank difficulty: " + ex.Message;
++                }
++            };
++            _unlockDifficultyOptions.Add(radio); unlockOptions.Controls.Add(radio);
++        }
++        bulk.Controls.Add(unlockOptions);
++        var unlock = AddButton(bulk, "Generate unlock ranks", GenerateUnlockRanks);
++        _tips.SetToolTip(unlock, "Preview tier-based ranks with variation. Guarantee one owned, directly purchasable truck of each original game class at rank 1 in each store country; extend starter countries where needed. Stage changes to keep the plan.");
+         layout.Controls.Add(bulk, 0, 2);
+         layout.Controls.Add(_grid, 0, 3);
+         layout.Controls.Add(_status, 0, 4);
+@@ -158,6 +192,7 @@ internal sealed class TruckPropertiesTab : UserControl
+                 var rows = await Task.Run(() => TruckPropertiesStore.LoadRows(workspace));
+                 if (IsDisposed || workspace != _getWorkspace().Trim()) return;
+                 _rows = rows; _loadedWorkspace = workspace;
++                SetUnlockDifficulty(TruckUnlockRankSettings.Load(workspace));
+                 RestoreDraft();
+             }
+             ShowRows();
+@@ -190,7 +225,7 @@ internal sealed class TruckPropertiesTab : UserControl
+             }
+             UpdateStatus();
+         }
+-        catch (Exception ex) { _status.Text = "Could not load truck properties: " + ex.Message; }
++        catch (Exception ex) { _loadedWorkspace = null; _status.Text = "Could not load truck properties: " + ex.Message; }
+         finally { _loading = false; }
+     }
+ 
+@@ -199,12 +234,14 @@ internal sealed class TruckPropertiesTab : UserControl
+     {
+         if (!Ready()) return;
+         _grid.CancelEdit();
+-        var pending = TruckPropertiesStore.LoadPending(_loadedWorkspace!);
++        var pending = TruckPropertiesStore.LoadSnapshot(_loadedWorkspace!);
+         foreach (var row in _rows)
+         {
+             row.Draft.Clear(); foreach (var pair in row.Current) row.Draft.Add(pair.Key, pair.Value);
+-            foreach (var edit in pending.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
++            row.DraftCountry = row.Country;
++            foreach (var edit in pending.Values.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
+                 if (row.Draft.ContainsKey(edit.Attribute)) row.Draft[edit.Attribute] = edit.After;
++            foreach (var edit in pending.Countries!.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase))) row.DraftCountry = edit.After;
+         }
+     }
+ 
+@@ -225,10 +262,11 @@ internal sealed class TruckPropertiesTab : UserControl
+                 var tier = tiers.FirstOrDefault(tier => tier.TruckCodes.Contains(data.Truck.Code, StringComparer.OrdinalIgnoreCase))?.Name ?? "Unsorted";
+                 var index = _grid.Rows.Add(data.Truck.Name, data.Truck.Class, tier,
+                     data.Draft.GetValueOrDefault("FuelCapacity"), data.Draft.GetValueOrDefault("UnlockByRank"), data.Draft.GetValueOrDefault("Price"),
+-                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Map trucks", data.Country, data.DiffLock);
++                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Map trucks", data.DraftCountry, data.DiffLock);
+                 var row = _grid.Rows[index]; row.Tag = data;
+                 row.Cells["Truck"].ToolTipText = data.Truck.Code + "\n" + data.RelativeFile;
+                 if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.ColorFor(tier);
++                PaintCountry(row);
+                 foreach (var spec in TruckPropertiesStore.Specs)
+                 {
+                     var cell = row.Cells[spec.Attribute];
+@@ -253,9 +291,13 @@ internal sealed class TruckPropertiesTab : UserControl
+ 
+     private void FormatValue(object? sender, DataGridViewCellFormattingEventArgs e)
+     {
+-        if (e.RowIndex < 0 || e.ColumnIndex < 0 || e.Value is not decimal value
+-            || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
++        if (e.RowIndex < 0 || e.ColumnIndex < 0 || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
+         var attribute = _grid.Columns[e.ColumnIndex].Name;
++        if (attribute == "Country" && data.DraftCountry != data.OriginalCountry)
++        {
++            e.Value = $"{data.DraftCountry} ({data.OriginalCountry})"; e.FormattingApplied = true; return;
++        }
++        if (e.Value is not decimal value) return;
+         if (data.Original.TryGetValue(attribute, out var original) && value != original && !_grid[e.ColumnIndex, e.RowIndex].IsInEditMode)
+         {
+             e.Value = $"{value:N0} ({original:N0})";
+@@ -263,6 +305,37 @@ internal sealed class TruckPropertiesTab : UserControl
+         }
+     }
+ 
++    private void PaintCountry(DataGridViewRow row)
++    {
++        if (row.Tag is not TruckPropertyRow data) return;
++        row.Cells["Country"].Style.BackColor = data.DraftCountry != data.Country ? Color.LightGoldenrodYellow
++            : data.Country != data.OriginalCountry ? Color.Honeydew : AppColors.Get("Surface");
++        row.Cells["Country"].ToolTipText = $"Original: {data.OriginalCountry}\nIn files: {data.Country}\nPreview: {data.DraftCountry}";
++    }
++
++    private void SetUnlockDifficulty(ProgressionDifficulty difficulty)
++    {
++        _loadingUnlockDifficulty = true;
++        try
++        {
++            _unlockDifficulty = difficulty;
++            foreach (var radio in _unlockDifficultyOptions) radio.Checked = radio.Text == difficulty.ToString();
++        }
++        finally { _loadingUnlockDifficulty = false; }
++    }
++
++    private void GenerateUnlockRanks()
++    {
++        if (!_grid.EndEdit() || !Ready()) return;
++        var enabled = (_getEnabledTrucks?.Invoke() ?? _rows.Select(row => row.Truck).ToArray()).Select(truck => truck.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var plan = TruckUnlockRankGenerator.Generate(_rows, TierListStore.Load(), enabled, _unlockDifficulty, Random.Shared.Next());
++        var byFile = plan.Choices.ToDictionary(choice => choice.RelativeFile, StringComparer.OrdinalIgnoreCase);
++        foreach (var row in _rows)
++            if (byFile.TryGetValue(row.RelativeFile, out var choice)) { row.Draft["UnlockByRank"] = choice.Rank; row.DraftCountry = choice.Countries; }
++        ShowRows();
++        _status.Text = $"Unlock ranks previewed: {_unlockDifficulty}, soft cap ≈{plan.SoftCap} (up to 30). Rank-1 coverage: every game class/store country. {plan.CountryExtensions} starter country additions; {plan.Unranked} unranked values kept except required starters. Stage changes to keep this plan.";
++    }
++
+     private void ValidateCell(object? sender, DataGridViewCellValidatingEventArgs e)
+     {
+         if (_updating || e.RowIndex < 0 || _grid[e.ColumnIndex, e.RowIndex].ReadOnly) return;
+@@ -299,12 +372,16 @@ internal sealed class TruckPropertiesTab : UserControl
+         .Where(pair => !changedOnly || pair.Value != row.Current[pair.Key])
+         .Select(pair => new TruckPropertyEdit(row.RelativeFile, row.Truck.Name, pair.Key, row.Current[pair.Key], pair.Value))).ToList();
+ 
++    private List<TruckCountryEdit> DraftCountries(bool changedOnly) => _rows.Where(row => row.Country.Length > 0 && (!changedOnly || row.DraftCountry != row.Country))
++        .Select(row => new TruckCountryEdit(row.RelativeFile, row.Truck.Name, row.Country, row.DraftCountry)).ToList();
++
+     private void Stage()
+     {
+         if (!_grid.EndEdit() || !Ready()) return;
+         var edits = DraftValues(true);
+-        TruckPropertiesStore.SavePending(_loadedWorkspace!, edits);
+-        _status.Text = $"Staged {edits.Count} truck property changes. Apply pending PAK edits from Start.";
++        var countries = DraftCountries(true);
++        TruckPropertiesStore.SaveSnapshot(_loadedWorkspace!, edits, countries);
++        _status.Text = $"Staged {edits.Count + countries.Count} truck property changes. Apply pending PAK edits from Start.";
+     }
+ 
+     private void SavePreset()
+@@ -312,7 +389,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (!_grid.EndEdit() || !Ready()) return;
+         using var dialog = new SaveFileDialog { Title = "Save truck properties preset", Filter = "Truck properties preset (*.json)|*.json", FileName = "truck-properties.json" };
+         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+-        TruckPropertiesStore.WriteAtomic(dialog.FileName, TruckPropertiesStore.SerializePreset(DraftValues(false)));
++        TruckPropertiesStore.WriteAtomic(dialog.FileName, TruckPropertiesStore.SerializeSnapshot(DraftValues(false), DraftCountries(false)));
+         _status.Text = "Truck properties preset saved.";
+     }
+ 
+@@ -321,18 +398,27 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (!_grid.EndEdit() || !Ready()) return;
+         using var dialog = new OpenFileDialog { Title = "Load truck properties preset", Filter = "Truck properties preset (*.json)|*.json" };
+         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+-        var values = TruckPropertiesStore.ReadPreset(File.ReadAllText(dialog.FileName));
++        var preset = TruckPropertiesStore.ReadPresetSnapshot(File.ReadAllText(dialog.FileName));
++        var values = preset.Values;
+         var count = 0;
+         foreach (var row in _rows)
+             foreach (var edit in values.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
+                 if (row.Draft.ContainsKey(edit.Attribute)) { row.Draft[edit.Attribute] = edit.After; count++; }
+-        ShowRows(); _status.Text = $"Loaded {count} preset values; {values.Count - count} unavailable values skipped. Stage changes to keep them.";
++        foreach (var row in _rows)
++            foreach (var edit in preset.Countries!.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
++                if (row.Country.Length > 0) { row.DraftCountry = edit.After; count++; }
++        ShowRows(); _status.Text = $"Loaded {count} preset values; {values.Count + preset.Countries!.Count - count} unavailable values skipped. Stage changes to keep them.";
+     }
+ 
+-    public IEnumerable<WorkspaceChange> PendingChanges(string workspace) => TruckPropertiesStore.LoadPending(workspace)
+-        .Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
++    public IEnumerable<WorkspaceChange> PendingChanges(string workspace)
++    {
++        var pending = TruckPropertiesStore.LoadSnapshot(workspace);
++        return pending.Values.Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
+             edit.TruckName + ": " + TruckPropertiesStore.Specs.Single(spec => spec.Attribute == edit.Attribute).Label,
+-            edit.Before.ToString(CultureInfo.InvariantCulture), edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
++            edit.Before.ToString(CultureInfo.InvariantCulture), edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile))
++            .Concat(pending.Countries!.Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
++                edit.TruckName + ": Store countries", edit.Before, edit.After, edit.RelativeFile)));
++    }
+ 
+     public void SavePendingChanges()
+     {
+@@ -340,14 +426,17 @@ internal sealed class TruckPropertiesTab : UserControl
+         _loadedWorkspace = null; // Re-read applied values on the next visit.
+     }
+ 
+-    private void UpdateStatus() => _status.Text = $"{_rows.Count} trucks · {DraftValues(true).Count} changed values. {_regionStatus}";
++    private void UpdateStatus() => _status.Text = $"{_rows.Count} trucks · {DraftValues(true).Count + DraftCountries(true).Count} changed values. {_regionStatus}";
+     private void HideHover() { _hover?.Dispose(); _hover = null; }
+     private void RefreshColors(object? sender, EventArgs e)
+     {
+         _grid.BackgroundColor = AppColors.Get("Surface");
+         _grid.DefaultCellStyle.BackColor = AppColors.Get("Surface");
+         foreach (DataGridViewRow row in _grid.Rows)
++        {
+             foreach (var spec in TruckPropertiesStore.Specs) PaintValue(row, spec);
++            PaintCountry(row);
++        }
+         _grid.Invalidate();
+     }
+ 
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index ea9def3..dbdbd05 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -71,7 +71,11 @@ internal sealed class MainForm : Form
+             _truckRandomizationTab.RefreshStagingState();
+             if (_startChanges is not null) await _startChanges.RefreshAsync();
+         };
+-        _truckPropertiesTab = new TruckPropertiesTab(() => _workspacePath.Text.Trim(), _regionsTrucksTab.GetRandomizationCatalogAsync);
++        _truckPropertiesTab = new TruckPropertiesTab(() => _workspacePath.Text.Trim(), _regionsTrucksTab.GetRandomizationCatalogAsync, () =>
++        {
++            _ownedContentTab.EnsureLoaded();
++            return _ownedContentTab.GetAvailableCustomGroupingTrucks();
++        });
+         BuildLayout();
+         _workspacePath.TextChanged += (_, _) => _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+         _unpackButton.Click += async (_, _) => await UnpackAsync();
+diff --git a/README.md b/README.md
+index 44ba921..4a90f79 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,8 @@ All desktop tabs share one double-Shift text search with a three-character minim
+ 
+ **Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells individually. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to whole litres (halves away from zero), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
++**Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. Easy has the broadest, early-biased within-tier variation so stronger trucks can unlock sooner; Normal has moderate variation; Hard is later and tighter. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. Every original game class (Highway, Heavy Duty, Offroad, Heavy, Scout) must have an owned, directly purchasable rank-1 truck in every store country found in the workspace; app-only Logging/Farming Tractor classes are ignored for this check. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. If a country has no eligible candidate of a class, the generator adds that country to a suitable owned starter; if an entire game class has no eligible starter, generation stops before changing the preview and explains the missing class. Country changes are highlighted with their originals, included in pending changes, and handled together with ranks by Stage, Apply, revert and version-2 presets. Earlier numeric-only pending files and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview.
++
+ The **Planning** tab contains **Truck tiers** and **Region difficulty**, alongside ownership and truck groups. **Region difficulty** ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ ANK MK38 Civilian (`ank_mk38_ht`) is included in the base truck catalog even though its XML is stored under `_dlc/dlc_6` without a truck entitlement entry. It appears in Planning → Truck tiers → Unsorted until ranked, and shares that assignment with Truck properties. Its tier is independent of the regular ANK MK38.
+diff --git a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+new file mode 100644
+index 0000000..18f9a1b
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+@@ -0,0 +1,96 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record TruckUnlockChoice(string RelativeFile, int Rank, string Countries, bool Starter);
++internal sealed record TruckUnlockPlan(List<TruckUnlockChoice> Choices, int SoftCap, int Unranked, int CountryExtensions);
++
++internal static class TruckUnlockRankGenerator
++{
++    internal static readonly string[] GameClasses = ["HIGHWAY", "HEAVY_DUTY", "OFFROAD", "HEAVY", "SCOUT"];
++    internal static int Quality(string tier) => tier switch { "FX" => 0, "D" => 1, "C" => 2, "B" => 3, "A" => 4, "S" => 5, "SS" => 6, _ => -1 };
++    internal static int SoftCap(ProgressionDifficulty difficulty) => difficulty switch
++    {
++        ProgressionDifficulty.Easy => 15, ProgressionDifficulty.Normal => 20, ProgressionDifficulty.Hard => 25,
++        _ => throw new ArgumentOutOfRangeException(nameof(difficulty))
++    };
++    internal static string[] Countries(string value) => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
++        .Select(code => code.ToUpperInvariant()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
++
++    internal static TruckUnlockPlan Generate(IReadOnlyList<TruckPropertyRow> rows, IReadOnlyList<GroupState> tiers,
++        IReadOnlySet<string> enabledCodes, ProgressionDifficulty difficulty, int seed)
++    {
++        var cap = SoftCap(difficulty);
++        var qualities = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        foreach (var tier in tiers)
++            foreach (var code in tier.TruckCodes)
++                if (Quality(tier.Name) is var quality && quality >= 0) qualities.TryAdd(code, quality);
++        var candidates = rows.Where(row => enabledCodes.Contains(row.Truck.Code) && row.Current.ContainsKey("UnlockByRank")
++            && row.Current.ContainsKey("Price") && !row.RequiresExploration && row.UnlockObjective.Length == 0 && !row.Locked
++            && row.Country.Length > 0 && GameClasses.Contains(row.GameClass.ToUpperInvariant())).ToArray();
++        // Check the whole guarantee before changing any preview values.
++        foreach (var gameClass in GameClasses)
++            if (!candidates.Any(row => row.GameClass.Equals(gameClass, StringComparison.OrdinalIgnoreCase)))
++                throw new InvalidOperationException($"Cannot guarantee rank-1 store coverage for {gameClass}: no owned, directly purchasable truck with explicit rank/country values is available. Discovery/task locks are preserved.");
++        var countries = rows.SelectMany(row => Countries(row.DraftCountry)).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray();
++        if (countries.Length == 0) throw new InvalidOperationException("No store countries were found in the truck definitions.");
++        var random = new Random(seed);
++        var ranks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        var availableCountries = rows.ToDictionary(row => row.RelativeFile, row => Countries(row.DraftCountry).ToList(), StringComparer.OrdinalIgnoreCase);
++        var unranked = 0;
++        foreach (var row in rows.OrderBy(row => row.RelativeFile, StringComparer.OrdinalIgnoreCase))
++        {
++            if (!row.Draft.TryGetValue("UnlockByRank", out var current)) continue;
++            if (!qualities.TryGetValue(row.Truck.Code, out var quality)) { ranks[row.RelativeFile] = (int)current; unranked++; continue; }
++            var fraction = quality / 6.0;
++            var exponent = difficulty switch { ProgressionDifficulty.Easy => 1.15, ProgressionDifficulty.Hard => 0.85, _ => 1.0 };
++            var spread = difficulty switch { ProgressionDifficulty.Easy => 5.0, ProgressionDifficulty.Hard => 1.5, _ => 3.0 };
++            var target = 1 + (cap - 1) * Math.Pow(fraction, exponent);
++            var variation = (random.NextDouble() + random.NextDouble() + random.NextDouble() - 1.5) * spread * (0.5 + fraction * 0.5);
++            // Easy's broad spread chiefly rewards early access, with a smaller late tail around its soft cap.
++            if (difficulty == ProgressionDifficulty.Easy && variation > 0) variation *= 0.5;
++            ranks[row.RelativeFile] = Math.Clamp((int)Math.Round(target + variation, MidpointRounding.AwayFromZero), 1, 30);
++        }
++        var starters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        var extended = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        var extensions = 0;
++        foreach (var gameClass in GameClasses)
++        {
++            var pool = candidates.Where(row => row.GameClass.Equals(gameClass, StringComparison.OrdinalIgnoreCase))
++                .OrderBy(row => qualities.GetValueOrDefault(row.Truck.Code, int.MaxValue))
++                .ThenBy(row => row.Draft.GetValueOrDefault("Price", decimal.MaxValue))
++                .ThenBy(row => row.Truck.Code, StringComparer.OrdinalIgnoreCase).ToArray();
++            foreach (var country in countries)
++            {
++                if (pool.Any(row => ranks[row.RelativeFile] == 1 && availableCountries[row.RelativeFile].Contains(country, StringComparer.OrdinalIgnoreCase))) continue;
++                var starter = pool.FirstOrDefault(row => availableCountries[row.RelativeFile].Contains(country, StringComparer.OrdinalIgnoreCase)) ?? pool[0];
++                ranks[starter.RelativeFile] = 1; starters.Add(starter.RelativeFile);
++                if (!availableCountries[starter.RelativeFile].Contains(country, StringComparer.OrdinalIgnoreCase))
++                {
++                    availableCountries[starter.RelativeFile].Add(country); extended.Add(starter.RelativeFile); extensions++;
++                }
++            }
++        }
++        return new(rows.Where(row => ranks.ContainsKey(row.RelativeFile)).Select(row => new TruckUnlockChoice(row.RelativeFile,
++            ranks[row.RelativeFile], extended.Contains(row.RelativeFile) ? string.Join(",", availableCountries[row.RelativeFile]) : row.DraftCountry,
++            starters.Contains(row.RelativeFile))).ToList(), cap, unranked, extensions);
++    }
++}
++
++internal static class TruckUnlockRankSettings
++{
++    private static string PathFor(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "truck-properties", "unlock-rank-settings.json");
++    internal static ProgressionDifficulty Load(string workspace)
++    {
++        var path = PathFor(workspace);
++        if (!File.Exists(path)) return ProgressionDifficulty.Normal;
++        var value = JsonSerializer.Deserialize<ProgressionDifficulty>(File.ReadAllText(path));
++        if (!Enum.IsDefined(value)) throw new InvalidDataException("Invalid unlock-rank difficulty setting.");
++        return value;
++    }
++    internal static void Save(string workspace, ProgressionDifficulty value)
++    {
++        if (!Enum.IsDefined(value)) throw new ArgumentOutOfRangeException(nameof(value));
++        TruckPropertiesStore.WriteAtomic(PathFor(workspace), JsonSerializer.Serialize(value));
++    }
++}
+diff --git a/.checks/UnlockRanks/Program.cs b/.checks/UnlockRanks/Program.cs
+new file mode 100644
+index 0000000..1548d06
+--- /dev/null
++++ b/.checks/UnlockRanks/Program.cs
+@@ -0,0 +1,187 @@
++using System.Collections;
++using System.Linq.Expressions;
++using System.Reflection;
++using System.Text.Json;
++using System.Text.Json.Nodes;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    private static object? Static(string type, string name, params object?[] args) => T(type).GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
++    private static object? Call(object obj, string name, params object?[] args) => obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(obj, args);
++    private static object Property(object obj, string name) => obj.GetType().GetProperty(name)!.GetValue(obj)!;
++    private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static object ListOf(string type) => Activator.CreateInstance(typeof(List<>).MakeGenericType(T(type)))!;
++    private static IEnumerable<object> Items(object list) => ((IEnumerable)list).Cast<object>();
++    private static string Code(object row) => (string)Property(Property(row, "Truck"), "Code");
++    private static Dictionary<string, decimal> Draft(object row) => (Dictionary<string, decimal>)Property(row, "Draft");
++    private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static void Wait(Task task)
++    {
++        var end = DateTime.UtcNow.AddSeconds(45);
++        while (!task.IsCompleted && DateTime.UtcNow < end) { Application.DoEvents(); Thread.Sleep(5); }
++        if (!task.IsCompleted) throw new TimeoutException(); task.GetAwaiter().GetResult();
++    }
++    private static IEnumerable<Control> All(Control root) => root.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(All(child)));
++    private static object Mode(string mode) => Enum.Parse(T("ProgressionDifficulty"), mode);
++    private static object Plan(object rows, object tiers, HashSet<string> owned, string mode, int seed) => Static("TruckUnlockRankGenerator", "Generate", rows, tiers, owned, Mode(mode), seed)!;
++    private static double Variance(IEnumerable<int> source) { var values = source.Select(value => (double)value).ToArray(); var mean = values.Average(); return values.Average(value => (value - mean) * (value - mean)); }
++    private static void Coverage(object rows, object plan, HashSet<string> owned)
++    {
++        var byFile = Items(rows).ToDictionary(row => (string)Property(row, "RelativeFile"));
++        var choices = Items(Property(plan, "Choices")).ToArray();
++        var countries = Items(rows).SelectMany(row => ((string)Property(row, "DraftCountry")).Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)).Distinct().ToArray();
++        foreach (var country in countries)
++            foreach (var gameClass in new[] { "HIGHWAY", "HEAVY_DUTY", "OFFROAD", "HEAVY", "SCOUT" })
++                if (!choices.Any(choice =>
++                {
++                    var row = byFile[(string)Property(choice, "RelativeFile")];
++                    return (int)Property(choice, "Rank") == 1 && (string)Property(row, "GameClass") == gameClass && owned.Contains(Code(row))
++                        && !(bool)Property(row, "RequiresExploration") && (string)Property(row, "UnlockObjective") == "" && !(bool)Property(row, "Locked")
++                        && ((string)Property(choice, "Countries")).Split(',').Contains(country);
++                })) throw new Exception($"Missing buyable rank-1 {gameClass} in {country}");
++    }
++    [STAThread] private static void Main(string[] args)
++    {
++        var root = Path.Combine(AppContext.BaseDirectory, "fixture-" + Guid.NewGuid().ToString("N"));
++        var truckRoot = Path.Combine(root, "initial.pak", "original_files", "[media]", "classes", "trucks"); Directory.CreateDirectory(truckRoot);
++        var tiers = (IList)ListOf("GroupState");
++        var tierByCode = new Dictionary<string, string>();
++        foreach (var tier in new[] { "FX", "D", "C", "B", "A", "S", "SS" })
++        {
++            var codes = new List<string>();
++            foreach (var gameClass in new[] { "HIGHWAY", "HEAVY_DUTY", "OFFROAD", "HEAVY", "SCOUT" })
++                for (var index = 0; index < 8; index++)
++                {
++                    var code = gameClass.ToLowerInvariant() + "_" + tier.ToLowerInvariant() + "_" + index;
++                    if (gameClass == "HEAVY" && tier == "D" && index == 7) code = "aramatsu_forester";
++                    if (gameClass == "HEAVY" && tier == "C" && index == 7) code = "kirovets_k700";
++                    codes.Add(code); tierByCode[code] = tier;
++                    var countries = gameClass is "HIGHWAY" or "HEAVY_DUTY" ? "US,NE,CE" : "US,RU,CAS,WA,NE,CE,CA";
++                    File.WriteAllText(Path.Combine(truckRoot, code + ".xml"), $"<_templates><TruckData FuelCapacity=\"999\"/></_templates>\n<Truck><TruckData TruckType=\"{gameClass}\" FuelCapacity=\"100\"/><GameData Country=\"{countries}\" UnlockByRank=\"20\" Price=\"1000\" UnlockByExploration=\"{(index == 1 ? "true" : "false")}\" {(index == 2 ? "UnlockByObjective=\"TASK_LOCK\"" : "")}><UiDesc UiName=\"{code}\"/></GameData><Unrelated Keep=\"true\"/></Truck>");
++                }
++            var state = Activator.CreateInstance(T("GroupState"))!;
++            state.GetType().GetProperty("Name")!.SetValue(state, tier); state.GetType().GetProperty("TruckCodes")!.SetValue(state, codes); tiers.Add(state);
++        }
++        File.WriteAllText(Path.Combine(truckRoot, "unranked.xml"), "<Truck><TruckData TruckType=\"SCOUT\" FuelCapacity=\"80\"/><GameData Country=\"US\" UnlockByRank=\"17\" Price=\"3000\" UnlockByExploration=\"false\"><UiDesc UiName=\"UNRANKED\"/></GameData></Truck>");
++        var rows = Static("TruckPropertiesStore", "LoadRows", root)!;
++        var owned = Items(rows).Select(Code).Where(code => !code.EndsWith("_0")).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var byFile = Items(rows).ToDictionary(row => (string)Property(row, "RelativeFile"));
++        Check(Items(rows).Single(row => Code(row) == "aramatsu_forester") is var logging && (string)Property(logging, "GameClass") == "HEAVY" && (string)Property(Property(logging, "Truck"), "Class") == "Logging", "generator keeps original game class independently of custom app class");
++        var samples = new Dictionary<string, List<int>>();
++        foreach (var mode in new[] { "Easy", "Normal", "Hard" })
++        {
++            samples[mode] = [];
++            var means = new Dictionary<string, List<int>>(); foreach (var tier in tierByCode.Values.Distinct()) means[tier] = [];
++            var exceeds = false;
++            for (var seed = 0; seed < 80; seed++)
++            {
++                var plan = Plan(rows, tiers, owned, mode, seed); Coverage(rows, plan, owned);
++                var cap = (int)Property(plan, "SoftCap");
++                foreach (var choice in Items(Property(plan, "Choices")))
++                {
++                    var rank = (int)Property(choice, "Rank"); var row = byFile[(string)Property(choice, "RelativeFile")];
++                    if (rank is < 1 or > 30) throw new Exception("Rank range");
++                    if (Code(row) == "unranked") { if (rank != 17) throw new Exception("Unranked changed"); continue; }
++                    var tier = tierByCode[Code(row)]; means[tier].Add(rank);
++                    if (tier == "SS") { samples[mode].Add(rank); if (rank > cap) exceeds = true; }
++                    if ((string)Property(choice, "Countries") != (string)Property(row, "DraftCountry") && (rank != 1 || !owned.Contains(Code(row)))) throw new Exception("Country extension beyond owned starter");
++                }
++            }
++            var averages = new[] { "FX", "D", "C", "B", "A", "S", "SS" }.Select(tier => means[tier].Average()).ToArray();
++            Check(averages.Zip(averages.Skip(1)).All(pair => pair.First < pair.Second), mode + " tier means rise from FX to SS");
++            Check(exceeds, mode + " soft cap can be exceeded without going beyond rank 30");
++        }
++        Check(Variance(samples["Easy"]) > Variance(samples["Normal"]) && Variance(samples["Normal"]) > Variance(samples["Hard"])
++            && samples["Easy"].Any(rank => rank <= 11), "Easy has the widest variance and meaningful early SS unlocks; Hard is tightest");
++        Check(Items(rows).All(row => Draft(row)["UnlockByRank"] == (Code(row) == "unranked" ? 17 : 20)), "generation plans never mutate preview/game data before accepted by the UI");
++        Check(true, "every original game class is buyable at rank 1 in every store country across all seeds, excluding unowned and discovery/task-locked candidates");
++        var failed = false;
++        try { Plan(rows, tiers, new HashSet<string>(), "Easy", 1); } catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException) { failed = true; }
++        Check(failed, "impossible owned starter coverage is reported before any preview mutation");
++        Static("TruckUnlockRankSettings", "Save", root, Mode("Normal"));
++        var emptyEntries = Array.CreateInstance(T("RegionTruckEntry"), 0);
++        var catalog = Activator.CreateInstance(T("RegionTruckCatalog"), emptyEntries, Array.Empty<string>(), 0, null)!;
++        var getter = Expression.Lambda(typeof(Func<>).MakeGenericType(typeof(Task<>).MakeGenericType(T("RegionTruckCatalog"))),
++            Expression.Call(typeof(Task).GetMethod("FromResult")!.MakeGenericMethod(T("RegionTruckCatalog")), Expression.Constant(catalog))).Compile();
++        var trucks = (IList)ListOf("CustomTruck"); foreach (var row in Items(rows).Where(row => owned.Contains(Code(row)))) trucks.Add(Property(row, "Truck"));
++        var ownedGetter = Expression.Lambda(typeof(Func<>).MakeGenericType(typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck"))), Expression.Constant(trucks, typeof(IReadOnlyList<>).MakeGenericType(T("CustomTruck")))).Compile();
++        using var tab = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => root), getter, ownedGetter)!;
++        tab.Size = new Size(1400, 850); tab.CreateControl(); Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        var radios = All(tab).OfType<RadioButton>().ToArray();
++        Check(radios.Length == 3 && radios.Single(radio => radio.Checked).Text == "Normal", "unlock difficulty radios load saved setting");
++        radios.Single(radio => radio.Text == "Easy").Checked = true;
++        Check(Static("TruckUnlockRankSettings", "Load", root)!.ToString() == "Easy", "difficulty persists independently of staged edits");
++        All(tab).OfType<Button>().Single(button => button.Text == "Generate unlock ranks").PerformClick();
++        var uiRows = Field(tab, "_rows");
++        Check(Items(uiRows).Any(row => Draft(row)["UnlockByRank"] == 1) && Items(uiRows).Any(row => (string)Property(row, "DraftCountry") != (string)Property(row, "Country")), "button previews starter ranks and required country additions");
++        Check(Items(Property(Static("TruckPropertiesStore", "LoadSnapshot", root)!, "Values")).Count() == 0 && !Directory.Exists(Path.Combine(root, "initial.pak", "updated")), "generating/changing difficulty does not stage or write truck files");
++        Call(tab, "Stage"); var snapshot = Static("TruckPropertiesStore", "LoadSnapshot", root)!;
++        Check(Items(Property(snapshot, "Values")).Any() && Items(Property(snapshot, "Countries")).Any(), "ranks and country extensions are staged in one snapshot");
++        var presetJson = (string)Static("TruckPropertiesStore", "SerializeSnapshot", Property(snapshot, "Values"), Property(snapshot, "Countries"))!;
++        Check(Items(Property(Static("TruckPropertiesStore", "ReadPresetSnapshot", presetJson)!, "Countries")).Any(), "version-2 preset retains country coverage edits");
++        var pendingPath = Path.Combine(root, "truck-properties", "pending-changes.json");
++        var savedSnapshot = File.ReadAllText(pendingPath);
++        var malformed = JsonNode.Parse(presetJson)!; malformed["Countries"]![0]!["After"] = "US,\"invalid";
++        var badCountries = JsonSerializer.Deserialize(malformed["Countries"]!.ToJsonString(), Property(snapshot, "Countries").GetType())!;
++        failed = false;
++        try { Static("TruckPropertiesStore", "SaveSnapshot", root, Property(snapshot, "Values"), badCountries); }
++        catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { failed = true; }
++        Check(failed && File.ReadAllText(pendingPath) == savedSnapshot, "invalid country values cannot overwrite the staged snapshot");
++        var legacy = Path.Combine(root, "legacy"); Directory.CreateDirectory(Path.Combine(legacy, "truck-properties"));
++        File.WriteAllText(Path.Combine(legacy, "truck-properties", "pending-changes.json"), JsonSerializer.Serialize(Property(snapshot, "Values")));
++        var upgraded = Static("TruckPropertiesStore", "LoadSnapshot", legacy)!;
++        Check(Items(Property(upgraded, "Values")).Any() && !Items(Property(upgraded, "Countries")).Any(), "legacy numeric-only pending arrays remain readable");
++        using (var fresh = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => root), getter, ownedGetter)!)
++        {
++            Check(Items(Call(fresh, "PendingChanges", root)!).Count() == Items(Property(snapshot, "Values")).Count() + Items(Property(snapshot, "Countries")).Count(), "Start restores numeric and country changes before opening the tab");
++            Wait((Task)Call(fresh, "EnsureLoadedAsync", false)!);
++            Check(Items(Field(fresh, "_rows")).Any(row => (string)Property(row, "DraftCountry") != (string)Property(row, "Country")), "staged countries survive tab restart");
++        }
++        var countryEdit = Items(Property(snapshot, "Countries")).First();
++        var relative = (string)Property(countryEdit, "RelativeFile");
++        var currentPath = (string)Static("WorkspaceOriginals", "GetCurrentPath", root, relative)!;
++        var originalText = File.ReadAllText(currentPath);
++        var updatePath = (string)Static("WorkspaceOriginals", "PrepareForEdit", root, currentPath)!;
++        var externalText = originalText.Replace("Country=\"" + (string)Property(countryEdit, "Before") + "\"", "Country=\"EXTERNAL\"");
++        File.WriteAllText(updatePath, externalText);
++        failed = false;
++        try { Static("TruckPropertiesStore", "Apply", root); } catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { failed = true; }
++        Check(failed && File.ReadAllText(updatePath) == externalText
++            && Directory.GetFiles(Path.Combine(root, "initial.pak", "updated"), "*.xml", SearchOption.AllDirectories).Length == 1,
++            "country conflicts reject the entire Apply before any other truck file is written");
++        File.WriteAllText(updatePath, originalText);
++        Call(tab, "SavePendingChanges");
++        var applied = Static("TruckPropertiesStore", "LoadRows", root)!;
++        Check(Items(applied).Any(row => (string)Property(row, "Country") != (string)Property(row, "OriginalCountry")) && Items(applied).All(row => Draft(row)["FuelCapacity"] == (Code(row) == "unranked" ? 80 : 100)), "Apply writes country/rank edits while preserving fuel");
++        Check(Directory.GetFiles(truckRoot).All(file => File.ReadAllText(file).Contains("FuelCapacity=\"100\"") || Path.GetFileName(file) == "unranked.xml"), "Apply preserves original truck files");
++        Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        using (var bitmap = new Bitmap(tab.Width, tab.Height)) { tab.PerformLayout(); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size)); bitmap.Save(Path.Combine(AppContext.BaseDirectory, "unlock-ranks-preview.png")); }
++        var changedCountryRow = Items(applied).First(row => (string)Property(row, "Country") != (string)Property(row, "OriginalCountry"));
++        var countryOnly = Static("TruckPropertiesStore", "ReadPresetSnapshot", JsonSerializer.Serialize(new
++        {
++            Version = 2, Values = Array.Empty<object>(), Countries = new[] { new
++            {
++                RelativeFile = (string)Property(changedCountryRow, "RelativeFile"), TruckName = Code(changedCountryRow),
++                Before = (string)Property(changedCountryRow, "Country"), After = (string)Property(changedCountryRow, "OriginalCountry")
++            } }
++        }))!;
++        Static("TruckPropertiesStore", "SaveSnapshot", root, Property(countryOnly, "Values"), Property(countryOnly, "Countries"));
++        Check(Items(Call(tab, "PendingChanges", root)!).Count() == 1, "country-only edits are visible on Start without numeric edits");
++        Static("TruckPropertiesStore", "Apply", root);
++        Wait((Task)Call(tab, "EnsureLoadedAsync", true)!);
++        All(tab).OfType<Button>().Single(button => button.Text == "Reset to original values").PerformClick(); Call(tab, "Stage"); Call(tab, "SavePendingChanges");
++        var restored = Static("TruckPropertiesStore", "LoadRows", root)!;
++        Check(Items(restored).All(row => (string)Property(row, "Country") == (string)Property(row, "OriginalCountry")
++            && Draft(row)["UnlockByRank"] == (Code(row) == "unranked" ? 17 : 20)), "reset/stage/apply restores original ranks and store countries together");
++        if (args.Length > 0)
++        {
++            var real = Static("TruckPropertiesStore", "LoadRows", args[0])!;
++            var realOwned = Items(real).Where(row => ((string)Property(row, "RelativeFile")).StartsWith("[media]/classes/trucks/", StringComparison.OrdinalIgnoreCase) || Code(row) == "ank_mk38_ht").Select(Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            var realPlan = Plan(real, tiers, realOwned, "Hard", 42); Coverage(real, realPlan, realOwned);
++            Check(true, "real workspace supports all country/class starters using only base-game/free-update trucks");
++        }
++        Console.WriteLine("All unlock progression, coverage, UI, staging and preset checks passed.");
++    }
++}
+diff --git a/.checks/UnlockRanks/UnlockRanks.csproj b/.checks/UnlockRanks/UnlockRanks.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/UnlockRanks/UnlockRanks.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

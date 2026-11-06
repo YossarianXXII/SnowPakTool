@@ -1,0 +1,349 @@
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index 742f1f5..d47f06b 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -33,7 +33,8 @@ internal sealed class OwnedContentTab : UserControl
+     private string? _loadedWorkspace;
+     private ListSortDirection _regionSortDirection = ListSortDirection.Ascending;
+     private readonly Dictionary<DataGridView, ListSortDirection> _releaseDateSortDirections = new();
+-    private readonly Dictionary<string, ListSortDirection> _truckSortDirections = new(StringComparer.OrdinalIgnoreCase);
++    private string? _truckSortColumn;
++    private ListSortDirection _truckSortDirection = ListSortDirection.Ascending;
+     public event Action? OwnedTrucksChanged;
+ 
+     public OwnedContentTab(Func<string> getWorkspacePath, OwnedRegionState ownedRegionState)
+@@ -41,7 +42,7 @@ internal sealed class OwnedContentTab : UserControl
+         _getWorkspacePath = getWorkspacePath;
+         _ownedRegionState = ownedRegionState;
+         BuildLayout();
+-        Disposed += (_, _) => _paneTips.Dispose();
++        Disposed += (_, _) => { _paneTips.Dispose(); foreach (var filter in _truckFilters) filter.Dispose(); };
+         AppColors.Changed += (_, _) => RefreshPaletteColors();
+         _ownedRegionState.Changed += UpdateOwnedRegion;
+     }
+@@ -55,6 +56,8 @@ internal sealed class OwnedContentTab : UserControl
+         _truckDlcGrid.Rows.Clear();
+         _otherDlcGrid.Rows.Clear();
+         _truckGrid.Rows.Clear();
++        _truckSortColumn = null;
++        foreach (DataGridViewColumn column in _truckGrid.Columns) column.HeaderCell.SortGlyphDirection = SortOrder.None;
+         foreach (var filter in _truckFilters) filter.SetOptions(Array.Empty<string>());
+         OwnedTrucksChanged?.Invoke();
+ 
+@@ -165,13 +168,8 @@ internal sealed class OwnedContentTab : UserControl
+         AddOwnedSection("Truck DLCs", _truckDlcGrid, _selectAllTruckDlcs, 2, 35);
+         AddOwnedSection("Other DLCs", _otherDlcGrid, _selectAllOtherDlcs, 4, 20);
+         var truckSection = new GroupBox { Text = "Truck list", Dock = DockStyle.Fill, Padding = new Padding(8), Margin = new Padding(6) };
+-        var truckPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+-        truckPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+-        truckPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-        truckPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+-        truckPanel.Controls.Add(CreateTruckFilterPanel(), 0, 0);
+-        truckPanel.Controls.Add(_truckGrid, 0, 1);
+-        truckSection.Controls.Add(truckPanel);
++        ConfigureTruckHeaderFilters();
++        truckSection.Controls.Add(_truckGrid);
+ 
+         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
+         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 69));
+@@ -203,22 +201,18 @@ internal sealed class OwnedContentTab : UserControl
+ 
+         _truckGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TruckName", HeaderText = "Truck", ReadOnly = true, FillWeight = 42, MinimumWidth = 120 });
+         _truckGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "DlcName", HeaderText = "DLC", ReadOnly = true, FillWeight = 38, MinimumWidth = 110 });
+-        _truckGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TruckClass", HeaderText = "Class", ReadOnly = true, FillWeight = 20, MinimumWidth = 70 });
++        _truckGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TruckClass", HeaderText = "Class", ReadOnly = true, FillWeight = 20, MinimumWidth = 100 });
+         foreach (DataGridViewColumn column in _truckGrid.Columns)
+             column.SortMode = DataGridViewColumnSortMode.Programmatic;
+-        foreach (var name in new[] { "TruckName", "DlcName", "TruckClass" })
+-            _truckSortDirections[name] = ListSortDirection.Ascending;
+         _truckGrid.ColumnHeaderMouseClick += (_, e) =>
+         {
+-            var columnName = _truckGrid.Columns[e.ColumnIndex].Name;
+-            var direction = _truckSortDirections[columnName] == ListSortDirection.Ascending
+-                ? ListSortDirection.Descending
+-                : ListSortDirection.Ascending;
+-            _truckSortDirections[columnName] = direction;
+-            _truckGrid.Sort(new TruckColumnComparer(columnName, direction));
+-            foreach (DataGridViewColumn column in _truckGrid.Columns)
+-                column.HeaderCell.SortGlyphDirection = column.Name != columnName ? SortOrder.None
+-                    : direction == ListSortDirection.Ascending ? SortOrder.Ascending : SortOrder.Descending;
++            if (e.Button != MouseButtons.Left) return;
++            var column = _truckGrid.Columns[e.ColumnIndex];
++            var cellBounds = _truckGrid.GetCellDisplayRectangle(e.ColumnIndex, -1, true);
++            var filterBounds = TruckHeaderCell.FilterBounds(new Rectangle(0, 0, cellBounds.Width, cellBounds.Height), _truckGrid.DeviceDpi / 96f);
++            if (filterBounds.Contains(e.X, e.Y)) { ShowTruckFilter(column); return; }
++            SortTrucks(column.Name, _truckSortColumn == column.Name && _truckSortDirection == ListSortDirection.Ascending
++                ? ListSortDirection.Descending : ListSortDirection.Ascending);
+         };
+ 
+         _regionGrid.Columns["DlcName"]!.SortMode = DataGridViewColumnSortMode.Programmatic;
+@@ -351,32 +345,57 @@ internal sealed class OwnedContentTab : UserControl
+         Invalidate(true);
+     }
+ 
+-    private Control CreateTruckFilterPanel()
++    private void ConfigureTruckHeaderFilters()
+     {
+-        var filters = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, AutoSize = true, Margin = new Padding(0, 0, 0, 4) };
+-        filters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+-        filters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+-        filters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
+-        foreach (var (index, label, column) in new[]
+-        {
+-            (0, "Truck", "TruckName"),
+-            (1, "DLC", "DlcName"),
+-            (2, "Class", "TruckClass")
+-        })
++        foreach (DataGridViewColumn column in _truckGrid.Columns)
+         {
+-            var filter = new MultiSelectFilter(label, column);
++            var filter = new MultiSelectFilter(column.HeaderText, column.Name);
+             filter.Changed += ApplyTruckFilters;
+             _truckFilters.Add(filter);
+-            filters.Controls.Add(filter.Button, index, 0);
++            column.HeaderCell = new TruckHeaderCell(() => filter.IsFiltered) { Value = column.HeaderText };
++            var menu = new ContextMenuStrip();
++            menu.Items.Add("Sort ascending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Ascending));
++            menu.Items.Add("Sort descending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Descending));
++            menu.Items.Add(new ToolStripSeparator());
++            menu.Items.Add("Filter " + column.HeaderText + "…", null, (_, _) => ShowTruckFilter(column));
++            menu.Items.Add("Clear filter", null, (_, _) => filter.Clear());
++            column.HeaderCell.ContextMenuStrip = menu;
++            Disposed += (_, _) => menu.Dispose();
+         }
+-        return filters;
++        UpdateTruckHeaderTips();
++    }
++
++    private void ShowTruckFilter(DataGridViewColumn column)
++    {
++        var bounds = _truckGrid.GetCellDisplayRectangle(column.Index, -1, true);
++        _truckFilters.Single(filter => filter.ColumnName == column.Name)
++            .Show(_truckGrid, new Point(bounds.Right - 280, bounds.Bottom));
+     }
+ 
++    private void SortTrucks(string columnName, ListSortDirection direction)
++    {
++        _truckSortColumn = columnName;
++        _truckSortDirection = direction;
++        _truckGrid.Sort(new TruckColumnComparer(columnName, direction));
++        foreach (DataGridViewColumn column in _truckGrid.Columns)
++            column.HeaderCell.SortGlyphDirection = column.Name != columnName ? SortOrder.None
++                : direction == ListSortDirection.Ascending ? SortOrder.Ascending : SortOrder.Descending;
++        _truckGrid.Invalidate();
++    }
++
++    private void UpdateTruckHeaderTips()
++    {
++        foreach (var filter in _truckFilters)
++            _truckGrid.Columns[filter.ColumnName]!.HeaderCell.ToolTipText =
++                "Click the heading to sort; click the funnel to filter. Right-click for commands. " + filter.Description;
++    }
+     private void ApplyTruckFilters()
+     {
+         _truckGrid.CurrentCell = null;
+         foreach (DataGridViewRow row in _truckGrid.Rows)
+             row.Visible = _truckFilters.All(filter => filter.Includes(Convert.ToString(row.Cells[filter.ColumnName].Value) ?? string.Empty));
++        UpdateTruckHeaderTips();
++        _truckGrid.Invalidate();
+     }
+ 
+     private void UpdateTruckFilterOptions()
+@@ -698,7 +717,50 @@ internal sealed class OwnedContentTab : UserControl
+         if (row.Tag is string code) _ownedRegionState.SetOwned(code, isOwned);
+     }
+ 
+-    private sealed class MultiSelectFilter
++    private sealed class TruckHeaderCell : DataGridViewColumnHeaderCell
++    {
++        private Func<bool> _isFiltered;
++        public TruckHeaderCell() : this(() => false) { }
++        public TruckHeaderCell(Func<bool> isFiltered) => _isFiltered = isFiltered;
++        public override object Clone()
++        {
++            var clone = (TruckHeaderCell)base.Clone();
++            clone._isFiltered = _isFiltered;
++            return clone;
++        }
++        internal static Rectangle FilterBounds(Rectangle bounds, float scale) => new(bounds.Right - (int)(24 * scale), bounds.Top, (int)(24 * scale), bounds.Height);
++
++        protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
++            DataGridViewElementStates dataGridViewElementState, object? value, object? formattedValue, string? errorText,
++            DataGridViewCellStyle cellStyle, DataGridViewAdvancedBorderStyle advancedBorderStyle, DataGridViewPaintParts paintParts)
++        {
++            base.Paint(graphics, clipBounds, cellBounds, rowIndex, dataGridViewElementState, value, formattedValue, errorText,
++                cellStyle, advancedBorderStyle, paintParts & ~DataGridViewPaintParts.ContentForeground);
++            if (!paintParts.HasFlag(DataGridViewPaintParts.ContentForeground)) return;
++            var scale = graphics.DpiX / 96f;
++            var filter = FilterBounds(cellBounds, scale);
++            var text = new Rectangle(cellBounds.Left + (int)(4 * scale), cellBounds.Top, Math.Max(0, cellBounds.Width - (int)(44 * scale)), cellBounds.Height);
++            TextRenderer.DrawText(graphics, Convert.ToString(formattedValue), cellStyle.Font, text, cellStyle.ForeColor,
++                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
++            var y = cellBounds.Top + cellBounds.Height / 2f;
++            var x = filter.Left - 8 * scale;
++            if (SortGlyphDirection != SortOrder.None)
++            {
++                var sign = SortGlyphDirection == SortOrder.Ascending ? 1 : -1;
++                using var brush = new SolidBrush(cellStyle.ForeColor);
++                PointF[] arrow = [new(x - 4 * scale, y + sign * 3 * scale), new(x + 4 * scale, y + sign * 3 * scale), new(x, y - sign * 3 * scale)];
++                graphics.FillPolygon(brush, arrow);
++            }
++            x = filter.Left + filter.Width / 2f;
++            PointF[] funnel = [new(x - 5 * scale, y - 5 * scale), new(x + 5 * scale, y - 5 * scale), new(x + 1.5f * scale, y),
++                new(x + 1.5f * scale, y + 4 * scale), new(x - 1.5f * scale, y + 6 * scale), new(x - 1.5f * scale, y)];
++            using var pen = new Pen(_isFiltered() ? SystemColors.Highlight : cellStyle.ForeColor, scale);
++            if (_isFiltered()) { using var brush = new SolidBrush(SystemColors.Highlight); graphics.FillPolygon(brush, funnel); }
++            else graphics.DrawPolygon(pen, funnel);
++        }
++    }
++
++    private sealed class MultiSelectFilter : IDisposable
+     {
+         private readonly string _label;
+         private readonly ToolStripDropDown _dropDown = new() { AutoClose = true };
+@@ -716,9 +778,9 @@ internal sealed class OwnedContentTab : UserControl
+         {
+             _label = label;
+             ColumnName = columnName;
+-            Button = new Button { Text = $"{label}: All ▼", Dock = DockStyle.Fill, Height = 28, Margin = new Padding(1, 1, 3, 2) };
++            _dropDown.AccessibleName = label + " filter";
+             var selectAll = new Button { Text = "Select all", AutoSize = true, Margin = new Padding(2) };
+-            var clear = new Button { Text = "Clear", AutoSize = true, Margin = new Padding(2) };
++            var clear = new Button { Text = "Select none", AutoSize = true, Margin = new Padding(2) };
+             var commands = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 30, AutoSize = false, WrapContents = false };
+             commands.Controls.Add(selectAll);
+             commands.Controls.Add(clear);
+@@ -733,7 +795,6 @@ internal sealed class OwnedContentTab : UserControl
+                 Padding = Padding.Empty
+             };
+             _dropDown.Items.Add(host);
+-            Button.Click += (_, _) => _dropDown.Show(Button, 0, Button.Height);
+             selectAll.Click += (_, _) => SetAll(true);
+             clear.Click += (_, _) => SetAll(false);
+             _options.ItemCheck += (_, _) =>
+@@ -745,8 +806,12 @@ internal sealed class OwnedContentTab : UserControl
+         }
+ 
+         public event Action? Changed;
+-        public Button Button { get; }
+         public string ColumnName { get; }
++        public bool IsFiltered => _options.CheckedItems.Count != _options.Items.Count;
++        public string Description => $"{_label}: {_options.CheckedItems.Count} of {_options.Items.Count} selected.";
++        public void Show(Control owner, Point location) => _dropDown.Show(owner, location);
++        public void Clear() => SetAll(true);
++        public void Dispose() => _dropDown.Dispose();
+ 
+         public void SetOptions(IEnumerable<string> values)
+         {
+@@ -756,7 +821,6 @@ internal sealed class OwnedContentTab : UserControl
+             foreach (var value in values) _options.Items.Add(value, isChecked: true);
+             _options.EndUpdate();
+             _suppressEvents = false;
+-            UpdateCaption();
+         }
+ 
+         public bool Includes(string value) => _options.CheckedItems.Count == _options.Items.Count ||
+@@ -772,18 +836,8 @@ internal sealed class OwnedContentTab : UserControl
+ 
+         private void NotifyChanged()
+         {
+-            UpdateCaption();
+             Changed?.Invoke();
+         }
+-
+-        private void UpdateCaption()
+-        {
+-            var selected = _options.CheckedItems.Count;
+-            var total = _options.Items.Count;
+-            Button.Text = selected == total || total == 0
+-                ? $"{_label}: All ▼"
+-                : $"{_label}: {selected}/{total} ▼";
+-        }
+     }
+ 
+     private sealed record TruckMetadata(string Name, string Class);
+diff --git a/README.md b/README.md
+index a091aab..6ce5fb8 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
+-On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact.
++On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to sort ascending, then descending; the active sort arrow appears at its right. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
+ 
+ Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
+ 
+diff --git a/.checks/TruckHeaderFilters/Program.cs b/.checks/TruckHeaderFilters/Program.cs
+new file mode 100644
+index 0000000..9937139
+--- /dev/null
++++ b/.checks/TruckHeaderFilters/Program.cs
+@@ -0,0 +1,56 @@
++using System.Collections;
++using System.Reflection;
++
++internal static class Program
++{
++    private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static object? Call(object obj, string name, params object?[] args) => obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!.Invoke(obj, args);
++    private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    [STAThread] private static void Main()
++    {
++        var app = Assembly.Load("SnowPakTool.Desktop");
++        using var tab = (Control)Activator.CreateInstance(app.GetType("SnowPakTool.Desktop.OwnedContentTab")!, new Func<string>(() => ""), Activator.CreateInstance(app.GetType("SnowPakTool.Desktop.OwnedRegionState")!))!;
++        tab.Size = new Size(1400, 900); tab.CreateControl(); tab.PerformLayout();
++        var grid = (DataGridView)Field(tab, "_truckGrid");
++        grid.Rows.Add("Zulu", "Season 2", "Scout"); grid.Rows.Add("Alpha", "Base game", "Offroad");
++        grid.Rows.Add("Bravo", "Season 2", "Offroad"); grid.Rows.Add("Delta", "Base game", "Scout");
++        Call(tab, "UpdateTruckFilterOptions");
++        void ClickHeader(string column)
++        {
++            var e = new DataGridViewCellMouseEventArgs(grid.Columns[column]!.Index, -1, 8, 10, new MouseEventArgs(MouseButtons.Left, 1, 8, 10, 0));
++            typeof(DataGridView).GetMethod("OnColumnHeaderMouseClick", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(grid, new object[] { e });
++        }
++        string[] Visible() => grid.Rows.Cast<DataGridViewRow>().Where(row => row.Visible).Select(row => (string)row.Cells["TruckName"].Value!).ToArray();
++        void Capture(string name)
++        {
++            tab.PerformLayout(); using var bitmap = new Bitmap(tab.Width, tab.Height); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size));
++            bitmap.Save(Path.Combine(AppContext.BaseDirectory, name + ".png"));
++        }
++        ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Alpha", "Bravo", "Delta", "Zulu" }) && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.Ascending, "first header click sorts ascending with its glyph");
++        Capture("ascending");
++        ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Zulu", "Delta", "Bravo", "Alpha" }) && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.Descending, "second header click reverses sorting and glyph");
++        ClickHeader("TruckClass");
++        Check((string)grid.Rows[0].Cells["TruckClass"].Value! == "Offroad" && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.None, "another heading starts ascending and clears the previous sort arrow");
++        var filters = ((IEnumerable)Field(tab, "_truckFilters")).Cast<object>().ToArray();
++        object Filter(string column) => filters.Single(filter => (string)filter.GetType().GetProperty("ColumnName")!.GetValue(filter)! == column);
++        void Exclude(string column, string value)
++        {
++            var options = (CheckedListBox)Field(Filter(column), "_options"); options.CreateControl();
++            options.SetItemChecked(options.Items.IndexOf(value), false); Application.DoEvents();
++        }
++        Exclude("DlcName", "Base game");
++        Check(Visible().ToHashSet().SetEquals(new[] { "Zulu", "Bravo" }), "DLC filter hides only excluded DLC trucks");
++        Exclude("TruckClass", "Scout");
++        Check(Visible().SequenceEqual(new[] { "Bravo" }), "column filters combine using AND");
++        Capture("filtered");
++        ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Bravo" }), "sorting preserves filters");
++        foreach (var filter in filters) Call(filter, "Clear");
++        Check(Visible().Length == 4 && grid.Columns["DlcName"]!.HeaderCell.ToolTipText.Contains("2 of 2 selected"), "clear filter restores choices and refreshes header counts");
++        var clone = grid.Columns[0].HeaderCell.Clone(); Check(clone.GetType() == grid.Columns[0].HeaderCell.GetType(), "custom headers support grid cloning");
++        Capture("cleared");
++        Console.WriteLine("Header filtering/sorting verified using display-only fixture rows; no workspace or ownership changes.");
++    }
++}
+diff --git a/.checks/TruckHeaderFilters/TruckHeaderFilters.csproj b/.checks/TruckHeaderFilters/TruckHeaderFilters.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/TruckHeaderFilters/TruckHeaderFilters.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

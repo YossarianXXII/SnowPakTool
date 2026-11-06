@@ -1,0 +1,108 @@
+--- MainForm.cs
++++ MainForm.cs
+@@ -124,8 +124,10 @@
+         var experiencePage = new TabPage("Experience / Ranks");
+         var ownedContentPage = new TabPage("Owned content");
+         var customGroupingPage = new TabPage("Custom grouping");
+-        var tierListPage = new TabPage("Tier List");
+-        var regionTierListPage = new TabPage("Region Tier List");
++        var tierListsPage = new TabPage("Tier lists");
++        var tierListTabs = new TabControl { Dock = DockStyle.Fill };
++        var tierListPage = new TabPage("Truck");
++        var regionTierListPage = new TabPage("Region");
+         var truckEditPage = new TabPage("Truck edit");
+         var gameDataPage = new TabPage("Game data");
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+@@ -141,6 +143,9 @@
+         tierListPage.Controls.Add(_tierListTab);
+         _regionTierListTab.Dock = DockStyle.Fill;
+         regionTierListPage.Controls.Add(_regionTierListTab);
++        tierListTabs.TabPages.Add(tierListPage);
++        tierListTabs.TabPages.Add(regionTierListPage);
++        tierListsPage.Controls.Add(tierListTabs);
+         _truckEditTab.Dock = DockStyle.Fill;
+         _settingsTab.Dock = DockStyle.Fill;
+         unpackPage.Controls.Add(root);
+@@ -166,19 +171,46 @@
+         tabs.TabPages.Add(unpackPage);
+         tabs.TabPages.Add(ownedContentPage);
+         tabs.TabPages.Add(customGroupingPage);
+-        tabs.TabPages.Add(tierListPage);
+-        tabs.TabPages.Add(regionTierListPage);
++        tabs.TabPages.Add(tierListsPage);
+         tabs.TabPages.Add(experiencePage);
+         tabs.TabPages.Add(truckEditPage);
+         tabs.TabPages.Add(gameDataPage);
+         tabs.TabPages.Add(settingsPage);
++        async Task RefreshSelectedTierListAsync()
++        {
++            if (tabs.SelectedTab != tierListsPage) return;
++            var selectedTier = tierListTabs.SelectedTab;
++            var workspace = _workspacePath.Text.Trim();
++            try
++            {
++                await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++                if (tabs.SelectedTab != tierListsPage || tierListTabs.SelectedTab != selectedTier ||
++                    !string.Equals(workspace, _workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
++                if (selectedTier == tierListPage)
++                {
++                    _ownedContentTab.EnsureLoaded();
++                    _tierListTab.RefreshOwnedTrucks();
++                }
++                else if (selectedTier == regionTierListPage)
++                {
++                    _tierRegions = WorkspaceDataCache.GetRegionMetadata(workspace)
++                        .OrderBy(entry => RegionTileAssets.GetReleaseOrder(entry.Key))
++                        .ThenBy(entry => entry.Value.Name, StringComparer.CurrentCultureIgnoreCase)
++                        .Select(entry => new CustomTruck(entry.Key, entry.Value.Name, RegionTileAssets.GetReleaseLabel(entry.Key)))
++                        .ToList();
++                    _regionTierListTab.RefreshOwnedTrucks();
++                }
++            }
++            catch (Exception ex) { AppendLog($"Tier list loading failed: {ex.Message}"); }
++        }
++        tierListTabs.SelectedIndexChanged += async (_, _) => await RefreshSelectedTierListAsync();
+         tabs.SelectedIndexChanged += async (_, _) =>
+         {
+             var selectedPage = tabs.SelectedTab;
+             if (selectedPage is null) return;
+             try
+             {
+-                if (selectedPage == ownedContentPage || selectedPage == customGroupingPage || selectedPage == tierListPage)
++                if (selectedPage == ownedContentPage || selectedPage == customGroupingPage || selectedPage == tierListsPage)
+                     await WorkspaceDataCache.PreloadOwnedAsync(_workspacePath.Text.Trim());
+                 else
+                     await WorkspaceDataCache.PreloadAsync(_workspacePath.Text.Trim());
+@@ -202,20 +234,7 @@
+                 _ownedContentTab.EnsureLoaded();
+                 _customGroupWipTab.RefreshOwnedTrucks();
+             }
+-            if (selectedPage == tierListPage)
+-            {
+-                _ownedContentTab.EnsureLoaded();
+-                _tierListTab.RefreshOwnedTrucks();
+-            }
+-            if (selectedPage == regionTierListPage)
+-            {
+-                _tierRegions = WorkspaceDataCache.GetRegionMetadata(_workspacePath.Text.Trim())
+-                    .OrderBy(entry => RegionTileAssets.GetReleaseOrder(entry.Key))
+-                    .ThenBy(entry => entry.Value.Name, StringComparer.CurrentCultureIgnoreCase)
+-                    .Select(entry => new CustomTruck(entry.Key, entry.Value.Name, RegionTileAssets.GetReleaseLabel(entry.Key)))
+-                    .ToList();
+-                _regionTierListTab.RefreshOwnedTrucks();
+-            }
++            if (selectedPage == tierListsPage) await RefreshSelectedTierListAsync();
+             if (selectedPage == truckEditPage)
+             {
+                 _ownedContentTab.EnsureLoaded();
+--- README.md
++++ README.md
+@@ -20,7 +20,7 @@
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
+-The **Region Tier List** tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
++The **Tier lists** tab contains **Truck** and **Region** sub-tabs. The **Region** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+ 

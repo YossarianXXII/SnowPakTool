@@ -1,0 +1,718 @@
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/MainForm.cs
+index bb24857..524a37c 100644
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -18,6 +18,7 @@ internal sealed class MainForm : Form
+     private readonly TruckEditTab _truckEditTab;
+     private readonly TrucksCargoTab _trucksCargoTab;
+     private readonly RegionsTrucksTab _regionsTrucksTab;
++    private readonly TruckPropertiesTab _truckPropertiesTab;
+     private readonly TruckRandomizationTab _truckRandomizationTab;
+     private readonly SettingsTab _settingsTab;
+     private StartChangesPanel? _startChanges;
+@@ -64,6 +65,7 @@ internal sealed class MainForm : Form
+             return _ownedContentTab.GetAvailableCustomGroupingTrucks();
+         });
+         _truckRandomizationTab = new TruckRandomizationTab(RandomizeObtainableAsync);
++        _truckPropertiesTab = new TruckPropertiesTab(() => _workspacePath.Text.Trim(), _regionsTrucksTab.GetRandomizationCatalogAsync);
+         _settingsTab = new SettingsTab();
+         BuildLayout();
+         _workspacePath.TextChanged += (_, _) => _openButton.Enabled = _packButton.Enabled = Directory.Exists(_workspacePath.Text.Trim());
+@@ -137,6 +139,7 @@ internal sealed class MainForm : Form
+         var gameDataTabs = new TabControl { Dock = DockStyle.Fill };
+         var trucksCargoPage = new TabPage("Trucks-Cargo");
+         var regionsTrucksPage = new TabPage("Regions-Trucks");
++        var truckPropertiesPage = new TabPage("Truck properties");
+         var randomizerPage = new TabPage("Randomizer");
+         var randomizerTabs = new TabControl { Dock = DockStyle.Fill };
+         var regionProgressionPage = new TabPage("Region progression");
+@@ -166,6 +169,9 @@ internal sealed class MainForm : Form
+         _regionsTrucksTab.Dock = DockStyle.Fill;
+         regionsTrucksPage.Controls.Add(_regionsTrucksTab);
+         gameDataTabs.TabPages.Add(regionsTrucksPage);
++        _truckPropertiesTab.Dock = DockStyle.Fill;
++        truckPropertiesPage.Controls.Add(_truckPropertiesTab);
++        gameDataTabs.TabPages.Add(truckPropertiesPage);
+         _truckRandomizationTab.Dock = DockStyle.Fill;
+         truckRandomizationPage.Controls.Add(_truckRandomizationTab);
+         _regionProgressionTab.Dock = DockStyle.Fill;
+@@ -177,6 +183,7 @@ internal sealed class MainForm : Form
+         {
+             if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+             else if (gameDataTabs.SelectedTab == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
++            else if (gameDataTabs.SelectedTab == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
+         };
+         gameDataPage.Controls.Add(gameDataTabs);
+         settingsPage.Controls.Add(_settingsTab);
+@@ -261,6 +268,7 @@ internal sealed class MainForm : Form
+             {
+                 if (gameDataTabs.SelectedTab == regionsTrucksPage) await _regionsTrucksTab.EnsureLoadedAsync();
+                 else if (gameDataTabs.SelectedTab == trucksCargoPage) _trucksCargoTab.EnsureLoaded();
++                else if (gameDataTabs.SelectedTab == truckPropertiesPage) await _truckPropertiesTab.EnsureLoadedAsync();
+             }
+             if (selectedPage == ownedContentPage) _ownedContentTab.EnsureLoaded();
+             if (selectedPage == customGroupingPage)
+@@ -397,7 +405,7 @@ internal sealed class MainForm : Form
+         if (_startChanges is not null) await _startChanges.RefreshAsync();
+     }
+ 
+-    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace))
++    private IReadOnlyList<WorkspaceChange> PendingPakChanges(string workspace) => _experienceTab.PendingChanges(workspace).Concat(_truckEditTab.PendingChanges(workspace)).Concat(_truckPropertiesTab.PendingChanges(workspace))
+         .Select(change => change with { Target = WorkspaceOriginals.GetRelativePath(workspace, change.Target) }).ToArray();
+ 
+     private void SavePendingPakChanges()
+@@ -405,6 +413,7 @@ internal sealed class MainForm : Form
+         var workspace = _workspacePath.Text.Trim();
+         if (_experienceTab.PendingChanges(workspace).Any()) _experienceTab.SavePendingChanges();
+         if (_truckEditTab.PendingChanges(workspace).Any()) _truckEditTab.SavePendingChanges();
++        if (_truckPropertiesTab.PendingChanges(workspace).Any()) _truckPropertiesTab.SavePendingChanges();
+         if (PendingPakChanges(workspace).Count > 0) throw new InvalidOperationException("Some PAK edits could not be saved. Review the pending rows and correct invalid values.");
+     }
+ 
+diff --git a/README.md b/README.md
+index 8aadd2b..4a1db85 100644
+--- a/README.md
++++ b/README.md
+@@ -20,6 +20,8 @@ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab h
+ 
+ All desktop tabs share one double-Shift text search with a three-character minimum. It searches the current tab and selected sub-tab, highlighting labels, values, table text and detail data without filtering rows. Enter focuses the first match; Esc, clicking elsewhere, or switching tabs/windows closes search.
+ 
++**Game data → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells or use the −/+ glyphs to adjust all explicitly defined values (10 L fuel, 1 rank, 1,000 price), bounded to the displayed ranges. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
++
+ The **Tier lists** tab contains **Truck** and **Region Difficulty** sub-tabs. The **Region Difficulty** sub-tab ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+ Run it from the repository root with:
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+new file mode 100644
+index 0000000..1318eeb
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+@@ -0,0 +1,140 @@
++using System.Globalization;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed record TruckPropertySpec(string Element, string Attribute, string Label, decimal Step, decimal Minimum, decimal Maximum);
++internal sealed record TruckPropertyEdit(string RelativeFile, string TruckName, string Attribute, decimal Before, decimal After);
++internal sealed record TruckPropertyPreset(int Version, List<TruckPropertyEdit> Values);
++internal sealed record TruckPropertyRow(string RelativeFile, CustomTruck Truck, string Country, string DiffLock,
++    Dictionary<string, decimal> Original, Dictionary<string, decimal> Current, Dictionary<string, decimal> Draft);
++
++internal static class TruckPropertiesStore
++{
++    internal static readonly TruckPropertySpec[] Specs =
++    [
++        new("TruckData", "FuelCapacity", "Fuel capacity (L)", 10, 1, 100000),
++        new("GameData", "UnlockByRank", "Unlock rank", 1, 0, 30),
++        new("GameData", "Price", "Price", 1000, 0, 100000000)
++    ];
++    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
++    private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "truck-properties", "pending-changes.json");
++    private static Match Root(string text) => Regex.Match(text, @"<Truck(?=[\s>])[\s\S]*?</Truck\s*>", RegexOptions.IgnoreCase);
++    private static Match Tag(string text, string element) => Regex.Match(text, @"<" + element + @"\b[^>]*>", RegexOptions.IgnoreCase);
++    private static Match Attribute(string text, string attribute) => Regex.Match(text, @"\b" + attribute + "\\s*=\\s*\"(?<value>[^\"]*)\"", RegexOptions.IgnoreCase);
++    internal static string Read(string text, string element, string attribute) => Attribute(Tag(Root(text).Value, element).Value, attribute).Groups["value"].Value;
++    internal static Dictionary<string, decimal> Values(string text) => Specs
++        .Select(spec => (spec.Attribute, Value: Read(text, spec.Element, spec.Attribute)))
++        .Where(pair => decimal.TryParse(pair.Value, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
++        .ToDictionary(pair => pair.Attribute, pair => decimal.Parse(pair.Value, CultureInfo.InvariantCulture));
++
++    internal static List<TruckPropertyRow> LoadRows(string workspace)
++    {
++        var names = WorkspaceDataCache.GetLocalizedNames(workspace);
++        var result = new List<TruckPropertyRow>();
++        foreach (var file in WorkspaceOriginals.EnumerateCurrentFiles(workspace, Path.Combine("[media]", "classes", "trucks"), "*.xml")
++                     .Concat(WorkspaceOriginals.EnumerateCurrentFiles(workspace, Path.Combine("[media]", "_dlc"), "*.xml")))
++        {
++            var relative = WorkspaceOriginals.GetRelativePath(workspace, file).Replace('\\', '/');
++            if (!relative.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase)) continue;
++            var text = File.ReadAllText(file);
++            if (!Root(text).Success) continue;
++            var code = Path.GetFileNameWithoutExtension(file);
++            var key = Read(text, "UiDesc", "UiName");
++            var truckClass = Read(text, "TruckData", "TruckType");
++            if (truckClass.Length == 0) continue;
++            var current = Values(text);
++            var originalFile = WorkspaceOriginals.GetOriginalReadPath(workspace, relative);
++            var original = File.Exists(originalFile) ? Values(File.ReadAllText(originalFile)) : new(current);
++            result.Add(new(relative, new(code, names.GetValueOrDefault(key, code), TruckClasses.ForTruck(code, truckClass)),
++                Read(text, "GameData", "Country"), Read(text, "TruckData", "DiffLockType"), original, current, new(current)));
++        }
++        return result;
++    }
++
++    internal static List<TruckPropertyEdit> LoadPending(string workspace)
++    {
++        var path = PendingPath(workspace);
++        return File.Exists(path) ? ReadEdits(File.ReadAllText(path)) : [];
++    }
++
++    internal static List<TruckPropertyEdit> ReadEdits(string json)
++    {
++        var edits = JsonSerializer.Deserialize<List<TruckPropertyEdit>>(json) ?? throw new InvalidDataException("Missing truck property values.");
++        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var edit in edits)
++        {
++            if (edit is null || string.IsNullOrWhiteSpace(edit.RelativeFile) || edit.TruckName is null)
++                throw new InvalidDataException("Invalid truck property entry.");
++            var spec = Specs.FirstOrDefault(spec => spec.Attribute == edit.Attribute);
++            var path = edit.RelativeFile.Replace('\\', '/');
++            if (spec is null || edit.After < spec.Minimum || edit.After > spec.Maximum || decimal.Truncate(edit.After) != edit.After
++                || Path.IsPathRooted(path) || path.Split('/').Any(part => part is ".." or "" or ".")
++                || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase)
++                || !path.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
++                || !keys.Add(path + "|" + edit.Attribute))
++                throw new InvalidDataException("Invalid or duplicate truck property value.");
++        }
++        return edits.Select(edit => edit with { RelativeFile = edit.RelativeFile.Replace('\\', '/') }).ToList();
++    }
++
++    internal static void SavePending(string workspace, List<TruckPropertyEdit> edits)
++    {
++        var json = JsonSerializer.Serialize(edits, JsonOptions);
++        ReadEdits(json);
++        WriteAtomic(PendingPath(workspace), json);
++    }
++
++    internal static void WriteAtomic(string path, string text)
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
++        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
++        try { File.WriteAllText(temporary, text); File.Move(temporary, path, true); }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    internal static string Patch(string text, IEnumerable<TruckPropertyEdit> edits)
++    {
++        foreach (var edit in edits)
++        {
++            var spec = Specs.Single(spec => spec.Attribute == edit.Attribute);
++            var root = Root(text);
++            var tag = Tag(root.Value, spec.Element);
++            var attribute = Attribute(tag.Value, spec.Attribute);
++            if (!decimal.TryParse(attribute.Groups["value"].Value, NumberStyles.Number, CultureInfo.InvariantCulture, out var current)
++                || current != edit.Before && current != edit.After)
++                throw new InvalidDataException($"{edit.TruckName}: {spec.Label} changed since staging. Reload and stage again.");
++            var value = attribute.Groups["value"];
++            var offset = root.Index + tag.Index + value.Index;
++            text = text.Remove(offset, value.Length).Insert(offset, edit.After.ToString(CultureInfo.InvariantCulture));
++        }
++        return text;
++    }
++
++    internal static void Apply(string workspace)
++    {
++        var pending = LoadPending(workspace);
++        // Validate every target before writing any output, preserving edits made by other editors.
++        var outputs = pending.GroupBy(edit => edit.RelativeFile, StringComparer.OrdinalIgnoreCase).Select(group =>
++        {
++            var path = WorkspaceOriginals.GetCurrentPath(workspace, group.Key);
++            return (Path: path, Text: Patch(File.ReadAllText(path), group));
++        }).ToArray();
++        foreach (var output in outputs)
++        {
++            var path = WorkspaceOriginals.PrepareForEdit(workspace, output.Path);
++            WriteAtomic(path, output.Text);
++            WorkspaceDataCache.InvalidateFile(path);
++        }
++        SavePending(workspace, []);
++    }
++
++    internal static string SerializePreset(List<TruckPropertyEdit> values) => JsonSerializer.Serialize(new TruckPropertyPreset(1, values), JsonOptions);
++    internal static List<TruckPropertyEdit> ReadPreset(string json)
++    {
++        var preset = JsonSerializer.Deserialize<TruckPropertyPreset>(json);
++        if (preset?.Version != 1 || preset.Values is null) throw new InvalidDataException("Unsupported truck property preset.");
++        return ReadEdits(JsonSerializer.Serialize(preset.Values));
++    }
++}
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+new file mode 100644
+index 0000000..54d950a
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -0,0 +1,346 @@
++using System.ComponentModel;
++using System.Globalization;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class TruckPropertiesTab : UserControl
++{
++    private readonly Func<string> _getWorkspace;
++    private readonly Func<Task<RegionTruckCatalog>> _getRegions;
++    private readonly DataGridView _grid = new()
++    {
++        Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
++        AllowUserToResizeRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
++        SelectionMode = DataGridViewSelectionMode.CellSelect, MultiSelect = false, EditMode = DataGridViewEditMode.EditOnEnter,
++        RowTemplate = { Height = 26 }
++    };
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(4, 6, 4, 4) };
++    private readonly ToolTip _tips = new();
++    private List<TruckPropertyRow> _rows = [];
++    private string? _loadedWorkspace;
++    private bool _updating;
++    private bool _loading;
++    private Form? _hover;
++    private string _regionStatus = "";
++
++    public TruckPropertiesTab(Func<string> getWorkspace, Func<Task<RegionTruckCatalog>> getRegions)
++    {
++        _getWorkspace = getWorkspace;
++        _getRegions = getRegions;
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 5 };
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.Controls.Add(new Label { AutoSize = true, Padding = new Padding(0, 0, 0, 8),
++            Text = "Edit truck values, then stage changes and apply them from Start. Amber = staged or edited; green = applied. Blank values are not explicitly defined and are left unchanged." }, 0, 0);
++        var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
++        AddButton(toolbar, "Reload properties", async () => await EnsureLoadedAsync(true));
++        AddButton(toolbar, "Order by tier", () => { _grid.EndEdit(); _grid.Sort(_grid.Columns["Tier"]!, ListSortDirection.Ascending); });
++        AddButton(toolbar, "Revert unstaged edits", () => { RestoreDraft(); ShowRows(); });
++        AddButton(toolbar, "Reset to original values", () =>
++        {
++            _grid.CancelEdit();
++            foreach (var row in _rows)
++                foreach (var spec in TruckPropertiesStore.Specs)
++                    if (row.Draft.ContainsKey(spec.Attribute) && row.Original.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = value;
++            ShowRows();
++        });
++        AddButton(toolbar, "Save preset…", SavePreset);
++        AddButton(toolbar, "Load preset…", LoadPreset);
++        AddButton(toolbar, "Stage changes", Stage);
++        AddButton(toolbar, "Revert staged changes", () =>
++        {
++            if (!Ready()) return;
++            TruckPropertiesStore.SavePending(_loadedWorkspace!, []);
++            RestoreDraft(); ShowRows();
++        });
++        layout.Controls.Add(toolbar, 0, 1);
++        var bulk = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
++        bulk.Controls.Add(new Label { Text = "Adjust all trucks:", AutoSize = true, Margin = new Padding(4, 8, 8, 4) });
++        foreach (var spec in TruckPropertiesStore.Specs)
++        {
++            bulk.Controls.Add(new Label { Text = spec.Label, AutoSize = true, Margin = new Padding(8, 8, 0, 4) });
++            foreach (var direction in new[] { -1, 1 })
++            {
++                var button = AddButton(bulk, direction < 0 ? "−" : "+", () => AdjustAll(spec, direction));
++                button.AutoSize = false; button.Size = new Size(30, 27);
++                button.AccessibleName = $"{(direction < 0 ? "Decrease" : "Increase")} all {spec.Label} by {spec.Step:N0}";
++                _tips.SetToolTip(button, button.AccessibleName + $" (range {spec.Minimum:N0}–{spec.Maximum:N0})");
++            }
++        }
++        layout.Controls.Add(bulk, 0, 2);
++        layout.Controls.Add(_grid, 0, 3);
++        layout.Controls.Add(_status, 0, 4);
++        Controls.Add(layout);
++        foreach (var (name, title, width) in new[] { ("Truck", "Truck", 220), ("Class", "Class", 130), ("Tier", "Tier", 65),
++                     ("FuelCapacity", "Fuel capacity (L)", 135), ("UnlockByRank", "Unlock rank", 100), ("Price", "Price", 105),
++                     ("Regions", "Obtainable in region / map", 360), ("Country", "Store countries", 120), ("DiffLock", "Differential lock", 130) })
++        {
++            var index = _grid.Columns.Add(name, title);
++            var column = _grid.Columns[index]; column.Width = width;
++            column.ReadOnly = !TruckPropertiesStore.Specs.Any(spec => spec.Attribute == name);
++            column.SortMode = DataGridViewColumnSortMode.Automatic;
++            if (!column.ReadOnly) { column.ValueType = typeof(decimal); column.DefaultCellStyle.Format = "N0"; }
++        }
++        _grid.Columns["Regions"]!.DefaultCellStyle.NullValue = "Unknown — load maps in Regions-Trucks";
++        _grid.CellValidating += ValidateCell;
++        _grid.CellValueChanged += ValueChanged;
++        _grid.DataError += (_, e) => { e.ThrowException = false; _status.Text = "Enter a whole number within the property's allowed range."; };
++        _grid.SortCompare += (_, e) =>
++        {
++            if (e.Column.Name != "Tier") return;
++            e.SortResult = TierOrder(Convert.ToString(e.CellValue1)).CompareTo(TierOrder(Convert.ToString(e.CellValue2)));
++            if (e.SortResult == 0) e.SortResult = string.Compare(Convert.ToString(_grid.Rows[e.RowIndex1].Cells["Truck"].Value),
++                Convert.ToString(_grid.Rows[e.RowIndex2].Cells["Truck"].Value), StringComparison.CurrentCultureIgnoreCase);
++            e.Handled = true;
++        };
++        _grid.CellMouseEnter += (_, e) =>
++        {
++            HideHover();
++            if (e.RowIndex < 0 || e.ColumnIndex != _grid.Columns["Truck"]!.Index || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow row) return;
++            var preview = new TilePreview(row.Truck);
++            _hover = preview;
++            var area = Screen.FromPoint(Cursor.Position).WorkingArea;
++            preview.Location = new Point(Math.Clamp(Cursor.Position.X + 18, area.Left, Math.Max(area.Left, area.Right - preview.Width)),
++                Math.Clamp(Cursor.Position.Y + 20, area.Top, Math.Max(area.Top, area.Bottom - preview.Height)));
++            preview.Show(this);
++        };
++        _grid.CellMouseLeave += (_, _) => HideHover();
++        _grid.Scroll += (_, _) => HideHover();
++        VisibleChanged += (_, _) => { if (!Visible) HideHover(); };
++        AppColors.Changed += RefreshColors;
++        Disposed += (_, _) => { HideHover(); _tips.Dispose(); AppColors.Changed -= RefreshColors; };
++        RefreshColors(this, EventArgs.Empty);
++    }
++
++    private Button AddButton(FlowLayoutPanel panel, string text, Action action)
++    {
++        var button = new Button { Text = text, AutoSize = true, Margin = new Padding(4) };
++        button.Click += (_, _) =>
++        {
++            try { action(); }
++            catch (Exception ex) { _status.Text = ex.Message; }
++        };
++        panel.Controls.Add(button); return button;
++    }
++
++    public async Task EnsureLoadedAsync(bool reload = false)
++    {
++        if (_loading) return;
++        _loading = true;
++        try
++        {
++            var workspace = _getWorkspace().Trim();
++            if (workspace.Length == 0 || !Directory.Exists(workspace))
++            {
++                _loadedWorkspace = null; _rows.Clear(); _grid.Rows.Clear();
++                _status.Text = "Choose an extracted workspace on Start."; return;
++            }
++            if (reload || !string.Equals(workspace, _loadedWorkspace, StringComparison.OrdinalIgnoreCase))
++            {
++                _loadedWorkspace = null; _rows.Clear(); _grid.Rows.Clear();
++                await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++                var rows = await Task.Run(() => TruckPropertiesStore.LoadRows(workspace));
++                if (IsDisposed || workspace != _getWorkspace().Trim()) return;
++                _rows = rows; _loadedWorkspace = workspace;
++                RestoreDraft();
++            }
++            ShowRows();
++            _regionStatus = "Reading obtainable map placements…"; UpdateStatus();
++            try
++            {
++                var catalog = await _getRegions();
++                if (IsDisposed || workspace != _getWorkspace().Trim()) return;
++                var regions = catalog.Entries.Where(entry => entry.Availability.StartsWith("Obtainable", StringComparison.Ordinal))
++                    .GroupBy(entry => entry.TruckCode, StringComparer.OrdinalIgnoreCase)
++                    .ToDictionary(group => group.Key, group => string.Join("; ", group.Select(entry => $"{entry.Region} / {entry.Map}"
++                        + (entry.TruckChanged ? " (replacement)" : "") + (entry.FileEntry is not null ? " [pending]" : "")).Distinct()), StringComparer.OrdinalIgnoreCase);
++                foreach (DataGridViewRow row in _grid.Rows)
++                    if (row.Tag is TruckPropertyRow data)
++                    {
++                        row.Cells["Regions"].Value = regions.TryGetValue(data.Truck.Code, out var locations) ? locations
++                            : catalog.MapsRead > 0 ? "No verified obtainable placement in scanned maps" : "Unknown — load maps in Regions-Trucks";
++                        row.Cells["Regions"].ToolTipText = Convert.ToString(row.Cells["Regions"].Value);
++                    }
++                _regionStatus = $"Regions use current placements, including randomized/pending replacements ({catalog.MapsRead} maps; {catalog.Warnings.Count} warnings).";
++            }
++            catch (Exception ex)
++            {
++                foreach (DataGridViewRow row in _grid.Rows)
++                {
++                    row.Cells["Regions"].Value = "Unknown — load maps in Regions-Trucks";
++                    row.Cells["Regions"].ToolTipText = ex.Message;
++                }
++                _regionStatus = "Obtainable regions unavailable: " + ex.Message;
++            }
++            UpdateStatus();
++        }
++        catch (Exception ex) { _status.Text = "Could not load truck properties: " + ex.Message; }
++        finally { _loading = false; }
++    }
++
++    private bool Ready() => _loadedWorkspace is not null && _loadedWorkspace.Equals(_getWorkspace().Trim(), StringComparison.OrdinalIgnoreCase);
++    private void RestoreDraft()
++    {
++        if (!Ready()) return;
++        _grid.CancelEdit();
++        var pending = TruckPropertiesStore.LoadPending(_loadedWorkspace!);
++        foreach (var row in _rows)
++        {
++            row.Draft.Clear(); foreach (var pair in row.Current) row.Draft.Add(pair.Key, pair.Value);
++            foreach (var edit in pending.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
++                if (row.Draft.ContainsKey(edit.Attribute)) row.Draft[edit.Attribute] = edit.After;
++        }
++    }
++
++    private static int TierOrder(string? tier) => tier switch { "SS" => 0, "S" => 1, "A" => 2, "B" => 3, "C" => 4, "D" => 5, "FX" => 6, _ => 7 };
++    private void ShowRows()
++    {
++        HideHover();
++        var sorted = _grid.SortedColumn; var direction = _grid.SortOrder == SortOrder.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending;
++        var regions = _grid.Rows.Cast<DataGridViewRow>().Where(row => row.Tag is TruckPropertyRow)
++            .ToDictionary(row => ((TruckPropertyRow)row.Tag!).RelativeFile, row => row.Cells["Regions"].Value, StringComparer.OrdinalIgnoreCase);
++        _updating = true;
++        try
++        {
++            _grid.Rows.Clear();
++            var tiers = TierListStore.Load();
++            foreach (var data in _rows.OrderBy(row => row.Truck.Name))
++            {
++                var tier = tiers.FirstOrDefault(tier => tier.TruckCodes.Contains(data.Truck.Code, StringComparer.OrdinalIgnoreCase))?.Name ?? "Unsorted";
++                var index = _grid.Rows.Add(data.Truck.Name, data.Truck.Class, tier,
++                    data.Draft.GetValueOrDefault("FuelCapacity"), data.Draft.GetValueOrDefault("UnlockByRank"), data.Draft.GetValueOrDefault("Price"),
++                    regions.GetValueOrDefault(data.RelativeFile) ?? "Unknown — load maps in Regions-Trucks", data.Country, data.DiffLock);
++                var row = _grid.Rows[index]; row.Tag = data;
++                row.Cells["Truck"].ToolTipText = data.Truck.Code + "\n" + data.RelativeFile;
++                if (tier != "Unsorted") row.Cells["Tier"].Style.BackColor = TierListStore.ColorFor(tier);
++                foreach (var spec in TruckPropertiesStore.Specs)
++                {
++                    var cell = row.Cells[spec.Attribute];
++                    if (!data.Draft.ContainsKey(spec.Attribute)) { cell.Value = null; cell.ReadOnly = true; }
++                    PaintValue(row, spec);
++                }
++            }
++            if (sorted is not null) _grid.Sort(sorted, direction);
++        }
++        finally { _updating = false; }
++        UpdateStatus();
++    }
++
++    private void PaintValue(DataGridViewRow row, TruckPropertySpec spec)
++    {
++        if (row.Tag is not TruckPropertyRow data || !data.Draft.TryGetValue(spec.Attribute, out var draft)) return;
++        var cell = row.Cells[spec.Attribute];
++        cell.Style.BackColor = draft != data.Current[spec.Attribute] ? Color.LightGoldenrodYellow
++            : data.Original.TryGetValue(spec.Attribute, out var original) && draft != original ? Color.Honeydew : AppColors.Get("Surface");
++        cell.ToolTipText = $"Original: {(data.Original.TryGetValue(spec.Attribute, out var baseline) ? baseline.ToString("N0") : "undefined")}\nIn files: {data.Current[spec.Attribute]:N0}\nStep: {spec.Step:N0}; range {spec.Minimum:N0}–{spec.Maximum:N0}";
++    }
++
++    private void ValidateCell(object? sender, DataGridViewCellValidatingEventArgs e)
++    {
++        if (_updating || e.RowIndex < 0 || _grid[e.ColumnIndex, e.RowIndex].ReadOnly) return;
++        var spec = TruckPropertiesStore.Specs.FirstOrDefault(spec => spec.Attribute == _grid.Columns[e.ColumnIndex].Name);
++        if (spec is null) return;
++        if (!decimal.TryParse(Convert.ToString(e.FormattedValue), NumberStyles.Number, CultureInfo.CurrentCulture, out var value)
++            || decimal.Truncate(value) != value || value < spec.Minimum || value > spec.Maximum)
++        {
++            e.Cancel = true;
++            _status.Text = $"{spec.Label}: enter a whole number from {spec.Minimum:N0} to {spec.Maximum:N0}.";
++        }
++    }
++
++    private void ValueChanged(object? sender, DataGridViewCellEventArgs e)
++    {
++        if (_updating || e.RowIndex < 0 || e.ColumnIndex < 0 || _grid.Rows[e.RowIndex].Tag is not TruckPropertyRow data) return;
++        var spec = TruckPropertiesStore.Specs.FirstOrDefault(spec => spec.Attribute == _grid.Columns[e.ColumnIndex].Name);
++        if (spec is null || _grid[e.ColumnIndex, e.RowIndex].Value is not decimal value) return;
++        data.Draft[spec.Attribute] = value; PaintValue(_grid.Rows[e.RowIndex], spec); UpdateStatus();
++    }
++
++    private void AdjustAll(TruckPropertySpec spec, int direction)
++    {
++        if (!_grid.EndEdit() || !Ready()) return;
++        foreach (var row in _rows)
++            if (row.Draft.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = Math.Clamp(value + direction * spec.Step, spec.Minimum, spec.Maximum);
++        ShowRows();
++    }
++
++    private List<TruckPropertyEdit> DraftValues(bool changedOnly) => _rows.SelectMany(row => row.Draft
++        .Where(pair => !changedOnly || pair.Value != row.Current[pair.Key])
++        .Select(pair => new TruckPropertyEdit(row.RelativeFile, row.Truck.Name, pair.Key, row.Current[pair.Key], pair.Value))).ToList();
++
++    private void Stage()
++    {
++        if (!_grid.EndEdit() || !Ready()) return;
++        var edits = DraftValues(true);
++        TruckPropertiesStore.SavePending(_loadedWorkspace!, edits);
++        _status.Text = $"Staged {edits.Count} truck property changes. Apply pending PAK edits from Start.";
++    }
++
++    private void SavePreset()
++    {
++        if (!_grid.EndEdit() || !Ready()) return;
++        using var dialog = new SaveFileDialog { Title = "Save truck properties preset", Filter = "Truck properties preset (*.json)|*.json", FileName = "truck-properties.json" };
++        if (dialog.ShowDialog(this) != DialogResult.OK) return;
++        TruckPropertiesStore.WriteAtomic(dialog.FileName, TruckPropertiesStore.SerializePreset(DraftValues(false)));
++        _status.Text = "Truck properties preset saved.";
++    }
++
++    private void LoadPreset()
++    {
++        if (!_grid.EndEdit() || !Ready()) return;
++        using var dialog = new OpenFileDialog { Title = "Load truck properties preset", Filter = "Truck properties preset (*.json)|*.json" };
++        if (dialog.ShowDialog(this) != DialogResult.OK) return;
++        var values = TruckPropertiesStore.ReadPreset(File.ReadAllText(dialog.FileName));
++        var count = 0;
++        foreach (var row in _rows)
++            foreach (var edit in values.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
++                if (row.Draft.ContainsKey(edit.Attribute)) { row.Draft[edit.Attribute] = edit.After; count++; }
++        ShowRows(); _status.Text = $"Loaded {count} preset values; {values.Count - count} unavailable values skipped. Stage changes to keep them.";
++    }
++
++    public IEnumerable<WorkspaceChange> PendingChanges(string workspace) => TruckPropertiesStore.LoadPending(workspace)
++        .Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
++            edit.TruckName + ": " + TruckPropertiesStore.Specs.Single(spec => spec.Attribute == edit.Attribute).Label,
++            edit.Before.ToString(CultureInfo.InvariantCulture), edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
++
++    public void SavePendingChanges()
++    {
++        TruckPropertiesStore.Apply(_getWorkspace().Trim());
++        _loadedWorkspace = null; // Re-read applied values on the next visit.
++    }
++
++    private void UpdateStatus() => _status.Text = $"{_rows.Count} trucks · {DraftValues(true).Count} changed values. {_regionStatus}";
++    private void HideHover() { _hover?.Dispose(); _hover = null; }
++    private void RefreshColors(object? sender, EventArgs e)
++    {
++        _grid.BackgroundColor = AppColors.Get("Surface");
++        _grid.DefaultCellStyle.BackColor = AppColors.Get("Surface");
++        foreach (DataGridViewRow row in _grid.Rows)
++            foreach (var spec in TruckPropertiesStore.Specs) PaintValue(row, spec);
++        _grid.Invalidate();
++    }
++
++    private sealed class TilePreview : Form
++    {
++        public TilePreview(CustomTruck truck)
++        {
++            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
++            AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);
++            ClientSize = new Size(166, 226);
++            var tile = CustomGroupWipTab.CreateTile(truck); tile.Location = new Point(8, 8); Controls.Add(tile);
++        }
++        protected override bool ShowWithoutActivation => true;
++        protected override CreateParams CreateParams
++        {
++            get { var value = base.CreateParams; value.ExStyle |= 0x00000020 | 0x00000080 | 0x08000000; return value; }
++        }
++        protected override void WndProc(ref Message message)
++        {
++            if (message.Msg == 0x0084) { message.Result = (IntPtr)(-1); return; }
++            base.WndProc(ref message);
++        }
++    }
++}
+diff --git a/.checks/truck-properties/Program.cs b/.checks/truck-properties/Program.cs
+new file mode 100644
+index 0000000..544d00d
+--- /dev/null
++++ b/.checks/truck-properties/Program.cs
+@@ -0,0 +1,120 @@
++using System.Collections;
++using System.Linq.Expressions;
++using System.Reflection;
++using System.Text.Json;
++
++internal static class Program
++{
++    private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
++    private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
++    private static object? Call(object obj, string name, params object?[] args) => obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(obj, args);
++    private static object? Store(string name, params object?[] args) => T("TruckPropertiesStore").GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
++    private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
++    private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
++    private static object Make(string name, Dictionary<string, object?> values)
++    {
++        var ctor = T(name).GetConstructors().OrderByDescending(ctor => ctor.GetParameters().Length).First();
++        return ctor.Invoke(ctor.GetParameters().Select(parameter => values.GetValueOrDefault(parameter.Name!, parameter.HasDefaultValue ? parameter.DefaultValue : parameter.ParameterType == typeof(string) ? "" : Activator.CreateInstance(parameter.ParameterType))).ToArray());
++    }
++    private static object Edits(string file, int before, int after, string attribute = "FuelCapacity") => Store("ReadEdits", JsonSerializer.Serialize(new[] { new { RelativeFile = file, TruckName = "Test truck", Attribute = attribute, Before = before, After = after } }))!;
++    private static void Wait(Task task)
++    {
++        var end = DateTime.UtcNow.AddSeconds(30);
++        while (!task.IsCompleted && DateTime.UtcNow < end) { Application.DoEvents(); Thread.Sleep(10); }
++        if (!task.IsCompleted) throw new TimeoutException();
++        task.GetAwaiter().GetResult();
++    }
++    private static IEnumerable<Control> All(Control parent) => parent.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(All(child)));
++    [STAThread] private static void Main(string[] args)
++    {
++        var workspace = Path.Combine(AppContext.BaseDirectory, "fixtures", Guid.NewGuid().ToString("N"));
++        const string relative = "[media]/classes/trucks/chevrolet_ck1500.xml";
++        var original = Path.Combine(workspace, "initial.pak", "original_files", relative);
++        var updated = Path.Combine(workspace, "initial.pak", "updated", relative);
++        Directory.CreateDirectory(Path.GetDirectoryName(original)!);
++        const string source = "<_templates><TruckData FuelCapacity=\"999\" /></_templates>\r\n<Truck>\r\n<TruckData FuelCapacity=\"80\" TruckType=\"SCOUT\" DiffLockType=\"Always\" />\r\n<GameData UnlockByRank=\"1\" Price=\"3000\" Country=\"US\"><UiDesc UiName=\"TEST_NAME\" /></GameData>\r\n<Unrelated Keep=\"true\" />\r\n</Truck>";
++        File.WriteAllText(original, source);
++        var edits = Edits(relative, 80, 90);
++        Store("SavePending", workspace, edits);
++        Check(File.ReadAllText(original) == source && !File.Exists(updated), "staging never writes game data");
++        var patched = (string)Store("Patch", source, edits)!;
++        Check(patched == source.Replace("FuelCapacity=\"80\"", "FuelCapacity=\"90\""), "patch changes only the real truck attribute, preserving templates and XML formatting");
++        Directory.CreateDirectory(Path.GetDirectoryName(updated)!);
++        File.WriteAllText(updated, source.Replace("Keep=\"true\"", "Keep=\"external-edit\""));
++        Store("Apply", workspace);
++        Check(File.ReadAllText(original) == source && File.ReadAllText(updated) == patched.Replace("Keep=\"true\"", "Keep=\"external-edit\""), "Apply preserves originals and unrelated editor changes");
++        Check(((IList)Store("LoadPending", workspace)!).Count == 0, "successful Apply clears staged snapshot");
++        Store("SavePending", workspace, Edits(relative, 90, 100));
++        File.WriteAllText(updated, patched.Replace("FuelCapacity=\"90\"", "FuelCapacity=\"95\""));
++        var refused = false;
++        try { Store("Apply", workspace); } catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { refused = true; }
++        Check(refused && ((IList)Store("LoadPending", workspace)!).Count == 1 && File.ReadAllText(updated).Contains("FuelCapacity=\"95\""), "conflicting staged values rejected and retained");
++        var preset = (string)Store("SerializePreset", edits)!;
++        Check(((IList)Store("ReadPreset", preset)!).Count == 1, "versioned preset round trip");
++        foreach (var invalid in new[] { "../escape.xml", "[media]/classes/trucks/../../other.xml" })
++        {
++            refused = false; try { Edits(invalid, 80, 90); } catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { refused = true; }
++            Check(refused, "unsafe preset path rejected: " + invalid);
++        }
++        refused = false; try { Edits(relative, 1, 31, "UnlockByRank"); } catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { refused = true; }
++        Check(refused, "out of range preset rank rejected");
++        File.WriteAllText(updated, source);
++        Store("SavePending", workspace, Edits(relative, 80, 90));
++        File.WriteAllText(Path.Combine(Path.GetDirectoryName(original)!, "unknown.xml"), "<Truck><TruckData TruckType=\"SCOUT\"/><GameData><UiDesc UiName=\"Unknown\"/></GameData></Truck>");
++        var entries = Array.CreateInstance(T("RegionTruckEntry"), 1);
++        var originalEntry = Make("RegionTruckEntry", new() { ["TruckCode"] = "gmc_9500", ["Truck"] = "GMC", ["RegionCode"] = "us_01", ["Region"] = "Michigan", ["Map"] = "Black River", ["Availability"] = "Obtainable — discovery/start" });
++        entries.SetValue(Make("RegionTruckEntry", new() { ["TruckCode"] = "chevrolet_ck1500", ["Truck"] = "Chevrolet", ["RegionCode"] = "us_01", ["Region"] = "Michigan", ["Map"] = "Black River", ["Availability"] = "Obtainable — discovery/start", ["OriginalTruckCode"] = "gmc_9500", ["FileEntry"] = originalEntry }), 0);
++        var catalog = Activator.CreateInstance(T("RegionTruckCatalog"), entries, Array.Empty<string>(), 1, null)!;
++        var taskType = typeof(Task<>).MakeGenericType(T("RegionTruckCatalog"));
++        var getterType = typeof(Func<>).MakeGenericType(taskType);
++        var getter = Expression.Lambda(getterType, Expression.Call(typeof(Task).GetMethod("FromResult")!.MakeGenericMethod(T("RegionTruckCatalog")), Expression.Constant(catalog, T("RegionTruckCatalog")))).Compile();
++        using var tab = (Control)Activator.CreateInstance(T("TruckPropertiesTab"), new Func<string>(() => workspace), getter)!;
++        Check(((IEnumerable)Call(tab, "PendingChanges", workspace)!).Cast<object>().Count() == 1, "Start lists persistent changes before tab is opened");
++        var pendingRow = ((IEnumerable)Call(tab, "PendingChanges", workspace)!).Cast<object>().Single();
++        var target = (string)pendingRow.GetType().GetProperty("Target")!.GetValue(pendingRow)!;
++        var displayedPath = (string)T("WorkspaceOriginals").GetMethod("GetRelativePath")!.Invoke(null, new object[] { workspace, target })!;
++        Check(displayedPath.Replace('\\', '/') == relative, "pending change targets satisfy Start dashboard path conversion");
++        tab.Size = new Size(1350, 650); tab.CreateControl();
++        Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        var grid = (DataGridView)Field(tab, "_grid");
++        Check(grid.Rows.Count == 2, "truck catalog loads explicit truck definitions");
++        var row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 90, "restart restores staged preview");
++        Check(Convert.ToString(row.Cells["Regions"].Value) == "Michigan / Black River (replacement) [pending]", "obtainable region follows current randomized replacement");
++        var unknown = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "unknown");
++        Check(unknown.Cells["FuelCapacity"].ReadOnly && unknown.Cells["FuelCapacity"].Value is null, "undefined numeric values remain blank and uneditable");
++        var spec = ((Array)T("TruckPropertiesStore").GetField("Specs", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!).GetValue(0)!;
++        Call(tab, "AdjustAll", spec, 1);
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 100, "bulk fuel step adds 10 L");
++        Call(tab, "RestoreDraft"); Call(tab, "ShowRows");
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 90 && File.ReadAllText(updated) == source, "revert unstaged edits restores staged snapshot without writing files");
++        Call(tab, "AdjustAll", spec, 1);
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Call(tab, "Stage"); row.Cells["FuelCapacity"].Value = 110m;
++        Call(tab, "SavePendingChanges");
++        Check(File.ReadAllText(updated).Contains("FuelCapacity=\"100\""), "Apply uses explicit staged snapshot and excludes later preview");
++        Wait((Task)Call(tab, "EnsureLoadedAsync", false)!);
++        All(tab).OfType<Button>().Single(button => button.Text == "Order by tier").PerformClick();
++        Check(grid.SortedColumn?.Name == "Tier", "tier sort wired to table");
++        grid.Rows[0].Cells["Tier"].Value = "S"; grid.Rows[1].Cells["Tier"].Value = "SS";
++        grid.Sort(grid.Columns["Tier"]!, System.ComponentModel.ListSortDirection.Ascending);
++        Check(Convert.ToString(grid.Rows[0].Cells["Tier"].Value) == "SS", "tier ordering uses assigned tier strength rather than alphabetic order");
++        All(tab).OfType<Button>().Single(button => button.Text == "Reset to original values").PerformClick();
++        row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
++        Check(Convert.ToDecimal(row.Cells["FuelCapacity"].Value) == 80 && File.ReadAllText(updated).Contains("FuelCapacity=\"100\""), "reset to preserved baseline is preview only");
++        Call(tab, "Stage");
++        All(tab).OfType<Button>().Single(button => button.Text == "Revert staged changes").PerformClick();
++        Check(((IList)Store("LoadPending", workspace)!).Count == 0, "revert staged changes clears persistent intent");
++        tab.PerformLayout(); using var bitmap = new Bitmap(tab.Width, tab.Height); tab.DrawToBitmap(bitmap, new Rectangle(Point.Empty, tab.Size));
++        bitmap.Save(Path.Combine(AppContext.BaseDirectory, "truck-properties-preview.png"));
++        if (args.Length > 0)
++        {
++            Wait((Task)T("WorkspaceDataCache").GetMethod("PreloadOwnedAsync")!.Invoke(null, new object[] { args[0] })!);
++            var real = (IList)Store("LoadRows", args[0])!;
++            Check(real.Count > 100, "real workspace catalog loads more than 100 truck definitions: " + real.Count);
++        }
++        Console.WriteLine("PASS all Truck properties regression checks; fixtures isolated from user workspace.");
++    }
++}
+diff --git a/.checks/truck-properties/TruckProperties.csproj b/.checks/truck-properties/TruckProperties.csproj
+new file mode 100644
+index 0000000..70ca305
+--- /dev/null
++++ b/.checks/truck-properties/TruckProperties.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup>
++  <ItemGroup><Reference Include="SnowPakTool.Desktop"><HintPath>../../src/SnowPakTool.Desktop/bin/Debug/net10.0-windows/SnowPakTool.Desktop.dll</HintPath></Reference></ItemGroup>
++</Project>

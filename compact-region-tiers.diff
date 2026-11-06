@@ -1,0 +1,49 @@
+--- CustomGroupWipTab.cs
++++ CustomGroupWipTab.cs
+@@ -10,6 +10,7 @@
+     private const int TileWidth = 150;
+     private const int TileHeight = 210;
+     private const int RegionTileWidth = 240;
++    private const int RegionTileHeight = 220;
+     private readonly Func<IReadOnlyList<CustomTruck>> _getAvailableTrucks;
+     private readonly List<GroupState> _states;
+     private readonly bool _tierList;
+@@ -119,6 +120,7 @@
+         if (!_tierList) section.Header.Controls.Add(commands, 1, 0);
+         else
+         {
++            if (_regionList) section.Panel.Margin = new Padding(3, 1, 3, 1);
+             section.Tiles.WrapContents = false;
+             section.Tiles.Margin = Padding.Empty;
+             section.Tiles.Padding = Padding.Empty;
+@@ -380,7 +382,7 @@
+     private int BoardTileHeight() => !_regionList ? TileHeight :
+         (_groupViews.SelectMany(view => view.Tiles.Controls.Cast<Control>())
+             .Concat(_unsortedTiles?.Controls.Cast<Control>() ?? Enumerable.Empty<Control>())
+-            .Select(tile => tile.Height).DefaultIfEmpty(260).Max());
++            .Select(tile => tile.Height).DefaultIfEmpty(RegionTileHeight).Max());
+ 
+     private void ResizeGroupPanes(FlowLayoutPanel groupList)
+     {
+@@ -388,7 +390,7 @@
+         {
+             if (_tierList)
+             {
+-                pane.Height = BoardTileHeight() + 1 + SystemInformation.HorizontalScrollBarHeight + 42;
++                pane.Height = BoardTileHeight() + 1 + SystemInformation.HorizontalScrollBarHeight + (_regionList ? 34 : 42);
+                 pane.Width = Math.Max(180, groupList.ClientSize.Width - groupList.Padding.Horizontal - pane.Margin.Horizontal - SystemInformation.VerticalScrollBarWidth);
+             }
+             else pane.Height = Math.Max(1, groupList.ClientSize.Height - groupList.Padding.Vertical - pane.Margin.Vertical);
+@@ -638,9 +640,9 @@
+         };
+         if (region)
+         {
+-            tile.Height = 240;
+-            name.Height = 44;
+-            classOverlay.Height = 60;
++            tile.Height = RegionTileHeight;
++            name.Height = 36;
++            classOverlay.Height = 48;
+             classOverlay.Padding = new Padding(4);
+             classOverlay.AutoEllipsis = true;
+         }

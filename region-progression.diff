@@ -1,0 +1,621 @@
+--- src\SnowPakTool.Desktop\MainForm.cs
++++ src\SnowPakTool.Desktop\MainForm.cs
+@@ -13,6 +13,7 @@
+     private readonly CustomGroupWipTab _customGroupWipTab;
+     private readonly CustomGroupWipTab _tierListTab;
+     private readonly CustomGroupWipTab _regionTierListTab;
++    private readonly RegionProgressionTab _regionProgressionTab;
+     private IReadOnlyList<CustomTruck> _tierRegions = Array.Empty<CustomTruck>();
+     private readonly TruckEditTab _truckEditTab;
+     private readonly TrucksCargoTab _trucksCargoTab;
+@@ -53,6 +54,7 @@
+         _tierListTab = new CustomGroupWipTab(_ownedContentTab.GetAvailableCustomGroupingTrucks, tierList: true);
+         _ownedContentTab.OwnedTrucksChanged += _tierListTab.RefreshOwnedTrucks;
+         _regionTierListTab = new CustomGroupWipTab(() => _tierRegions, regionList: true);
++        _regionProgressionTab = new RegionProgressionTab(() => _tierRegions);
+         _truckEditTab = new TruckEditTab(() => _workspacePath.Text.Trim(), _ownedContentTab);
+         _trucksCargoTab = new TrucksCargoTab(() => _workspacePath.Text.Trim());
+         _regionsTrucksTab = new RegionsTrucksTab(() => _workspacePath.Text.Trim(), () => _pakPath.Text.Trim(), getEnabledTrucks: () =>
+@@ -135,8 +137,8 @@
+         var regionsTrucksPage = new TabPage("Regions-Trucks");
+         var randomizerPage = new TabPage("Randomizer");
+         var randomizerTabs = new TabControl { Dock = DockStyle.Fill };
+-		var regionProgressionPage = new TabPage ( "Region progression" );
+-		var truckRandomizationPage = new TabPage("Truck-Randomization");
++        var regionProgressionPage = new TabPage("Region progression");
++        var truckRandomizationPage = new TabPage("Truck-Randomization");
+         var settingsPage = new TabPage("Settings");
+         root.Dock = DockStyle.Fill;
+         _experienceTab.Dock = DockStyle.Fill;
+@@ -163,8 +165,10 @@
+         regionsTrucksPage.Controls.Add(_regionsTrucksTab);
+         gameDataTabs.TabPages.Add(regionsTrucksPage);
+         truckRandomizationPage.Controls.Add(new TruckRandomizationTab { Dock = DockStyle.Fill });
++        _regionProgressionTab.Dock = DockStyle.Fill;
++        regionProgressionPage.Controls.Add(_regionProgressionTab);
++        randomizerTabs.TabPages.Add(regionProgressionPage);
+         randomizerTabs.TabPages.Add(truckRandomizationPage);
+-        randomizerTabs.TabPages.Add(regionProgressionPage);
+         randomizerPage.Controls.Add(randomizerTabs);
+         gameDataTabs.SelectedIndexChanged += async (_, _) =>
+         {
+@@ -182,6 +186,31 @@
+         tabs.TabPages.Add(gameDataPage);
+         tabs.TabPages.Add(randomizerPage);
+         tabs.TabPages.Add(settingsPage);
++        void LoadTierRegions(string workspace)
++        {
++            var regionNames = WorkspaceDataCache.GetLocalizedNames(workspace);
++            _tierRegions = WorkspaceDataCache.GetRegionMetadata(workspace)
++                .OrderBy(entry => RegionTileAssets.GetReleaseOrder(entry.Key))
++                .ThenBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
++                .Select(entry => new CustomTruck(entry.Key, entry.Value.Name, RegionTileAssets.GetReleaseLabel(entry.Key),
++                    RegionTileAssets.GetMapNames(entry.Key, regionNames)))
++                .ToList();
++        }
++        async Task RefreshRegionProgressionAsync()
++        {
++            if (tabs.SelectedTab != randomizerPage || randomizerTabs.SelectedTab != regionProgressionPage) return;
++            var workspace = _workspacePath.Text.Trim();
++            try
++            {
++                await WorkspaceDataCache.PreloadOwnedAsync(workspace);
++                if (tabs.SelectedTab != randomizerPage || randomizerTabs.SelectedTab != regionProgressionPage ||
++                    !string.Equals(workspace, _workspacePath.Text.Trim(), StringComparison.OrdinalIgnoreCase)) return;
++                LoadTierRegions(workspace);
++                _regionProgressionTab.RefreshRegions();
++            }
++            catch (Exception ex) { AppendLog($"Region progression loading failed: {ex.Message}"); }
++        }
++        randomizerTabs.SelectedIndexChanged += async (_, _) => await RefreshRegionProgressionAsync();
+         async Task RefreshSelectedTierListAsync()
+         {
+             if (tabs.SelectedTab != tierListsPage) return;
+@@ -199,13 +228,7 @@
+                 }
+                 else if (selectedTier == regionTierListPage)
+                 {
+-                    var regionNames = WorkspaceDataCache.GetLocalizedNames(workspace);
+-                    _tierRegions = WorkspaceDataCache.GetRegionMetadata(workspace)
+-                        .OrderBy(entry => RegionTileAssets.GetReleaseOrder(entry.Key))
+-                        .ThenBy(entry => entry.Value.Name, StringComparer.CurrentCultureIgnoreCase)
+-                        .Select(entry => new CustomTruck(entry.Key, entry.Value.Name, RegionTileAssets.GetReleaseLabel(entry.Key),
+-                            RegionTileAssets.GetMapNames(entry.Key, regionNames)))
+-                        .ToList();
++                    LoadTierRegions(workspace);
+                     _regionTierListTab.RefreshOwnedTrucks();
+                 }
+             }
+@@ -243,6 +266,7 @@
+                 _customGroupWipTab.RefreshOwnedTrucks();
+             }
+             if (selectedPage == tierListsPage) await RefreshSelectedTierListAsync();
++            if (selectedPage == randomizerPage) await RefreshRegionProgressionAsync();
+             if (selectedPage == truckEditPage)
+             {
+                 _ownedContentTab.EnsureLoaded();
+--- src\SnowPakTool.Desktop\CustomGroupWipTab.cs
++++ src\SnowPakTool.Desktop\CustomGroupWipTab.cs
+@@ -439,7 +439,7 @@
+         return data;
+     }
+ 
+-    private static void AttachTileDragHandlers(Control control, Panel tile, FlowLayoutPanel? groupList)
++    internal static void AttachTileDragHandlers(Control control, Panel tile, FlowLayoutPanel? groupList)
+     {
+         Point mouseDown = Point.Empty;
+         control.MouseDown += (_, e) => mouseDown = e.Location;
+@@ -533,7 +533,7 @@
+             ClearDropMarkers(child);
+     }
+ 
+-    private static void UpdateDropPreview(TileFlowPanel target, FlowLayoutPanel? groupList, Control eventSource, DragEventArgs e)
++    internal static void UpdateDropPreview(TileFlowPanel target, FlowLayoutPanel? groupList, Control eventSource, DragEventArgs e)
+     {
+         e.Effect = e.Data?.GetData(typeof(Panel)) is Panel ? DragDropEffects.Move : DragDropEffects.None;
+         if (e.Effect == DragDropEffects.None)
+@@ -590,7 +590,7 @@
+         UpdateUnsortedPaneWidth();
+     }
+ 
+-    private static Panel CreateTile(CustomTruck truck, bool region = false)
++    internal static Panel CreateTile(CustomTruck truck, bool region = false)
+     {
+         var tile = new SearchableTruckTile
+         {
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Truck-Randomization** and an empty **Region progression** sub-tab. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Region progression** first, followed by **Truck-Randomization**. **Region progression** offers Easy, Normal, and Hard radio buttons and a Randomize button that automatically saves the suggested play order. It always starts in the easiest populated difficulty tier (D is easiest, S hardest), then uses a rising difficulty target with weighted variation; Hard favors tougher regions earlier. Unsorted regions go last when generating. The wrapping region tiles use the same drag preview and insertion marker as the tier lists; manual reordering saves automatically. Previous randomization restores one prior order kept in memory for this session. New regions append to the saved order without moving existing placements; tier and difficulty changes do not reroll the order. This uses all regions listed by the current workspace and does not modify game data. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 
+--- SMALL_CHANGE_QUEUE.md
++++ SMALL_CHANGE_QUEUE.md
+@@ -1,10 +1,11 @@
+ # Small change queue
+ 
+-Queued requests (1 of 10):
++Queued requests (0 of 10):
++
++
++Completed requests:
+ 
+ - Move Region progression to the first sub-tab under Randomizer, before Truck-Randomization.
+-
+-Completed requests:
+ 
+ - Make the currently targeted search result stand out more clearly from other matches, including when navigating with Tab / Shift+Tab.
+ - Put Aramatsu Forester in a separate app-internal `Logging` class, leaving its game TruckType unchanged.
+--- /dev/null
++++ src\SnowPakTool.Desktop\RegionProgressionService.cs
+@@ -0,0 +1,66 @@
++namespace SnowPakTool.Desktop;
++
++internal enum ProgressionDifficulty { Easy = -1, Normal = 0, Hard = 1 }
++
++internal sealed record ProgressionRegion(string Code, int? Difficulty);
++
++internal static class RegionProgressionService
++{
++    public static int? TierDifficulty(string tier) => tier switch
++    {
++        "S" => 4, "A" => 3, "B" => 2, "C" => 1, "D" => 0, _ => null
++    };
++
++    public static List<string> Generate(IReadOnlyList<ProgressionRegion> regions, ProgressionDifficulty difficulty, int seed)
++    {
++        // Canonical ordering makes the result independent of ordering inside tier panes.
++        var unique = regions.DistinctBy(region => region.Code, StringComparer.OrdinalIgnoreCase).ToList();
++        var remaining = unique.Where(region => region.Difficulty.HasValue)
++            .OrderBy(region => region.Code, StringComparer.OrdinalIgnoreCase).ToList();
++        var result = new List<string>();
++        var random = new Random(seed);
++        var count = remaining.Count;
++        if (count > 0)
++        {
++            var easiest = remaining.Min(region => region.Difficulty!.Value);
++            var hardest = remaining.Max(region => region.Difficulty!.Value);
++            void Take(ProgressionRegion region) { result.Add(region.Code); remaining.Remove(region); }
++            var starters = remaining.Where(region => region.Difficulty == easiest).ToArray();
++            Take(starters[random.Next(starters.Length)]);
++            while (remaining.Count > 0)
++            {
++                var progress = (double)result.Count / (count - 1);
++                var setting = Math.Clamp((int)difficulty, -1, 1);
++                var target = easiest + (hardest - easiest) * Math.Pow(progress, Math.Pow(2, -setting));
++                var spread = 0.8 + 0.25 * setting;
++                var tiers = remaining.GroupBy(region => region.Difficulty!.Value).OrderBy(group => group.Key)
++                    .Select(group => (Regions: group.ToArray(), Weight: Math.Exp(-Math.Pow(group.Key - target, 2) / (2 * spread * spread))))
++                    .ToArray();
++                var roll = random.NextDouble() * tiers.Sum(tier => tier.Weight);
++                var chosen = tiers[^1];
++                foreach (var tier in tiers)
++                {
++                    roll -= tier.Weight;
++                    if (roll <= 0) { chosen = tier; break; }
++                }
++                Take(chosen.Regions[random.Next(chosen.Regions.Length)]);
++            }
++        }
++        result.AddRange(unique.Where(region => !region.Difficulty.HasValue).Select(region => region.Code));
++        return result;
++    }
++
++    // Never move an existing placement when regions or their tier assignments change.
++    public static List<string> AppendNew(IEnumerable<string> saved, IEnumerable<string> available) =>
++        saved.Concat(available).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
++
++    public static List<string> Move(IReadOnlyList<string> saved, IReadOnlyList<string> visible, string code, int insertionIndex)
++    {
++        var reordered = visible.Where(item => !item.Equals(code, StringComparison.OrdinalIgnoreCase)).ToList();
++        reordered.Insert(Math.Clamp(insertionIndex, 0, reordered.Count), code);
++        var visibleSet = visible.ToHashSet(StringComparer.OrdinalIgnoreCase);
++        var next = 0;
++        // Hidden regions keep their saved positions when editing another workspace's visible subset.
++        return saved.Select(item => visibleSet.Contains(item) ? reordered[next++] : item).ToList();
++    }
++}
+--- /dev/null
++++ src\SnowPakTool.Desktop\RegionProgressionStore.cs
+@@ -0,0 +1,45 @@
++using System.Text.Json;
++
++namespace SnowPakTool.Desktop;
++
++internal sealed class RegionProgressionState
++{
++    public List<string> Order { get; set; } = [];
++    public ProgressionDifficulty Difficulty { get; set; } = ProgressionDifficulty.Normal;
++    public bool HasRandomized { get; set; }
++    public int? Seed { get; set; }
++}
++
++internal sealed class RegionProgressionStore
++{
++    private readonly string _path;
++    public RegionProgressionStore(string? path = null) => _path = path ?? Path.Combine(
++        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++        "SnowPakTool.Desktop", "region-progression.json");
++
++    public RegionProgressionState Load()
++    {
++        if (!File.Exists(_path)) return new();
++        var state = JsonSerializer.Deserialize<RegionProgressionState>(File.ReadAllText(_path))
++            ?? throw new JsonException("The saved progression is empty.");
++        Validate(state);
++        return state;
++    }
++
++    public void Save(RegionProgressionState state)
++    {
++        Validate(state);
++        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
++        var temporary = _path + ".tmp";
++        File.WriteAllText(temporary, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporary, _path, overwrite: true);
++    }
++
++    private static void Validate(RegionProgressionState state)
++    {
++        if (state.Order is null || state.Order.Any(string.IsNullOrWhiteSpace) ||
++            state.Order.Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Order.Count ||
++            !Enum.IsDefined(state.Difficulty))
++            throw new JsonException("The saved region progression is invalid.");
++    }
++}
+--- /dev/null
++++ src\SnowPakTool.Desktop\RegionProgressionTab.cs
+@@ -0,0 +1,242 @@
++namespace SnowPakTool.Desktop;
++
++internal sealed class RegionProgressionTab : UserControl
++{
++    private readonly Func<IReadOnlyList<CustomTruck>> _getRegions;
++    private readonly Func<List<GroupState>> _getTiers;
++    private readonly RegionProgressionStore _store;
++    private RegionProgressionState _state;
++    private RegionProgressionState? _previous;
++    private readonly bool _loadFailed;
++    private IReadOnlyList<CustomTruck> _regions = [];
++    private readonly Dictionary<string, string> _tiers = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Button _randomize = new() { Text = "Randomize", AutoSize = true, Enabled = false };
++    private readonly Button _restore = new() { Text = "Previous randomization", AutoSize = true, Enabled = false };
++    private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 0) };
++    private readonly TileFlowPanel _tiles = new(false)
++    {
++        Dock = DockStyle.Fill, AutoScroll = true, WrapContents = true,
++        FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(3), AllowDrop = true
++    };
++    private readonly System.Windows.Forms.Timer _dragScroll = new() { Interval = 60 };
++    private Panel? _dragTile;
++
++    public RegionProgressionTab(Func<IReadOnlyList<CustomTruck>> getRegions,
++        RegionProgressionStore? store = null, Func<List<GroupState>>? getTiers = null)
++    {
++        _getRegions = getRegions;
++        _getTiers = getTiers ?? RegionTierListStore.Load;
++        _store = store ?? new();
++        try { _state = _store.Load(); }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
++        {
++            _state = new();
++            _loadFailed = true;
++            _status.Text = "Could not load saved progression: " + ex.Message;
++        }
++        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 4 };
++        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
++        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
++        layout.Controls.Add(new Label
++        {
++            Text = "Start in the easiest ranked tier, then gradually favor harder regions with some variation. Hard brings tougher regions forward; Unsorted goes last. Drag tiles to adjust the saved order.",
++            AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8)
++        }, 0, 0);
++        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
++        toolbar.Controls.Add(new Label { Text = "Difficulty", AutoSize = true, Margin = new Padding(0, 7, 8, 0) });
++        foreach (var difficulty in new[] { ProgressionDifficulty.Easy, ProgressionDifficulty.Normal, ProgressionDifficulty.Hard })
++        {
++            var radio = new RadioButton
++            {
++                Text = difficulty.ToString(), AutoSize = true, Checked = _state.Difficulty == difficulty,
++                Margin = new Padding(0, 5, 12, 0), Enabled = !_loadFailed
++            };
++            toolbar.Controls.Add(radio);
++            radio.CheckedChanged += (_, _) =>
++            {
++                if (!radio.Checked || _state.Difficulty == difficulty) return;
++                if (Commit(Copy(_state, difficulty: difficulty)))
++                    _status.Text = "Difficulty saved. The current order stays unchanged until you randomize.";
++                else
++                    foreach (var option in toolbar.Controls.OfType<RadioButton>())
++                        option.Checked = option.Text == _state.Difficulty.ToString();
++            };
++        }
++        toolbar.Controls.Add(_randomize);
++        toolbar.Controls.Add(_restore);
++        layout.Controls.Add(toolbar, 0, 1);
++        var pane = new GroupBox { Text = "Suggested play order — left to right, then next row", Dock = DockStyle.Fill, Padding = new Padding(7) };
++        pane.Controls.Add(_tiles);
++        layout.Controls.Add(pane, 0, 2);
++        layout.Controls.Add(_status, 0, 3);
++        Controls.Add(layout);
++        _randomize.Click += (_, _) => Randomize();
++        _restore.Click += (_, _) => RestorePrevious();
++        AttachDropTarget(_tiles);
++        _dragScroll.Tick += (_, _) => ScrollDuringDrag();
++        var wheel = new DirectionalWheelFilter(this);
++        Application.AddMessageFilter(wheel);
++        Disposed += (_, _) => { Application.RemoveMessageFilter(wheel); _dragScroll.Dispose(); };
++        if (!_loadFailed) _status.Text = "Open an extracted workspace to list regions.";
++    }
++
++    public void RefreshRegions()
++    {
++        if (IsDisposed || _loadFailed) return;
++        _regions = _getRegions();
++        ReadTiers();
++        var order = RegionProgressionService.AppendNew(_state.Order, _regions.Select(region => region.Code));
++        if (!order.SequenceEqual(_state.Order, StringComparer.OrdinalIgnoreCase) && !Commit(Copy(_state, order))) return;
++        RenderTiles();
++        _randomize.Enabled = _regions.Count > 0;
++        _restore.Enabled = _previous is not null && _regions.Count > 0;
++        _status.Text = _regions.Count == 0 ? "Open an extracted workspace to list regions." :
++            $"{_regions.Count} regions. {(_state.HasRandomized ? "Saved play order." : "Choose a difficulty and randomize to generate a play order.")} Changes save automatically.";
++    }
++
++    private void ReadTiers()
++    {
++        _tiers.Clear();
++        foreach (var tier in _getTiers())
++            foreach (var code in tier.TruckCodes) _tiers.TryAdd(code, tier.Name);
++    }
++
++    private void Randomize()
++    {
++        if (_regions.Count == 0 || _loadFailed) return;
++        ReadTiers();
++        var seed = Random.Shared.Next();
++        var order = RegionProgressionService.Generate(_regions.Select(region => new ProgressionRegion(region.Code,
++            RegionProgressionService.TierDifficulty(_tiers.GetValueOrDefault(region.Code, "Unsorted")))).ToList(), _state.Difficulty, seed);
++        var available = _regions.Select(region => region.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
++        order.AddRange(_state.Order.Where(code => !available.Contains(code)));
++        var candidate = Copy(_state, order);
++        candidate.HasRandomized = true;
++        candidate.Seed = seed;
++        var previous = _state.HasRandomized ? Copy(_state) : null;
++        if (!Commit(candidate)) return;
++        _previous = previous;
++        _restore.Enabled = _previous is not null;
++        RenderTiles();
++        _status.Text = "New play order saved. Unsorted regions are at the end.";
++    }
++
++    private void RestorePrevious()
++    {
++        if (_previous is null) return;
++        var restored = Copy(_previous, RegionProgressionService.AppendNew(_previous.Order, _state.Order), _state.Difficulty);
++        if (!Commit(restored)) return;
++        _previous = null;
++        _restore.Enabled = false;
++        RenderTiles();
++        _status.Text = "Previous play order restored and saved.";
++    }
++
++    private bool Commit(RegionProgressionState candidate)
++    {
++        if (_loadFailed) return false;
++        try { _store.Save(candidate); _state = candidate; return true; }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
++        {
++            _status.Text = "Could not save progression: " + ex.Message;
++            return false;
++        }
++    }
++
++    private static RegionProgressionState Copy(RegionProgressionState state, List<string>? order = null, ProgressionDifficulty? difficulty = null) => new()
++    {
++        Order = order is null ? [.. state.Order] : [.. order], Difficulty = difficulty ?? state.Difficulty,
++        HasRandomized = state.HasRandomized, Seed = state.Seed
++    };
++
++    private void RenderTiles()
++    {
++        _tiles.SuspendLayout();
++        foreach (var control in _tiles.Controls.Cast<Control>().ToArray()) control.Dispose();
++        var regions = _regions.ToDictionary(region => region.Code, StringComparer.OrdinalIgnoreCase);
++        foreach (var code in _state.Order)
++        {
++            if (!regions.TryGetValue(code, out var region)) continue;
++            var tile = CustomGroupWipTab.CreateTile(region, region: true);
++            CustomGroupWipTab.AttachTileDragHandlers(tile, tile, null);
++            tile.QueryContinueDrag += (_, e) => { if (e.Action != DragAction.Continue) StopDrag(); };
++            AttachDropTarget(tile);
++            _tiles.Controls.Add(tile);
++        }
++        UpdateCaptions();
++        _tiles.ResumeLayout(true);
++    }
++
++    private void UpdateCaptions()
++    {
++        var regions = _regions.ToDictionary(region => region.Code, StringComparer.OrdinalIgnoreCase);
++        for (var index = 0; index < _tiles.Controls.Count; index++)
++        {
++            var tile = _tiles.Controls[index];
++            var region = regions[(string)tile.Tag!];
++            var tier = _tiers.GetValueOrDefault(region.Code, "Unsorted");
++            tile.Controls.OfType<Label>().First(label => label.Dock == DockStyle.Top).Text =
++                $"{index + 1}. {region.Name}{Environment.NewLine}{region.Class} · {tier}";
++            tile.AccessibleName = $"{index + 1}. {region.Name}, {tier}";
++        }
++    }
++
++    private void AttachDropTarget(Control control)
++    {
++        control.AllowDrop = true;
++        control.DragEnter += (_, e) => PreviewDrop(control, e);
++        control.DragOver += (_, e) => PreviewDrop(control, e);
++        control.DragLeave += (_, _) =>
++        {
++            if (!_tiles.RectangleToScreen(_tiles.ClientRectangle).Contains(Cursor.Position)) StopDrag();
++        };
++        control.DragDrop += (_, e) => CompleteDrop(e);
++        foreach (Control child in control.Controls) AttachDropTarget(child);
++    }
++
++    private void PreviewDrop(Control source, DragEventArgs e)
++    {
++        if (e.Data?.GetData(typeof(Panel)) is not Panel tile || tile.Parent != _tiles)
++        { e.Effect = DragDropEffects.None; StopDrag(); return; }
++        _dragTile = tile;
++        _dragScroll.Start();
++        CustomGroupWipTab.UpdateDropPreview(_tiles, null, source, e);
++    }
++
++    private void CompleteDrop(DragEventArgs e)
++    {
++        if (e.Data?.GetData(typeof(Panel)) is not Panel tile || tile.Parent != _tiles) return;
++        var insert = _tiles.DropIndex >= 0 ? _tiles.DropIndex :
++            _tiles.GetInsertionPosition(_tiles.PointToClient(new Point(e.X, e.Y)), tile).Index;
++        var visible = _tiles.Controls.Cast<Control>().Select(control => (string)control.Tag!).ToList();
++        var order = RegionProgressionService.Move(_state.Order, visible, (string)tile.Tag!, insert);
++        if (Commit(Copy(_state, order)))
++        {
++            _tiles.Controls.Remove(tile);
++            _tiles.Controls.Add(tile);
++            _tiles.Controls.SetChildIndex(tile, Math.Clamp(insert, 0, _tiles.Controls.Count - 1));
++            UpdateCaptions();
++            _status.Text = "Manual play order saved.";
++        }
++        StopDrag();
++    }
++
++    private void ScrollDuringDrag()
++    {
++        if (_dragTile is null || _dragTile.IsDisposed || _dragTile.Parent != _tiles || !Visible)
++        { StopDrag(); return; }
++        var point = _tiles.PointToClient(Cursor.Position);
++        if (!_tiles.ClientRectangle.Contains(point)) { StopDrag(); return; }
++        var offset = _tiles.AutoScrollPosition;
++        var maximum = Math.Max(0, _tiles.VerticalScroll.Maximum - _tiles.VerticalScroll.LargeChange + 1);
++        var delta = point.Y < 48 ? -16 : point.Y > _tiles.ClientSize.Height - 48 ? 16 : 0;
++        _tiles.AutoScrollPosition = new Point(-offset.X, Math.Clamp(-offset.Y + delta, 0, maximum));
++        var position = _tiles.GetInsertionPosition(_tiles.PointToClient(Cursor.Position), _dragTile);
++        _tiles.SetDropPosition(position.Index, _dragTile, position.AtPreviousRowEnd);
++    }
++
++    private void StopDrag() { _dragScroll.Stop(); _dragTile = null; _tiles.ClearDropIndex(); }
++}
+--- /dev/null
++++ .checks\RegionProgression\Program.cs
+@@ -0,0 +1,99 @@
++using System.Reflection;
++using System.Text.Json;
++using SnowPakTool.Desktop;
++internal static class Program
++{
++ static void Check(bool ok,string name) { if(!ok) throw new Exception(name); }
++ static T Field<T>(object value,string name) => (T)value.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(value)!;
++ static void Call(object value,string name,params object[] args) => value.GetType().GetMethod(name,BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(value,args);
++ static IEnumerable<Control> All(Control root) { foreach(Control c in root.Controls) { yield return c; foreach(var child in All(c)) yield return child; } }
++ static string[] Codes(TileFlowPanel panel) => panel.Controls.Cast<Control>().Select(c=>(string)c.Tag!).ToArray();
++ [STAThread] static void Main()
++ {
++  Application.SetHighDpiMode(HighDpiMode.SystemAware);
++  var sample=Enumerable.Range(0,5).SelectMany(d=>Enumerable.Range(0,4).Select(i=>new ProgressionRegion($"r{d}_{i}",d))).ToList();
++  sample.Add(new("new1",null));sample.Add(new("new2",null));
++  var lookup=sample.ToDictionary(r=>r.Code);
++  var averages=new List<double>();
++  foreach(var mode in new[]{ProgressionDifficulty.Easy,ProgressionDifficulty.Normal,ProgressionDifficulty.Hard})
++  {
++   double sum=0;bool variance=false;
++   for(int seed=0;seed<4000;seed++)
++   {
++    var order=RegionProgressionService.Generate(sample,mode,seed);
++    Check(order.Count==sample.Count && order.Distinct().Count()==sample.Count,"permutation");
++    Check(lookup[order[0]].Difficulty==0,"easiest start");
++    Check(order.TakeLast(2).SequenceEqual(new[]{"new1","new2"}),"unsorted tail");
++    sum+=order.Skip(1).Take(5).Average(code=>lookup[code].Difficulty!.Value);
++    variance|=order.Take(5).Any(code=>lookup[code].Difficulty>=(mode==ProgressionDifficulty.Easy ? 2 : 3));
++   }
++   Check(variance,"harder region occasionally early");averages.Add(sum/4000);
++  }
++  Check(averages[0]<averages[1] && averages[1]<averages[2],"difficulty effect");
++  var once=RegionProgressionService.Generate(sample,ProgressionDifficulty.Normal,42);
++  Check(once.SequenceEqual(RegionProgressionService.Generate(sample.Where(r=>r.Difficulty.HasValue).Reverse().Concat(sample.Where(r=>r.Difficulty is null)).ToList(),ProgressionDifficulty.Normal,42)),"within-tier ordering irrelevant");
++  var expanded=sample.Append(new ProgressionRegion("dlc",null)).ToList();
++  Check(RegionProgressionService.Generate(expanded,ProgressionDifficulty.Normal,42).Take(sample.Count).SequenceEqual(once),"new unsorted has no effect on draw");
++  Check(RegionProgressionService.Generate([],ProgressionDifficulty.Normal,1).Count==0,"empty input");
++  Check(RegionProgressionService.Generate([new("one",4)],ProgressionDifficulty.Hard,1).Single()=="one","single ranked");
++  Check(RegionProgressionService.Generate([new("one",null),new("two",null)],ProgressionDifficulty.Hard,1).SequenceEqual(new[]{"one","two"}),"all unsorted");
++  Check(RegionProgressionService.Generate([new("hard",4),new("easy",2)],ProgressionDifficulty.Hard,1)[0]=="easy","easiest available tier");
++  Check(RegionProgressionService.Move(["hidden","a","b","c"],["a","b","c"],"a",2).SequenceEqual(new[]{"hidden","b","c","a"}),"hidden positions preserved");
++  Console.WriteLine($"PASS algorithm: 12,000 seeds, easiest start, Unsorted last, uniqueness, variance, deterministic tiers, new DLC stability. Early difficulty Easy/Normal/Hard: {string.Join(" / ",averages.Select(v=>v.ToString("F2")))}");
++  var path=Path.Combine(AppContext.BaseDirectory,"test-state","progression.json");
++  Directory.CreateDirectory(Path.GetDirectoryName(path)!); if(File.Exists(path)) File.Delete(path);
++  var store=new RegionProgressionStore(path);
++  var regions=new List<CustomTruck>{new("us_01","Michigan","Base game","Black River"),new("us_02","Alaska","Base game"),new("ru_02","Taymyr","Base game"),new("ru_03","Kola","Season 1"),new("us_04","Yukon","Season 2"),new("us_03","Wisconsin","Season 3")};
++  var tiers=new List<GroupState>{new(){Name="D",TruckCodes=["us_01","us_02"]},new(){Name="A",TruckCodes=["ru_02"]},new(){Name="S",TruckCodes=["ru_03"]}};
++  using(var tab=new RegionProgressionTab(()=>regions,store,()=>tiers){Size=new Size(1080,740)})
++  {
++   tab.RefreshRegions();tab.CreateControl();tab.PerformLayout();
++   var tiles=Field<TileFlowPanel>(tab,"_tiles"); tiles.CreateControl(); tiles.PerformLayout();
++   Check(tiles.WrapContents && tiles.FlowDirection==FlowDirection.LeftToRight,"wrapping tile pane");
++   Check(tiles.Controls[1].Left>tiles.Controls[0].Left && tiles.Controls[4].Top>tiles.Controls[0].Top,"left to right multirow layout");
++   Check(tiles.Controls[0].Controls.OfType<PictureBox>().Single().Image is not null,"real region thumbnail");
++   Check(tiles.Controls[0] is ISearchHighlight,"searchable region tile");
++   Call(tab,"Randomize");var first=store.Load().Order.ToArray();
++   Check(first.TakeLast(2).SequenceEqual(new[]{"us_04","us_03"}),"UI unsorted tail");
++   Check(!Field<Button>(tab,"_restore").Enabled,"no previous before second roll");
++   Call(tab,"Randomize");Check(Field<Button>(tab,"_restore").Enabled,"one previous available");
++   var before=store.Load().Order.ToArray();
++   var radios=All(tab).OfType<RadioButton>().ToArray();radios.Single(r=>r.Text=="Hard").Checked=true;
++   Check(store.Load().Difficulty==ProgressionDifficulty.Hard && store.Load().Order.SequenceEqual(before),"setting persists without reshuffle");
++   var tile=(Panel)tiles.Controls[0];var expected=Codes(tiles).Skip(1).Append((string)tile.Tag!).ToArray();
++   tiles.SetDropPosition(tiles.Controls.Count-1,tile,false);
++   Call(tab,"CompleteDrop",new DragEventArgs(CustomGroupWipTab.CreateTileDragData(tile),0,0,0,DragDropEffects.Move,DragDropEffects.Move));
++   Check(Codes(tiles).SequenceEqual(expected) && store.Load().Order.SequenceEqual(expected),"drop reorders and saves across rows");
++   Check(tiles.Controls[0].Controls.OfType<Label>().Single(l=>l.Dock==DockStyle.Top).Text.StartsWith("1. "),"drop renumbers");
++   regions.Add(new("us_19","New DLC","Season 19"));tab.RefreshRegions();
++   Check(store.Load().Order.Take(expected.Length).SequenceEqual(expected) && store.Load().Order.Last()=="us_19","append without cascade");
++   tiers[0].TruckCodes.Remove("us_01");tiers[2].TruckCodes.Add("us_01");tab.RefreshRegions();
++   Check(store.Load().Order.Take(expected.Length).SequenceEqual(expected),"tier change no cascade");
++   Call(tab,"RestorePrevious");
++   Check(store.Load().Order.Take(first.Length).SequenceEqual(first) && store.Load().Order.Last()=="us_19","previous restores and retains new DLC");
++   Check(!Field<Button>(tab,"_restore").Enabled,"previous consumed");
++   using(var preview=new Bitmap(tab.Width,tab.Height)) { tab.DrawToBitmap(preview,new Rectangle(Point.Empty,tab.Size)); preview.Save(Path.Combine(AppContext.BaseDirectory,"region-progression-preview.png")); }
++   var saved=File.ReadAllText(path);Directory.CreateDirectory(path+".tmp");Call(tab,"Randomize");
++   Check(File.ReadAllText(path)==saved && Field<RegionProgressionState>(tab,"_state").Order.SequenceEqual(store.Load().Order),"failed save leaves state unchanged");
++   Directory.Delete(path+".tmp");
++  }
++  using(var restarted=new RegionProgressionTab(()=>regions,store,()=>tiers))
++  {
++   restarted.RefreshRegions();Check(Codes(Field<TileFlowPanel>(restarted,"_tiles")).SequenceEqual(store.Load().Order),"restart saved order");
++   Check(!Field<Button>(restarted,"_restore").Enabled,"previous memory only");
++  }
++  File.WriteAllText(path,"{broken");
++  using(var broken=new RegionProgressionTab(()=>regions,store,()=>tiers))
++  {broken.RefreshRegions();Check(!Field<Button>(broken,"_randomize").Enabled && File.ReadAllText(path)=="{broken","bad state not overwritten");}
++  File.Delete(path);
++  Console.WriteLine("PASS UI/store: wrapping region thumbnails, search, saved difficulty, drag reorder and renumber, append-only DLC/tier changes, one previous, restart, failed writes, corrupt state protection.");
++ }
++}
++namespace SnowPakTool.Desktop
++{
++ internal static class TruckThumbnailProvider
++ {
++  public static Image PlaceholderImage {get;}=new Bitmap(1,1);
++  public static Task<Image> LoadAsync(CustomTruck truck)=>Task.FromResult(PlaceholderImage);
++ }
++}
+--- /dev/null
++++ .checks\RegionProgression\RegionProgression.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionStore.cs" Link="RegionProgressionStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionTab.cs" Link="RegionProgressionTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomGroupStore.cs" Link="CustomGroupStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TierListStore.cs" Link="TierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionTierListStore.cs" Link="RegionTierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TileFlowPanel.cs" Link="TileFlowPanel.cs"/><Compile Include="../../src/SnowPakTool.Desktop/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionTileAssets.cs" Link="RegionTileAssets.cs"/><Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CurrentTabSearch.cs" Link="CurrentTabSearch.cs"/><Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png"><LogicalName>SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)</LogicalName></EmbeddedResource></ItemGroup></Project>

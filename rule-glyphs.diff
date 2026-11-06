@@ -1,0 +1,92 @@
+--- src\SnowPakTool.Desktop\TruckRandomizationTab.cs
++++ src\SnowPakTool.Desktop\TruckRandomizationTab.cs
+@@ -13,11 +13,14 @@
+     ];
+ 
+     private readonly TruckRandomizationRuleStore _store = new();
++    private readonly ToolTip _actionTips = new();
++    private readonly Font _glyphFont = new("Segoe MDL2 Assets", 10f);
+     private readonly TruckRandomizationRules _rules;
+     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 8) };
+ 
+     public TruckRandomizationTab()
+     {
++        Disposed += (_, _) => { _actionTips.Dispose(); _glyphFont.Dispose(); };
+         try { _rules = _store.Load(); }
+         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+         {
+@@ -58,7 +61,7 @@
+             Text = "Rules", AutoSize = true, Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold),
+             Anchor = AnchorStyles.Left, Margin = Padding.Empty
+         }, 0, 0);
+-        var add = new Button { Text = "Add rule…", AutoSize = true };
++        var add = CreateGlyphAction("\uE710", $"Add {title} rule");
+         header.Controls.Add(add, 1, 0);
+         layout.Controls.Add(header, 0, 0);
+ 
+@@ -80,7 +83,7 @@
+             list.RowCount = Math.Max(1, rules.Count);
+             if (rules.Count == 0)
+             {
+-                var empty = new Label { Text = "No rules yet. Use Add rule to create one.", AutoSize = true, Dock = DockStyle.Fill };
++                var empty = new Label { Text = "No rules yet. Use + to add one.", AutoSize = true, Dock = DockStyle.Fill };
+                 list.Controls.Add(empty, 0, 0);
+                 list.SetColumnSpan(empty, 3);
+             }
+@@ -88,18 +91,18 @@
+             {
+                 var ruleIndex = index;
+                 list.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+-                list.Controls.Add(new Label { Text = $"{index + 1}.", AutoSize = true, Margin = new Padding(0, 5, 4, 12) }, 0, index);
++                list.Controls.Add(new Label { Text = $"{index + 1}.", AutoSize = true, Margin = new Padding(0, 5, 4, 8) }, 0, index);
+                 list.Controls.Add(new Label
+                 {
+-                    Text = rules[index], AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 5, 8, 12)
++                    Text = rules[index], AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 5, 8, 8)
+                 }, 1, index);
+                 var actions = new FlowLayoutPanel
+                 {
+-                    AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false,
+-                    Margin = new Padding(0, 0, 0, 12)
++                    AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
++                    Margin = new Padding(0, 0, 0, 8)
+                 };
+-                var edit = new Button { Text = "Edit…", AutoSize = true, AccessibleName = $"Edit {title} rule {index + 1}" };
+-                var remove = new Button { Text = "Remove", AutoSize = true, AccessibleName = $"Remove {title} rule {index + 1}" };
++                var edit = CreateGlyphAction("\uE70F", $"Edit {title} rule {index + 1}");
++                var remove = CreateGlyphAction("\uE74D", $"Remove {title} rule {index + 1}");
+                 edit.Click += (_, _) =>
+                 {
+                     var text = EditRule($"Edit {title} rule {ruleIndex + 1}", rules[ruleIndex]);
+@@ -123,6 +126,20 @@
+         layout.Controls.Add(scroll, 0, 1);
+         pane.Controls.Add(layout);
+         return pane;
++    }
++
++    private Button CreateGlyphAction(string glyph, string description)
++    {
++        var action = new Button
++        {
++            Text = glyph, Font = _glyphFont, Size = new Size(26, 26), Margin = Padding.Empty,
++            Padding = Padding.Empty, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
++            AccessibleName = description, AccessibleDescription = description,
++            UseVisualStyleBackColor = true
++        };
++        action.FlatAppearance.BorderSize = 0;
++        _actionTips.SetToolTip(action, description);
++        return action;
+     }
+ 
+     private void ChangeRules(List<string> rules, Action<List<string>> change, Action refresh)
+--- README.md
++++ README.md
+@@ -14,7 +14,7 @@
+ 
+ ### SnowPakTool Desktop UI
+ 
+-The **Randomizer** main tab contains **Truck-Randomization** and an empty **Region progression** sub-tab. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has Add rule, and every rule has Edit and Remove actions. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
++The **Randomizer** main tab contains **Truck-Randomization** and an empty **Region progression** sub-tab. **Truck-Randomization** displays side-by-side Obtainable and Missions rule panes. The Obtainable pane starts with the six randomization rules (ownership, class, variety, progression, tires, and required addons); Missions starts empty. Each pane has a compact + glyph to add a rule; every rule has pencil and trash glyphs to edit and remove it. Tooltips identify each action. Edits save automatically between sessions; empty lists stay empty. This page documents the rules and does not apply randomization.
+ 
+ A simple Windows Forms frontend is in `src/SnowPakTool.Desktop`. Its first tab handles PAK unpacking, workspace merging, and repacking. The **Experience / Ranks** tab displays and edits the `rankExp` progression values in `[ps]/rank_settings.sso`, shows the 17-season maximum of 1,163,997 XP, provides a collapsible region XP checklist with a selected subtotal, and totals the current rank progression values needed to reach level 30. The updated XP progression uses an exponential curve, with a steepness slider beside the curve preview and an XP reduction slider below it; the reduction amount appears beneath that slider.
+ 

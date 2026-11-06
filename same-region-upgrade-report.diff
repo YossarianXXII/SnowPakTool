@@ -1,0 +1,170 @@
+diff --git a/original-trucks-upgrade-region-analysis.md b/original-trucks-upgrade-region-analysis.md
+index 666715f..d3443d1 100644
+--- a/original-trucks-upgrade-region-analysis.md
++++ b/original-trucks-upgrade-region-analysis.md
+@@ -143,25 +143,128 @@ Each model is counted once. An upgrade is local when it is in any of that model'
+ | ZiKZ 566A | Ontario | 2 | 6 | 25.0% |
+ | ZiKZ 605R | Amur | 0 | 4 | 0.0% |
+ 
++## Truck-specific upgrades found in the same region
++
++94 truck-specific upgrade pickups. Each part is compatible with exactly one model in the full 120-model catalog; that model has an original obtainable map placement.
++
++| Truck | Original obtainable region(s) | Upgrade | Pickup region | Exact upgrade ID |
++| --- | --- | --- | --- | --- |
++| AAC-58DW | Almaty | Alto 4-110 | Almaty | `us_special_aac_58dw_alto_4110` |
++| AAC-58DW | Almaty | Alto 6-190 | Almaty | `us_special_aac_58dw_alto_6190` |
++| AAC-58DW | Almaty | Raised | Almaty | `aac_58dw_suspension_high` |
++| AAC-58DW | Almaty | Special | Almaty | `g_aac_58dw_special` |
++| ANK MK38 | Alaska | Raised | Alaska | `ank_mk38_suspension_high` |
++| Ankatra 1160 | Austria | METRA V52-D85 | Austria | `us_ankatra_1160_engine_1` |
++| Azov 43-191 "Sprinter" | Tennessee | Azov SAM-8 14 | Tennessee | `ru_azov_sprinter_custom_engine` |
++| Azov 43-191 "Sprinter" | Tennessee | Sport | Tennessee | `g_azov_sprinter_sport` |
++| Burlak 6x6 | Scandinavia | Highrange | Scandinavia | `g_scout_burlak_highrange` |
++| Chevrolet CK1500 | Glades, Michigan | Engageable | Michigan | `chevrolet_ck1500_diff_lock` |
++| Chevrolet CK1500 | Glades, Michigan | Raised | Michigan | `chevrolet_ck1500_suspension_high` |
++| Chevrolet Kodiak C70 | Michigan, Yukon | Raised | Michigan | `chevrolet_kodiakC70_suspension_high` |
++| Derry Special 15C-177 | Ontario | Active | Ontario | `derry_special_15c177_suspension_active` |
++| Derry Special 15C-177 | Ontario | Gb-8V 3500T | Ontario | `us_truck_modern_engine_derry_special` |
++| DERRY “SAVIOR” | Switzerland | Advanced Special | Switzerland | `g_derry_savior_special_offroad` |
++| DERRY “SAVIOR” | Switzerland | DDA-8V 720T | Switzerland | `engine_truck_derry_savior_1` |
++| DERRY “SAVIOR” | Switzerland | DDA-8V 900TTA | Switzerland | `engine_truck_derry_savior_2` |
++| EarthRoamer LTi | Austria | Raised | Austria | `earthroamer_lti_suspension_high` |
++| EarthRoamer SX | Austria | Raised | Austria | `earthroamer_sx_suspension_high` |
++| FEMM 37-AT | North Carolina | Engageable | North Carolina | `femm_37at_diff_lock` |
++| FEMM 37-AT | North Carolina | SBR6-250-R1 | North Carolina | `ru_special_femm_37at_sbr_r1` |
++| FEMM 37-AT | North Carolina | SBR6-250-R2 | North Carolina | `ru_special_femm_37at_sbr_r2` |
++| Fleetstar F2070A | Michigan, Ontario | Engageable AWD | Michigan | `international_fleetstar_f2070a_transferbox_allwheels` |
++| Fleetstar F2070A | Michigan, Ontario | Raised | Michigan | `fleetstar_f2070a_suspension_high` |
++| Ford F 750 | Kola Peninsula | Engageable AWD | Kola Peninsula | `ford_f750_transferbox_allwheels` |
++| Ford F 750 | Kola Peninsula | Het/10V 6,6 | Kola Peninsula | `us_scout_old_engine_f750` |
++| Ford F 750 | Kola Peninsula | Raised | Kola Peninsula | `ford_f750_suspension_high` |
++| Ford F 750 | Kola Peninsula | Tuned Custom | Kola Peninsula | `ford_f750_suspension_ultimate` |
++| Futom 7290RA | Austria | Pass 530L14 | Austria | `us_futom_7290ra_engine_1` |
++| GMC MH9500 | Michigan, Ontario | Engageable | Michigan | `gmc_9500_diff_lock` |
++| GMC MH9500 | Michigan, Ontario | Raised | Michigan | `gmc9500_suspension_high` |
++| Gor BY-4 | Tennessee | Engageable | Tennessee | `gor_by4_diff_lock` |
++| Gor BY-4 | Tennessee | Raised | Tennessee | `gor_by4_suspension_high` |
++| HIB Billert 1980 | Washington | Engageable | Washington | `hib_billert_1980_diff_lock` |
++| HIB Billert 1980 | Washington | HB-I6/1900E | Washington | `us_truck_old_engine_hib_billert` |
++| HIB Billert 1980 | Washington | Raised | Washington | `hib_billert_1980_suspension_high` |
++| HIB Billert M816 | Chiapas | Engageable | Chiapas | `hib_billert_m816_230_diff_lock` |
++| HIB Billert M816 | Chiapas | Engageable AWD | Chiapas | `hib_billert_m816_transferbox_allwheels` |
++| HIB Billert M816 | Chiapas | KTV 14-890 | Chiapas | `engine_truck_hib_billert_m816_02` |
++| Hummer H2 | Alaska, Wisconsin, Ontario | Engageable | Alaska | `hummer_h2_diff_lock` |
++| Hummer H2 | Alaska, Wisconsin, Ontario | Raised | Alaska | `hummer_h2_suspension_high` |
++| International Paystar 5600TS | Wisconsin | Engageable | Wisconsin | `paystar_5600ts_diff_lock` |
++| International Paystar 5600TS | Wisconsin | Engageable AWD | Wisconsin | `paystar_5600ts_transferbox_allwheels` |
++| International Paystar 5600TS | Wisconsin | Raised | Wisconsin | `paystar_5600ts_suspension_high` |
++| International Transtar 4070A | Michigan | Si-6V/2380 | Michigan | `us_truck_old_engine_4070` |
++| Jangsu RX600 | Zurdania | Crawler | Zurdania | `jangsu_rx600_suspension_crawler` |
++| Jangsu RX600 | Zurdania | Highrange | Zurdania | `g_truck_jangsu_rx_600_highrange` |
++| Kenworth 963 | British Columbia | H6 15.OL Wanderer | British Columbia | `us_truck_old_heavy_engine_kenworth_963` |
++| KHAN 317 Sentinel | Amur | Raised | Amur | `khan_317_sentinel_suspension_high` |
++| KHAN 317 Sentinel | Amur | Tuned Custom | Amur | `khan_317_sentinel_suspension_ultimate` |
++| Kirovets K-700 | Glades | IMZ-8 520 AT | Glades | `ru_kirovets_k700_engine_1` |
++| Kirovets K-700 | Glades | KZGT-8 530 T | Glades | `ru_kirovets_k700_engine_2` |
++| Kirovets K-7М | Glades | DAN-8C 370 | Glades | `ru_kirovets_k7m_engine_1` |
++| Kirovets K-7М | Glades | KZGT-8 420T | Glades | `ru_kirovets_k7m_engine_2` |
++| Mack Defense M917 | British Columbia | MC-V8 13.OT | British Columbia | `us_special_mack_defense_mcv8` |
++| Mack Defense M917 | British Columbia | MC-V8 FuelMiser | British Columbia | `us_special_mack_defense_mcv8fm` |
++| Mercer K520 | Quebec | CIMA 5-520 | Quebec | `us_truck_old_mercer_k520` |
++| Mercer K520 | Quebec | Raised | Quebec | `mercer_k520_suspension_high` |
++| Mercer R230 | Chiapas | Crawler | Chiapas | `mercer_6x6r_230_suspension_crawler` |
++| Mercer R230 | Chiapas | MMDV-96 X300 | Chiapas | `engine_truck_mercer_6x6r_230_02` |
++| Mercer R230 | Chiapas | Offroad | Chiapas | `g_mercer_6x6r_230_offroad` |
++| MTB 8106 (Rock Grinder) | North Carolina | Crawler | North Carolina | `mtb_8106_suspension_crawler` |
++| MTB 8106 (Rock Grinder) | North Carolina | Engageable | North Carolina | `mtb_8106_diff_lock` |
++| MTB 8106 (Rock Grinder) | North Carolina | GForce-4V 11.0T | North Carolina | `us_special_mtb_8106_gf4v` |
++| MTB 8106 (Rock Grinder) | North Carolina | Raised | North Carolina | `mtb_8106_suspension_high` |
++| Neo Falcon 2000 | Scandinavia | Raised | Scandinavia | `neo_falcon_2000_suspension_high` |
++| PLAD 440 “BUDDY” | Washington | Datz 8-383C | Washington | `us_truck_old_engine_plad_440` |
++| PLAD 440 “BUDDY” | Washington | Engageable | Washington | `plad_440_diff_lock` |
++| PLAD 440 “BUDDY” | Washington | Raised | Washington | `plad_440_suspension_high` |
++| PLAD 450 | Almaty | Datz 12-513C | Almaty | `us_special_plad_450_datz12l` |
++| PLAD 450 | Almaty | Fanis 19-450KT | Almaty | `us_special_plad_450_fanis19` |
++| PLAD 450 | Almaty | Multipurpose | Almaty | `g_special_plad_450` |
++| Royal BM17 | Alaska | Raised | Alaska | `royal_bm17_suspension_high` |
++| Scout 800 | Michigan, Ontario, North Carolina | Raised | Michigan | `international_scout_800_suspension_high` |
++| Sleiter ST 816 "Elephant" | Quebec | Active | Quebec | `sleiter_mfk816_suspension_active` |
++| Step 310Е | Taymyr | Raised | Taymyr | `step_310e_suspension_high` |
++| Tatra FORCE T815-7 | Don | Engageable | Don | `tatra_force_t815_7_diff_lock` |
++| Tatra PHOENIX | Don | Engageable | Don | `tatra_phoenix_diff_lock` |
++| Tayga 6436 | Taymyr, Glades, British Columbia | Raised | Taymyr | `tayga_6436_suspension_high` |
++| TUZ 108 "Warthog" | Kola Peninsula | Active | Kola Peninsula | `tuz_108_warthog_suspension_active` |
++| TUZ 108 "Warthog" | Kola Peninsula | Raised | Kola Peninsula | `tuz_108_warthog_suspension_high` |
++| TUZ 16 "Actaeon" | Kola Peninsula | Raised | Kola Peninsula | `tuz_16_actaeon_suspension_high` |
++| TUZ 166 | Taymyr, Glades | Raised | Taymyr | `tuz_166_suspension_high` |
++| TUZ 166 | Taymyr, Glades | Tuned Custom | Taymyr | `tuz_166_suspension_ultimate` |
++| Voron G-5352 | Zurdania | IMZ-8 360-X | Zurdania | `ru_truck_old_engine_voron_g5352_2` |
++| Voron G-5352 | Zurdania | Offroad | Zurdania | `g_truck_voron_g5352_offroad` |
++| White Western Star 4964 | Michigan, British Columbia | Engageable | Michigan | `ws_4964_white_diff_lock` |
++| White Western Star 4964 | Michigan, British Columbia | Engageable AWD | Michigan | `ws_4964_white_transferbox_allwheels` |
++| White Western Star 4964 | Michigan, British Columbia | Raised | Michigan | `white_ws4964_suspension_high` |
++| Wortek 250T | Switzerland | Advanced Special | Switzerland | `g_special_wortek_250t_offroad` |
++| Wortek 250T | Switzerland | Highway | Switzerland | `g_special_wortek_250t_highway` |
++| Wortek 250T | Switzerland | TAC D-850X | Switzerland | `engine_truck_wortek_250t_2` |
++| ZiKZ 566A | Ontario | IMZ-6 370 | Ontario | `ru_truck_old_engine_zikz_566a` |
++| ZiKZ 566A | Ontario | Raised | Ontario | `zikz_566a_suspension_high` |
++
+ ## Truck-specific upgrades found elsewhere
+ 
++15 truck-specific upgrade pickups. Each part is compatible with exactly one model in the full 120-model catalog; that model has an original obtainable map placement.
++
+ | Truck | Original obtainable region(s) | Upgrade | Pickup region | Exact upgrade ID |
+ | --- | --- | --- | --- | --- |
+-| ANK MK38 | Alaska | Tuned Custom | Yukon | `ank_mk38_suspension_ultimate` |
+ | ANK MK38 | Alaska | Active | Yukon | `ank_mk38_suspension_active` |
++| ANK MK38 | Alaska | Tuned Custom | Yukon | `ank_mk38_suspension_ultimate` |
++| Chevrolet Kodiak C70 | Michigan, Yukon | Engageable AWD | Alaska | `chevrolet_kodiak_c70_transferbox_allwheels` |
+ | DAN 96320 | Taymyr | Active | Maine | `dan_96320_suspension_active` |
+-| DON 71 | Glades, North Carolina | Tuned Custom | Taymyr | `don_71_suspension_ultimate` |
+ | DON 71 | Glades, North Carolina | Raised | Taymyr | `don_71_suspension_high` |
++| DON 71 | Glades, North Carolina | Tuned Custom | Taymyr | `don_71_suspension_ultimate` |
+ | Freightliner 114SD | Ontario | Engageable AWD | Alaska | `freightliner_114sd_transferbox_allwheels` |
+ | Freightliner 114SD | Ontario | Raised | Alaska | `freightliner_114sd_suspension_high` |
+ | GMC MH9500 | Michigan, Ontario | Engageable AWD | Kola Peninsula | `gmc_9500_transferbox_allwheels` |
+-| Chevrolet Kodiak C70 | Michigan, Yukon | Engageable AWD | Alaska | `chevrolet_kodiak_c70_transferbox_allwheels` |
+ | International Transtar 4070A | Michigan | Raised | Maine | `transtar_4070a_suspension_high` |
+ | Voron AE-4380 | Scandinavia | Raised | Taymyr | `voron_ae4380_suspension_high` |
+ | Western Star 6900 TwinSteer | Michigan | Engageable AWD | Kola Peninsula | `ws_6900xd_twin_transferbox_allwheels` |
+ | Western Star 6900 TwinSteer | Michigan | Raised | Alaska | `ws_6900xd_twin_suspension_high` |
+-| ZiKZ 5368 | Zurdania | Raised | Taymyr | `zikz_5368_suspension_high` |
+ | ZiKZ 5368 | Zurdania | Engageable | Taymyr | `zikz_5368_diff_lock` |
++| ZiKZ 5368 | Zurdania | Raised | Taymyr | `zikz_5368_suspension_high` |
+ 
+ ## Coverage and method
+ 
+diff --git a/.checks/UpgradeRegionAnalysis/Summarize.py b/.checks/UpgradeRegionAnalysis/Summarize.py
+index ec7d49e..50c65b9 100644
+--- a/.checks/UpgradeRegionAnalysis/Summarize.py
++++ b/.checks/UpgradeRegionAnalysis/Summarize.py
+@@ -120,15 +120,19 @@ for model in sorted(eligible,key=lambda m:m['Name'].casefold()):
+     group = [link for link in links if link['Truck'] == model['Truck']]
+     total,same = counts(group)
+     lines.append(f'| {safe(model["Name"])} | {regions(model["Regions"])} | {same} | {total-same} | {percent(same,total)} |')
+-lines += [
+-    '',
+-    '## Truck-specific upgrades found elsewhere',
+-    '',
+-    '| Truck | Original obtainable region(s) | Upgrade | Pickup region | Exact upgrade ID |',
+-    '| --- | --- | --- | --- | --- |',
+-]
+-for link in exclusive:
+-    if not link['SameRegion']:
++for same_region, heading in [(True, 'Truck-specific upgrades found in the same region'), (False, 'Truck-specific upgrades found elsewhere')]:
++    group = sorted((link for link in exclusive if link['SameRegion'] == same_region),
++                   key=lambda link: (link['Name'].casefold(), link['UpgradeName'].casefold(), link['UpgradeId']))
++    lines += [
++        '',
++        f'## {heading}',
++        '',
++        f'{len(group)} truck-specific upgrade pickups. Each part is compatible with exactly one model in the full 120-model catalog; that model has an original obtainable map placement.',
++        '',
++        '| Truck | Original obtainable region(s) | Upgrade | Pickup region | Exact upgrade ID |',
++        '| --- | --- | --- | --- | --- |',
++    ]
++    for link in group:
+         lines.append(f'| {safe(link["Name"])} | {regions(link["TruckRegion"].split(","))} | {safe(link["UpgradeName"])} | {region_name(link["UpgradeRegion"])} | `{link["UpgradeId"]}` |')
+ lines += [
+     '',

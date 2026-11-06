@@ -1,0 +1,832 @@
+diff --git a/src/SnowPakTool.Desktop/AddonsTab.cs b/src/SnowPakTool.Desktop/Editors/Addons/AddonsTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/AddonsTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Addons/AddonsTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/AddonsExploration.cs b/src/SnowPakTool.Desktop/Editors/Addons/AddonsExploration.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/AddonsExploration.cs
+rename to src/SnowPakTool.Desktop/Editors/Addons/AddonsExploration.cs
+
+diff --git a/src/SnowPakTool.Desktop/AddonExplorationStore.cs b/src/SnowPakTool.Desktop/Editors/Addons/AddonExplorationStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/AddonExplorationStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Addons/AddonExplorationStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/FrameAddonFuelStore.cs b/src/SnowPakTool.Desktop/Editors/Addons/FrameAddonFuelStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/FrameAddonFuelStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Addons/FrameAddonFuelStore.cs
+
+diff --git a/src/SnowPakTool/FilesContainer.cs b/src/SnowPakTool/Containers/FilesContainer.cs
+similarity index 100%
+rename from src/SnowPakTool/FilesContainer.cs
+rename to src/SnowPakTool/Containers/FilesContainer.cs
+
+diff --git a/src/SnowPakTool/DirectoryFilesContainer.cs b/src/SnowPakTool/Containers/DirectoryFilesContainer.cs
+similarity index 100%
+rename from src/SnowPakTool/DirectoryFilesContainer.cs
+rename to src/SnowPakTool/Containers/DirectoryFilesContainer.cs
+
+diff --git a/src/SnowPakTool/ZipArchiveFilesContainer.cs b/src/SnowPakTool/Containers/ZipArchiveFilesContainer.cs
+similarity index 100%
+rename from src/SnowPakTool/ZipArchiveFilesContainer.cs
+rename to src/SnowPakTool/Containers/ZipArchiveFilesContainer.cs
+
+diff --git a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs b/src/SnowPakTool.Desktop/Editors/Experience/ExperienceEditorTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Experience/ExperienceEditorTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/RankXpStageStore.cs b/src/SnowPakTool.Desktop/Editors/Experience/RankXpStageStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RankXpStageStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Experience/RankXpStageStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/RankProgressionChanges.cs b/src/SnowPakTool.Desktop/Editors/Experience/RankProgressionChanges.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RankProgressionChanges.cs
+rename to src/SnowPakTool.Desktop/Editors/Experience/RankProgressionChanges.cs
+
+diff --git a/src/SnowPakTool.Desktop/AddonCatalogService.cs b/src/SnowPakTool.Desktop/Catalogs/AddonCatalogService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/AddonCatalogService.cs
+rename to src/SnowPakTool.Desktop/Catalogs/AddonCatalogService.cs
+
+diff --git a/src/SnowPakTool.Desktop/CargoCatalogService.cs b/src/SnowPakTool.Desktop/Catalogs/CargoCatalogService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CargoCatalogService.cs
+rename to src/SnowPakTool.Desktop/Catalogs/CargoCatalogService.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckCatalogService.cs b/src/SnowPakTool.Desktop/Catalogs/TruckCatalogService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckCatalogService.cs
+rename to src/SnowPakTool.Desktop/Catalogs/TruckCatalogService.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs b/src/SnowPakTool.Desktop/Catalogs/TruckEquipmentCatalog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs
+rename to src/SnowPakTool.Desktop/Catalogs/TruckEquipmentCatalog.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckMassCatalog.cs b/src/SnowPakTool.Desktop/Catalogs/TruckMassCatalog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckMassCatalog.cs
+rename to src/SnowPakTool.Desktop/Catalogs/TruckMassCatalog.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs b/src/SnowPakTool.Desktop/Catalogs/TruckUpgradeCatalog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckUpgradeCatalog.cs
+rename to src/SnowPakTool.Desktop/Catalogs/TruckUpgradeCatalog.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckClasses.cs b/src/SnowPakTool.Desktop/Catalogs/TruckClasses.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckClasses.cs
+rename to src/SnowPakTool.Desktop/Catalogs/TruckClasses.cs
+
+diff --git a/src/SnowPakTool.Desktop/CustomTruck.cs b/src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CustomTruck.cs
+rename to src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs
+
+diff --git a/src/SnowPakTool.Desktop/LocalizedStrings.cs b/src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/LocalizedStrings.cs
+rename to src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs
+
+diff --git a/src/SnowPakTool.Desktop/DlcReleaseDates.cs b/src/SnowPakTool.Desktop/Catalogs/DlcReleaseDates.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/DlcReleaseDates.cs
+rename to src/SnowPakTool.Desktop/Catalogs/DlcReleaseDates.cs
+
+diff --git a/src/SnowPakTool.Desktop/SsoDataReader.cs b/src/SnowPakTool.Desktop/Catalogs/SsoDataReader.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/SsoDataReader.cs
+rename to src/SnowPakTool.Desktop/Catalogs/SsoDataReader.cs
+
+diff --git a/src/SnowPakTool.Desktop/EngineEditTab.cs b/src/SnowPakTool.Desktop/Editors/Engines/EngineEditTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/EngineEditTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Engines/EngineEditTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/Editors/Trucks/TruckPropertiesTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Trucks/TruckPropertiesTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesStore.cs b/src/SnowPakTool.Desktop/Editors/Trucks/TruckPropertiesStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Trucks/TruckPropertiesStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs b/src/SnowPakTool.Desktop/Editors/Trucks/TruckUnlockRankGenerator.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+rename to src/SnowPakTool.Desktop/Editors/Trucks/TruckUnlockRankGenerator.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckExplorationUnlockGenerator.cs b/src/SnowPakTool.Desktop/Editors/Trucks/TruckExplorationUnlockGenerator.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckExplorationUnlockGenerator.cs
+rename to src/SnowPakTool.Desktop/Editors/Trucks/TruckExplorationUnlockGenerator.cs
+
+diff --git a/src/SnowPakTool.Desktop/SharedPreset.cs b/src/SnowPakTool.Desktop/Presets/SharedPreset.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/SharedPreset.cs
+rename to src/SnowPakTool.Desktop/Presets/SharedPreset.cs
+
+diff --git a/src/SnowPakTool.Desktop/PresetOverwriteReview.cs b/src/SnowPakTool.Desktop/Presets/PresetOverwriteReview.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/PresetOverwriteReview.cs
+rename to src/SnowPakTool.Desktop/Presets/PresetOverwriteReview.cs
+
+diff --git a/src/SnowPakTool.Desktop/PresetBrowseMode.cs b/src/SnowPakTool.Desktop/Presets/PresetBrowseMode.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/PresetBrowseMode.cs
+rename to src/SnowPakTool.Desktop/Presets/PresetBrowseMode.cs
+
+diff --git a/src/SnowPakTool/ZipPakHelper.cs b/src/SnowPakTool/Archives/ZipPakHelper.cs
+similarity index 100%
+rename from src/SnowPakTool/ZipPakHelper.cs
+rename to src/SnowPakTool/Archives/ZipPakHelper.cs
+
+diff --git a/src/SnowPakTool/PakableFileNameComparer.cs b/src/SnowPakTool/Archives/PakableFileNameComparer.cs
+similarity index 100%
+rename from src/SnowPakTool/PakableFileNameComparer.cs
+rename to src/SnowPakTool/Archives/PakableFileNameComparer.cs
+
+diff --git a/src/SnowPakTool/SoundListFile.cs b/src/SnowPakTool/Lists/SoundListFile.cs
+similarity index 100%
+rename from src/SnowPakTool/SoundListFile.cs
+rename to src/SnowPakTool/Lists/SoundListFile.cs
+
+diff --git a/src/SnowPakTool/LoadListFile.cs b/src/SnowPakTool/Lists/LoadListFile.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListFile.cs
+rename to src/SnowPakTool/Lists/LoadListFile.cs
+
+diff --git a/src/SnowPakTool/LoadListEntryType.cs b/src/SnowPakTool/Lists/LoadListEntryType.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListEntryType.cs
+rename to src/SnowPakTool/Lists/LoadListEntryType.cs
+
+diff --git a/src/SnowPakTool/LoadListEntryBase.cs b/src/SnowPakTool/Lists/LoadListEntryBase.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListEntryBase.cs
+rename to src/SnowPakTool/Lists/LoadListEntryBase.cs
+
+diff --git a/src/SnowPakTool/LoadListEndEntry.cs b/src/SnowPakTool/Lists/LoadListEndEntry.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListEndEntry.cs
+rename to src/SnowPakTool/Lists/LoadListEndEntry.cs
+
+diff --git a/src/SnowPakTool/LoadListAssetEntry.cs b/src/SnowPakTool/Lists/LoadListAssetEntry.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListAssetEntry.cs
+rename to src/SnowPakTool/Lists/LoadListAssetEntry.cs
+
+diff --git a/src/SnowPakTool/LoadListStartEntry.cs b/src/SnowPakTool/Lists/LoadListStartEntry.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListStartEntry.cs
+rename to src/SnowPakTool/Lists/LoadListStartEntry.cs
+
+diff --git a/src/SnowPakTool/LoadListStageEntry.cs b/src/SnowPakTool/Lists/LoadListStageEntry.cs
+similarity index 100%
+rename from src/SnowPakTool/LoadListStageEntry.cs
+rename to src/SnowPakTool/Lists/LoadListStageEntry.cs
+
+diff --git a/src/SnowPakTool.Desktop/CustomGroupWipTab.cs b/src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CustomGroupWipTab.cs
+rename to src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/CustomGroupStore.cs b/src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CustomGroupStore.cs
+rename to src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/TierListStore.cs b/src/SnowPakTool.Desktop/Planning/TierListStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TierListStore.cs
+rename to src/SnowPakTool.Desktop/Planning/TierListStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTierListStore.cs b/src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTierListStore.cs
+rename to src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionProgressionTab.cs b/src/SnowPakTool.Desktop/Planning/RegionProgressionTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionProgressionTab.cs
+rename to src/SnowPakTool.Desktop/Planning/RegionProgressionTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionProgressionStore.cs b/src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionProgressionStore.cs
+rename to src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionProgressionService.cs b/src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionProgressionService.cs
+rename to src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs
+
+diff --git a/src/SnowPakTool.Desktop/OwnedRegionState.cs b/src/SnowPakTool.Desktop/Planning/OwnedRegionState.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/OwnedRegionState.cs
+rename to src/SnowPakTool.Desktop/Planning/OwnedRegionState.cs
+
+diff --git a/src/SnowPakTool.Desktop/OwnedDlcState.cs b/src/SnowPakTool.Desktop/Planning/OwnedDlcState.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/OwnedDlcState.cs
+rename to src/SnowPakTool.Desktop/Planning/OwnedDlcState.cs
+
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/Planning/OwnedContentTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/OwnedContentTab.cs
+rename to src/SnowPakTool.Desktop/Planning/OwnedContentTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/MainForm.cs b/src/SnowPakTool.Desktop/Application/MainForm.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MainForm.cs
+rename to src/SnowPakTool.Desktop/Application/MainForm.cs
+
+diff --git a/src/SnowPakTool.Desktop/Program.cs b/src/SnowPakTool.Desktop/Application/Program.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/Program.cs
+rename to src/SnowPakTool.Desktop/Application/Program.cs
+
+diff --git a/src/SnowPakTool.Desktop/SettingsTab.cs b/src/SnowPakTool.Desktop/Application/SettingsTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/SettingsTab.cs
+rename to src/SnowPakTool.Desktop/Application/SettingsTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/UserPreferences.cs b/src/SnowPakTool.Desktop/Application/UserPreferences.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UserPreferences.cs
+rename to src/SnowPakTool.Desktop/Application/UserPreferences.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckEditTab.cs b/src/SnowPakTool.Desktop/Editors/Winches/TruckEditTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckEditTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Winches/TruckEditTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/PendingWinchChanges.cs b/src/SnowPakTool.Desktop/Editors/Winches/PendingWinchChanges.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/PendingWinchChanges.cs
+rename to src/SnowPakTool.Desktop/Editors/Winches/PendingWinchChanges.cs
+
+diff --git a/src/SnowPakTool.Desktop/WinchCustomPresetStore.cs b/src/SnowPakTool.Desktop/Editors/Winches/WinchCustomPresetStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WinchCustomPresetStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Winches/WinchCustomPresetStore.cs
+
+diff --git a/src/SnowTruckConfig/XmlHelpers.cs b/src/SnowTruckConfig/Utilities/XmlHelpers.cs
+similarity index 100%
+rename from src/SnowTruckConfig/XmlHelpers.cs
+rename to src/SnowTruckConfig/Utilities/XmlHelpers.cs
+
+diff --git a/src/SnowTruckConfig/Pair.cs b/src/SnowTruckConfig/Utilities/Pair.cs
+similarity index 100%
+rename from src/SnowTruckConfig/Pair.cs
+rename to src/SnowTruckConfig/Utilities/Pair.cs
+
+diff --git a/src/SnowPakTool.Desktop/AppColors.cs b/src/SnowPakTool.Desktop/UI/AppColors.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/AppColors.cs
+rename to src/SnowPakTool.Desktop/UI/AppColors.cs
+
+diff --git a/src/SnowPakTool.Desktop/BoundCatalogGrid.cs b/src/SnowPakTool.Desktop/UI/BoundCatalogGrid.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/BoundCatalogGrid.cs
+rename to src/SnowPakTool.Desktop/UI/BoundCatalogGrid.cs
+
+diff --git a/src/SnowPakTool.Desktop/CurrentTabSearch.cs b/src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CurrentTabSearch.cs
+rename to src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs
+
+diff --git a/src/SnowPakTool.Desktop/DirectionalWheelFilter.cs b/src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/DirectionalWheelFilter.cs
+rename to src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs
+
+diff --git a/src/SnowPakTool.Desktop/NavigationTabControl.cs b/src/SnowPakTool.Desktop/UI/NavigationTabControl.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/NavigationTabControl.cs
+rename to src/SnowPakTool.Desktop/UI/NavigationTabControl.cs
+
+diff --git a/src/SnowPakTool.Desktop/QuickSearchOverlay.cs b/src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/QuickSearchOverlay.cs
+rename to src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTileAssets.cs b/src/SnowPakTool.Desktop/UI/RegionTileAssets.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTileAssets.cs
+rename to src/SnowPakTool.Desktop/UI/RegionTileAssets.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTileButton.cs b/src/SnowPakTool.Desktop/UI/RegionTileButton.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTileButton.cs
+rename to src/SnowPakTool.Desktop/UI/RegionTileButton.cs
+
+diff --git a/src/SnowPakTool.Desktop/SmoothComparisonPanel.cs b/src/SnowPakTool.Desktop/UI/SmoothComparisonPanel.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/SmoothComparisonPanel.cs
+rename to src/SnowPakTool.Desktop/UI/SmoothComparisonPanel.cs
+
+diff --git a/src/SnowPakTool.Desktop/TableHeaderBehavior.cs b/src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TableHeaderBehavior.cs
+rename to src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs
+
+diff --git a/src/SnowPakTool.Desktop/TableHeaderCell.cs b/src/SnowPakTool.Desktop/UI/TableHeaderCell.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TableHeaderCell.cs
+rename to src/SnowPakTool.Desktop/UI/TableHeaderCell.cs
+
+diff --git a/src/SnowPakTool.Desktop/TextAreaStyle.cs b/src/SnowPakTool.Desktop/UI/TextAreaStyle.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TextAreaStyle.cs
+rename to src/SnowPakTool.Desktop/UI/TextAreaStyle.cs
+
+diff --git a/src/SnowPakTool.Desktop/TileFlowPanel.cs b/src/SnowPakTool.Desktop/UI/TileFlowPanel.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TileFlowPanel.cs
+rename to src/SnowPakTool.Desktop/UI/TileFlowPanel.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckCellHoverPreview.cs b/src/SnowPakTool.Desktop/UI/TruckCellHoverPreview.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckCellHoverPreview.cs
+rename to src/SnowPakTool.Desktop/UI/TruckCellHoverPreview.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckDetailsFormatter.cs b/src/SnowPakTool.Desktop/UI/TruckDetailsFormatter.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckDetailsFormatter.cs
+rename to src/SnowPakTool.Desktop/UI/TruckDetailsFormatter.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckThumbnailProvider.cs b/src/SnowPakTool.Desktop/UI/TruckThumbnailProvider.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckThumbnailProvider.cs
+rename to src/SnowPakTool.Desktop/UI/TruckThumbnailProvider.cs
+
+diff --git a/src/SnowPakTool.Desktop/FileConflictDialog.cs b/src/SnowPakTool.Desktop/UI/FileConflictDialog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/FileConflictDialog.cs
+rename to src/SnowPakTool.Desktop/UI/FileConflictDialog.cs
+
+diff --git a/src/SnowPakTool.Desktop/FileConflictReviewDialog.cs b/src/SnowPakTool.Desktop/UI/FileConflictReviewDialog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/FileConflictReviewDialog.cs
+rename to src/SnowPakTool.Desktop/UI/FileConflictReviewDialog.cs
+
+diff --git a/src/SnowPakTool.Desktop/WorkspaceOriginals.cs b/src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WorkspaceOriginals.cs
+rename to src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs
+
+diff --git a/src/SnowPakTool.Desktop/WorkspaceLayout.cs b/src/SnowPakTool.Desktop/Workspace/WorkspaceLayout.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WorkspaceLayout.cs
+rename to src/SnowPakTool.Desktop/Workspace/WorkspaceLayout.cs
+
+diff --git a/src/SnowPakTool.Desktop/WorkspaceDataCache.cs b/src/SnowPakTool.Desktop/Workspace/WorkspaceDataCache.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WorkspaceDataCache.cs
+rename to src/SnowPakTool.Desktop/Workspace/WorkspaceDataCache.cs
+
+diff --git a/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs b/src/SnowPakTool.Desktop/Workspace/WorkspaceChangeAudit.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+rename to src/SnowPakTool.Desktop/Workspace/WorkspaceChangeAudit.cs
+
+diff --git a/src/SnowPakTool.Desktop/WorkspaceChange.cs b/src/SnowPakTool.Desktop/Workspace/WorkspaceChange.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/WorkspaceChange.cs
+rename to src/SnowPakTool.Desktop/Workspace/WorkspaceChange.cs
+
+diff --git a/src/SnowPakTool.Desktop/StartChangesPanel.cs b/src/SnowPakTool.Desktop/Workspace/StartChangesPanel.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/StartChangesPanel.cs
+rename to src/SnowPakTool.Desktop/Workspace/StartChangesPanel.cs
+
+diff --git a/src/SnowPakTool.Desktop/UpgradeTrialService.cs b/src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeTrialService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UpgradeTrialService.cs
+rename to src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeTrialService.cs
+
+diff --git a/src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs b/src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeRandomizationTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UpgradeRandomizationTab.cs
+rename to src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeRandomizationTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs b/src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeRandomizationRuleStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UpgradeRandomizationRuleStore.cs
+rename to src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeRandomizationRuleStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs b/src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeDistributionPlanner.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs
+rename to src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeDistributionPlanner.cs
+
+diff --git a/src/SnowPakTool.Desktop/UpgradeChanges.cs b/src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeChanges.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/UpgradeChanges.cs
+rename to src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeChanges.cs
+
+diff --git a/src/SnowPakTool.Desktop/RandomizationLogEntry.cs b/src/SnowPakTool.Desktop/Randomization/RandomizationLogEntry.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RandomizationLogEntry.cs
+rename to src/SnowPakTool.Desktop/Randomization/RandomizationLogEntry.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationTab.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckRandomizationTab.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationRuleStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationRuleStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckRandomizationEquipment.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationEquipment.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckRandomizationEquipment.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationEquipment.cs
+
+diff --git a/src/SnowPakTool.Desktop/MissionTruckRandomizer.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckRandomizer.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MissionTruckRandomizer.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckRandomizer.cs
+
+diff --git a/src/SnowPakTool.Desktop/MissionTruckDifficulty.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckDifficulty.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MissionTruckDifficulty.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckDifficulty.cs
+
+diff --git a/src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs b/src/SnowPakTool.Desktop/Randomization/Trucks/ObtainableTruckRandomizer.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs
+rename to src/SnowPakTool.Desktop/Randomization/Trucks/ObtainableTruckRandomizer.cs
+
+diff --git a/src/SnowTruckConfig/StringsFile.cs b/src/SnowTruckConfig/Localization/StringsFile.cs
+similarity index 100%
+rename from src/SnowTruckConfig/StringsFile.cs
+rename to src/SnowTruckConfig/Localization/StringsFile.cs
+
+diff --git a/src/SnowTruckConfig/GameLanguage.cs b/src/SnowTruckConfig/Localization/GameLanguage.cs
+similarity index 100%
+rename from src/SnowTruckConfig/GameLanguage.cs
+rename to src/SnowTruckConfig/Localization/GameLanguage.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTruckCatalogService.cs b/src/SnowPakTool.Desktop/Maps/RegionTruckCatalogService.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTruckCatalogService.cs
+rename to src/SnowPakTool.Desktop/Maps/RegionTruckCatalogService.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTruckPlacementOverrides.cs b/src/SnowPakTool.Desktop/Maps/RegionTruckPlacementOverrides.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTruckPlacementOverrides.cs
+rename to src/SnowPakTool.Desktop/Maps/RegionTruckPlacementOverrides.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs b/src/SnowPakTool.Desktop/Maps/RegionTruckAvailabilityStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs
+rename to src/SnowPakTool.Desktop/Maps/RegionTruckAvailabilityStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs b/src/SnowPakTool.Desktop/Maps/RegionsTrucksTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+rename to src/SnowPakTool.Desktop/Maps/RegionsTrucksTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/RegionsTrucksHover.cs b/src/SnowPakTool.Desktop/Maps/RegionsTrucksHover.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/RegionsTrucksHover.cs
+rename to src/SnowPakTool.Desktop/Maps/RegionsTrucksHover.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementStore.cs b/src/SnowPakTool.Desktop/Maps/TruckReplacementStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckReplacementStore.cs
+rename to src/SnowPakTool.Desktop/Maps/TruckReplacementStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementDialog.cs b/src/SnowPakTool.Desktop/Maps/TruckReplacementDialog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckReplacementDialog.cs
+rename to src/SnowPakTool.Desktop/Maps/TruckReplacementDialog.cs
+
+diff --git a/src/SnowPakTool.Desktop/TruckReplacementCell.cs b/src/SnowPakTool.Desktop/Maps/TruckReplacementCell.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TruckReplacementCell.cs
+rename to src/SnowPakTool.Desktop/Maps/TruckReplacementCell.cs
+
+diff --git a/src/SnowPakTool.Desktop/PendingTruckReplacements.cs b/src/SnowPakTool.Desktop/Maps/PendingTruckReplacements.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+rename to src/SnowPakTool.Desktop/Maps/PendingTruckReplacements.cs
+
+diff --git a/src/SnowPakTool.Desktop/MapArchiveWriter.cs b/src/SnowPakTool.Desktop/Maps/MapArchiveWriter.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MapArchiveWriter.cs
+rename to src/SnowPakTool.Desktop/Maps/MapArchiveWriter.cs
+
+diff --git a/src/SnowPakTool.Desktop/MapUpgradesTab.cs b/src/SnowPakTool.Desktop/Maps/MapUpgradesTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MapUpgradesTab.cs
+rename to src/SnowPakTool.Desktop/Maps/MapUpgradesTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/MapUpgradesHover.cs b/src/SnowPakTool.Desktop/Maps/MapUpgradesHover.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/MapUpgradesHover.cs
+rename to src/SnowPakTool.Desktop/Maps/MapUpgradesHover.cs
+
+diff --git a/src/SnowPakTool/IOHelpers.cs b/src/SnowPakTool/Utilities/IOHelpers.cs
+similarity index 100%
+rename from src/SnowPakTool/IOHelpers.cs
+rename to src/SnowPakTool/Utilities/IOHelpers.cs
+
+diff --git a/src/SnowPakTool/Crc32Managed.cs b/src/SnowPakTool/Utilities/Crc32Managed.cs
+similarity index 100%
+rename from src/SnowPakTool/Crc32Managed.cs
+rename to src/SnowPakTool/Utilities/Crc32Managed.cs
+
+diff --git a/src/SnowPakTool/CommandLineExtensions.cs b/src/SnowPakTool/Utilities/CommandLineExtensions.cs
+similarity index 100%
+rename from src/SnowPakTool/CommandLineExtensions.cs
+rename to src/SnowPakTool/Utilities/CommandLineExtensions.cs
+
+diff --git a/src/SnowPakTool/MiscHelpers.cs b/src/SnowPakTool/Utilities/MiscHelpers.cs
+similarity index 100%
+rename from src/SnowPakTool/MiscHelpers.cs
+rename to src/SnowPakTool/Utilities/MiscHelpers.cs
+
+diff --git a/src/SnowPakTool.Desktop/TrucksCargoTab.cs b/src/SnowPakTool.Desktop/Editors/Cargo/TrucksCargoTab.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/TrucksCargoTab.cs
+rename to src/SnowPakTool.Desktop/Editors/Cargo/TrucksCargoTab.cs
+
+diff --git a/src/SnowPakTool.Desktop/CargoMassStore.cs b/src/SnowPakTool.Desktop/Editors/Cargo/CargoMassStore.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CargoMassStore.cs
+rename to src/SnowPakTool.Desktop/Editors/Cargo/CargoMassStore.cs
+
+diff --git a/src/SnowPakTool.Desktop/CargoMassEditing.cs b/src/SnowPakTool.Desktop/Editors/Cargo/CargoMassEditing.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CargoMassEditing.cs
+rename to src/SnowPakTool.Desktop/Editors/Cargo/CargoMassEditing.cs
+
+diff --git a/src/SnowPakTool.Desktop/CargoMassDialog.cs b/src/SnowPakTool.Desktop/Editors/Cargo/CargoMassDialog.cs
+similarity index 100%
+rename from src/SnowPakTool.Desktop/CargoMassDialog.cs
+rename to src/SnowPakTool.Desktop/Editors/Cargo/CargoMassDialog.cs
+
+diff --git a/src/SnowTruckConfig/TruckHelpers.cs b/src/SnowTruckConfig/Trucks/TruckHelpers.cs
+similarity index 100%
+rename from src/SnowTruckConfig/TruckHelpers.cs
+rename to src/SnowTruckConfig/Trucks/TruckHelpers.cs
+
+diff --git a/src/SnowTruckConfig/ExtrasRenamer.cs b/src/SnowTruckConfig/Trucks/ExtrasRenamer.cs
+similarity index 100%
+rename from src/SnowTruckConfig/ExtrasRenamer.cs
+rename to src/SnowTruckConfig/Trucks/ExtrasRenamer.cs
+
+diff --git a/src/SnowPakTool/CacheBlockWriter.cs b/src/SnowPakTool/CacheBlocks/CacheBlockWriter.cs
+similarity index 100%
+rename from src/SnowPakTool/CacheBlockWriter.cs
+rename to src/SnowPakTool/CacheBlocks/CacheBlockWriter.cs
+
+diff --git a/src/SnowPakTool/CacheBlockReader.cs b/src/SnowPakTool/CacheBlocks/CacheBlockReader.cs
+similarity index 100%
+rename from src/SnowPakTool/CacheBlockReader.cs
+rename to src/SnowPakTool/CacheBlocks/CacheBlockReader.cs
+
+diff --git a/src/SnowPakTool/CacheBlockFile.cs b/src/SnowPakTool/CacheBlocks/CacheBlockFile.cs
+similarity index 100%
+rename from src/SnowPakTool/CacheBlockFile.cs
+rename to src/SnowPakTool/CacheBlocks/CacheBlockFile.cs
+
+diff --git a/src/SnowPakTool/CacheBlockFileFileEntry.cs b/src/SnowPakTool/CacheBlocks/CacheBlockFileFileEntry.cs
+similarity index 100%
+rename from src/SnowPakTool/CacheBlockFileFileEntry.cs
+rename to src/SnowPakTool/CacheBlocks/CacheBlockFileFileEntry.cs
+
+diff --git a/.checks/CargoRegression/CargoRegression.csproj b/.checks/CargoRegression/CargoRegression.csproj
+index 93bc6d9..b099535 100644
+--- a/.checks/CargoRegression/CargoRegression.csproj
++++ b/.checks/CargoRegression/CargoRegression.csproj
+@@ -7,12 +7,12 @@
+     <Nullable>enable</Nullable>
+   </PropertyGroup>
+   <ItemGroup>
+-    <Compile Include="../../src/SnowPakTool.Desktop/CargoCatalogService.cs" Link="CargoCatalogService.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TrucksCargoTab.cs" Link="TrucksCargoTab.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/CargoCatalogService.cs" Link="CargoCatalogService.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Editors/Cargo/TrucksCargoTab.cs" Link="TrucksCargoTab.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs" />
+   </ItemGroup>
+-<ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>
++<ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup></Project>
+
+diff --git a/.checks/RegionProgression/RegionProgression.csproj b/.checks/RegionProgression/RegionProgression.csproj
+index f94e01d..22e9548 100644
+--- a/.checks/RegionProgression/RegionProgression.csproj
++++ b/.checks/RegionProgression/RegionProgression.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionStore.cs" Link="RegionProgressionStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionTab.cs" Link="RegionProgressionTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CustomGroupStore.cs" Link="CustomGroupStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TierListStore.cs" Link="TierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionTierListStore.cs" Link="RegionTierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TileFlowPanel.cs" Link="TileFlowPanel.cs"/><Compile Include="../../src/SnowPakTool.Desktop/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionTileAssets.cs" Link="RegionTileAssets.cs"/><Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs"/><Compile Include="../../src/SnowPakTool.Desktop/CurrentTabSearch.cs" Link="CurrentTabSearch.cs"/><Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png"><LogicalName>SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)</LogicalName></EmbeddedResource></ItemGroup></Project>
+\ No newline at end of file
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs" Link="RegionProgressionService.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs" Link="RegionProgressionStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionTab.cs" Link="RegionProgressionTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs" Link="CustomTruck.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs" Link="CustomGroupStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/TierListStore.cs" Link="TierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs" Link="RegionTierListStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/TileFlowPanel.cs" Link="TileFlowPanel.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/RegionTileAssets.cs" Link="RegionTileAssets.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png"><LogicalName>SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)</LogicalName></EmbeddedResource></ItemGroup></Project>
+\ No newline at end of file
+
+diff --git a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+index 77b60b2..1ed500a 100644
+--- a/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
++++ b/.checks/RegionsTrucksRegression/RegionsTrucksRegression.csproj
+@@ -4,53 +4,53 @@
+     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+   </PropertyGroup>
+   <ItemGroup>
+-    <Compile Include="../../src/SnowPakTool.Desktop/MissionTruckDifficulty.cs" Link="MissionTruckDifficulty.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/MissionTruckRandomizer.cs" Link="MissionTruckRandomizer.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckMassCatalog.cs" Link="TruckMassCatalog.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionsTrucksHover.cs" Link="RegionsTrucksHover.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckCellHoverPreview.cs" Link="TruckCellHoverPreview.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TileFlowPanel.cs" Link="TileFlowPanel.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TierListStore.cs" Link="TierListStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTierListStore.cs" Link="RegionTierListStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckThumbnailProvider.cs" Link="TruckThumbnailProvider.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckDifficulty.cs" Link="MissionTruckDifficulty.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckRandomizer.cs" Link="MissionTruckRandomizer.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/TruckMassCatalog.cs" Link="TruckMassCatalog.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/RegionsTrucksHover.cs" Link="RegionsTrucksHover.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/TruckCellHoverPreview.cs" Link="TruckCellHoverPreview.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/CustomGroupWipTab.cs" Link="CustomGroupWipTab.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/TileFlowPanel.cs" Link="TileFlowPanel.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/DirectionalWheelFilter.cs" Link="DirectionalWheelFilter.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/TierListStore.cs" Link="TierListStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionTierListStore.cs" Link="RegionTierListStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/TruckThumbnailProvider.cs" Link="TruckThumbnailProvider.cs" />
+ 
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckCatalogService.cs" Link="RegionTruckCatalogService.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationEquipment.cs" Link="TruckRandomizationEquipment.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/ObtainableTruckRandomizer.cs" Link="ObtainableTruckRandomizer.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionStore.cs" Link="RegionProgressionStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/CustomGroupStore.cs" Link="CustomGroupStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckEquipmentCatalog.cs" Link="TruckEquipmentCatalog.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckDetailsFormatter.cs" Link="TruckDetailsFormatter.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/MapArchiveWriter.cs" Link="MapArchiveWriter.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/PendingTruckReplacements.cs" Link="PendingTruckReplacements.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RankProgressionChanges.cs" Link="RankProgressionChanges.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs" Link="WorkspaceChangeAudit.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/StartChangesPanel.cs" Link="StartChangesPanel.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/CustomTruck.cs" Link="CustomTruck.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/TruckClasses.cs" Link="TruckClasses.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckPlacementOverrides.cs" Link="RegionTruckPlacementOverrides.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTruckAvailabilityStore.cs" Link="RegionTruckAvailabilityStore.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionsTrucksTab.cs" Link="RegionsTrucksTab.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTileAssets.cs" Link="RegionTileAssets.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/RegionTileButton.cs" Link="RegionTileButton.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/SsoDataReader.cs" Link="SsoDataReader.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/WorkspaceLayout.cs" Link="WorkspaceLayout.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
+-    <Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/RegionTruckCatalogService.cs" Link="RegionTruckCatalogService.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationEquipment.cs" Link="TruckRandomizationEquipment.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/ObtainableTruckRandomizer.cs" Link="ObtainableTruckRandomizer.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs" Link="RegionProgressionService.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionStore.cs" Link="RegionProgressionStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Planning/CustomGroupStore.cs" Link="CustomGroupStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/TruckEquipmentCatalog.cs" Link="TruckEquipmentCatalog.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/TruckDetailsFormatter.cs" Link="TruckDetailsFormatter.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/TruckReplacementCell.cs" Link="TruckReplacementCell.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/TruckReplacementDialog.cs" Link="TruckReplacementDialog.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/TruckReplacementStore.cs" Link="TruckReplacementStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/MapArchiveWriter.cs" Link="MapArchiveWriter.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/PendingTruckReplacements.cs" Link="PendingTruckReplacements.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Editors/Experience/RankProgressionChanges.cs" Link="RankProgressionChanges.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceChange.cs" Link="WorkspaceChange.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceChangeAudit.cs" Link="WorkspaceChangeAudit.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/StartChangesPanel.cs" Link="StartChangesPanel.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/SmoothComparisonPanel.cs" Link="SmoothComparisonPanel.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/CustomTruck.cs" Link="CustomTruck.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/TruckClasses.cs" Link="TruckClasses.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/RegionTruckPlacementOverrides.cs" Link="RegionTruckPlacementOverrides.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/RegionTruckAvailabilityStore.cs" Link="RegionTruckAvailabilityStore.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Maps/RegionsTrucksTab.cs" Link="RegionsTrucksTab.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/RegionTileAssets.cs" Link="RegionTileAssets.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/RegionTileButton.cs" Link="RegionTileButton.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/SsoDataReader.cs" Link="SsoDataReader.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceOriginals.cs" Link="WorkspaceOriginals.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Workspace/WorkspaceLayout.cs" Link="WorkspaceLayout.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Catalogs/LocalizedStrings.cs" Link="LocalizedStrings.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs" />
+   </ItemGroup>
+   <ItemGroup>
+     <EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Regions/*.png" LogicalName="SnowPakTool.Desktop.Assets.Regions.%(Filename)%(Extension)" />
+   </ItemGroup>
+-<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup></Project>
++<ItemGroup><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/*.png" LogicalName="SnowPakTool.Desktop.Assets.Trucks.%(Filename)%(Extension)"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/Trucks/aliases.json" LogicalName="SnowPakTool.Desktop.Assets.Trucks.aliases.json"/><EmbeddedResource Include="../../src/SnowPakTool.Desktop/Assets/aac-58dw.png" LogicalName="SnowPakTool.Desktop.Assets.aac-58dw.png"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderBehavior.cs" Link="TableHeaderBehavior.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/TableHeaderCell.cs" Link="TableHeaderCell.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup></Project>
+
+diff --git a/.checks/RuleEditor/RuleEditor.csproj b/.checks/RuleEditor/RuleEditor.csproj
+index 9c1b389..5dda110 100644
+--- a/.checks/RuleEditor/RuleEditor.csproj
++++ b/.checks/RuleEditor/RuleEditor.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/MissionTruckDifficulty.cs" Link="MissionTruckDifficulty.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/RegionProgressionService.cs" Link="RegionProgressionService.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/AppColors.cs" Link="AppColors.cs"/></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/MissionTruckDifficulty.cs" Link="MissionTruckDifficulty.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Randomization/RandomizationLogEntry.cs" Link="RandomizationLogEntry.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationTab.cs" Link="TruckRandomizationTab.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Randomization/Trucks/TruckRandomizationRuleStore.cs" Link="TruckRandomizationRuleStore.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Planning/RegionProgressionService.cs" Link="RegionProgressionService.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/TextAreaStyle.cs" Link="TextAreaStyle.cs"/></ItemGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/AppColors.cs" Link="AppColors.cs"/></ItemGroup></Project>
+
+diff --git a/.checks/SearchActive/SearchActive.csproj b/.checks/SearchActive/SearchActive.csproj
+index 2e71175..8ed770c 100644
+--- a/.checks/SearchActive/SearchActive.csproj
++++ b/.checks/SearchActive/SearchActive.csproj
+@@ -1 +1 @@
+-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/CurrentTabSearch.cs" Link="CurrentTabSearch.cs"/><Compile Include="../../src/SnowPakTool.Desktop/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs"/><Compile Include="../../src/SnowPakTool.Desktop/TruckClasses.cs" Link="TruckClasses.cs"/></ItemGroup></Project>
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><NuGetAudit>false</NuGetAudit></PropertyGroup><ItemGroup><Compile Include="../../src/SnowPakTool.Desktop/UI/CurrentTabSearch.cs" Link="CurrentTabSearch.cs"/><Compile Include="../../src/SnowPakTool.Desktop/UI/QuickSearchOverlay.cs" Link="QuickSearchOverlay.cs"/><Compile Include="../../src/SnowPakTool.Desktop/Catalogs/TruckClasses.cs" Link="TruckClasses.cs"/></ItemGroup></Project>
+
+diff --git a/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj b/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj
+index bc7dc36..094a807 100644
+--- a/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj
++++ b/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj
+@@ -7,6 +7,6 @@
+     <NuGetAudit>false</NuGetAudit>
+   </PropertyGroup>
+   <ItemGroup>
+-    <Compile Include="../../src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs" Link="UpgradeDistributionPlanner.cs" />
++    <Compile Include="../../src/SnowPakTool.Desktop/Randomization/Upgrades/UpgradeDistributionPlanner.cs" Link="UpgradeDistributionPlanner.cs" />
+   </ItemGroup>
+ </Project>
+
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,3 @@
+ # SnowRunnerTools
++
++See [Source layout](SOURCE_LAYOUT.md) for the feature folders and guidance on where to put new code.
+
+diff --git a/SOURCE_LAYOUT.md b/SOURCE_LAYOUT.md
+new file mode 100644
+--- /dev/null
++++ b/SOURCE_LAYOUT.md
+@@ -0,0 +1,40 @@
++# Source layout
++
++Keep related features together. Use shared folders for code used by several features, and avoid adding a folder for every class.
++
++## Desktop application (`src/SnowPakTool.Desktop`)
++
++| Folder | Contents |
++| --- | --- |
++| `Application` | Entry point, main window, settings and user preferences |
++| `Catalogs` | Truck, equipment, addon and cargo catalogs; localization and game-data readers |
++| `Editors` | Addons, cargo, engines, experience, truck properties and winches, grouped by editor |
++| `Maps` | Map catalogs, placements, replacement dialogs, staging and archive writing |
++| `Planning` | Ownership, truck groups, tiers and region progression |
++| `Presets` | Shared presets, overwrite review and browsing restrictions |
++| `Randomization` | Shared logging plus truck and upgrade randomizers and their rules |
++| `UI` | Shared controls, search, table headers, styling, thumbnails and conflict dialogs |
++| `Workspace` | Workspace paths, preserved originals, caching, change auditing and Start changes panel |
++| `Assets` | Existing embedded truck and region images and metadata |
++
++The winch editor's existing `TruckEditTab.cs` name is retained. The folder identifies its purpose without renaming the class.
++
++## Archive tool (`src/SnowPakTool`)
++
++`Program.cs` remains the command-line entry point. `Archives` handles PAK operations, `CacheBlocks` handles cache-block formats, `Containers` abstracts file sources, `Lists` handles load/sound lists, `Utilities` contains shared helpers, and the existing `Zip` folder contains ZIP records.
++
++## Truck configuration tool (`src/SnowTruckConfig`)
++
++`Program.cs` remains the entry point. `Trucks` contains truck transformations, `Localization` contains language/string handling, and `Utilities` contains XML and pair helpers.
++
++## Maintenance
++
++Namespaces, project paths, embedded-resource paths and runtime workspace paths are unchanged. SDK projects discover C# files recursively; moving a source file normally needs no project-file edit. Active regression projects under `.checks` that explicitly link source files must have their `Compile Include` paths updated when those files move. Historical preview and baseline snapshots are left in place.
++
++Build the desktop application from this directory:
++
++```powershell
++dotnet build src/SnowPakTool.Desktop/SnowPakTool.Desktop.csproj -c Release
++```
++
++The source move and regression-path changes are recorded in `source-folder-reorganization.diff`.

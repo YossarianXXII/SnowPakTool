@@ -1,0 +1,73 @@
+diff --git a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+index 74df621..5fc2f42 100644
+--- a/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
++++ b/src/SnowPakTool.Desktop/TruckUnlockRankGenerator.cs
+@@ -40,7 +40,7 @@ internal static class TruckUnlockRankGenerator
+             if (!qualities.TryGetValue(row.Truck.Code, out var quality)) { ranks[row.RelativeFile] = (int)current; unranked++; continue; }
+             var fraction = quality / 6.0;
+             var exponent = difficulty switch { ProgressionDifficulty.Easy => 1.15, ProgressionDifficulty.Hard => 0.85, _ => 1.0 };
+-            var spread = difficulty switch { ProgressionDifficulty.Easy => 5.0, ProgressionDifficulty.Hard => 1.5, _ => 3.0 };
++            var spread = difficulty switch { ProgressionDifficulty.Easy => 8.0, ProgressionDifficulty.Hard => 4.0, _ => 5.5 };
+             var target = 1 + (cap - 1) * Math.Pow(fraction, exponent);
+             var variation = (random.NextDouble() + random.NextDouble() + random.NextDouble() - 1.5) * spread * (0.5 + fraction * 0.5);
+             // Easy's broad spread chiefly rewards early access, with a smaller late tail around its soft cap.
+diff --git a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index df97676..4be4a66 100644
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -82,7 +82,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         foreach (var difficulty in new[] { ProgressionDifficulty.Easy, ProgressionDifficulty.Normal, ProgressionDifficulty.Hard })
+         {
+             var radio = new RadioButton { Text = difficulty.ToString(), AutoSize = true, Checked = difficulty == _unlockDifficulty, Margin = new Padding(0, 7, 8, 0) };
+-            _tips.SetToolTip(radio, $"Soft cap about rank {TruckUnlockRankGenerator.SoftCap(difficulty)}. Easy has the widest variation, allowing better trucks earlier; Hard has later, tighter progression. Some can exceed the soft cap, up to rank 30.");
++            _tips.SetToolTip(radio, $"Soft cap about rank {TruckUnlockRankGenerator.SoftCap(difficulty)}. All modes have broad per-truck variation; Easy is widest and early-biased, Hard unlocks later. Gaps and shared ranks remain possible. Maximum rank 30.");
+             radio.CheckedChanged += (_, _) =>
+             {
+                 if (_loadingUnlockDifficulty || !radio.Checked) return;
+diff --git a/README.md b/README.md
+index 5006d47..34cf516 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,7 @@ All desktop tabs share one double-Shift text search with a three-character minim
+ 
+ **Editors → Truck properties** lists truck names, classes, assigned tiers, fuel capacity, unlock rank, price, store countries, differential lock and verified obtainable regions/maps. Region information reuses Regions-Trucks, including randomized replacements and pending map changes; unavailable map data and unverified placements are not guessed. Click column headers to sort, or **Order by tier** for SS through FX followed by Unsorted. Hover a truck name to show its usual tile. Edit numeric cells individually. The compact fuel multiplier slider selects 0.5× through 3× in 0.5 steps; **Multiply all fuel** multiplies the currently displayed, explicitly defined fuel capacities, rounds to whole litres (halves away from zero), and bounds the results to the allowed range. Moving the slider alone does not change values, and repeated button clicks multiply again. Changed numeric cells show the preserved original in parentheses, e.g. **160 (80)**, with amber preview/staged and green applied highlights; editing and sorting use the numeric value. The **Columns** checkbox dropdown controls visible columns; Differential Lock is hidden and unchecked by default. Blank/inherited values stay unchanged. **Save preset / Load preset** exports/imports a versioned JSON snapshot; loading only previews matching workspace values. **Stage changes** persists an explicit snapshot across restarts and lists it on Start even before opening this tab. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews the preserved baseline. Only Start → Apply pending PAK edits writes the updated workspace files, preserving unrelated XML and the original files; later unstaged edits are excluded. Reload properties discards unstaged edits. Staged values changed externally are rejected during Apply and can be reloaded and restaged.
+ 
+-**Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. Easy has the broadest, early-biased within-tier variation so stronger trucks can unlock sooner; Normal has moderate variation; Hard is later and tighter. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. For each existing store country, the generator sets an owned, directly purchasable starter of every available original game class (Highway, Heavy Duty, Offroad, Heavy, Scout) to rank 1; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in a country, the generator reports that country/class gap and proceeds with the achievable rank changes. It does not add country assignments or remove discovery/task locks. Staging, Apply, presets and reset handle numeric values only; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview.
++**Generate unlock ranks** in Truck properties previews a new unlock-rank plan from the saved truck tier list (FX/D early through S/SS late). Separate Easy / Normal / Hard radio buttons save per workspace and target soft caps of about ranks 15 / 20 / 25. All modes use wider independent per-truck variation: Easy is broadest and early-biased, Normal has a medium spread, and Hard unlocks later with a narrower but still substantial spread. Original game class is used for rank-1 starter coverage only; other ranks depend on tier and independent random draws. There is no class balancing, rank-spacing enforcement or gap filling, so multiple trucks may share a rank and empty ranks can still occur. Soft caps are not limits: individual trucks can unlock above them, up to rank 30. Unranked trucks retain their current preview ranks unless needed as a starter. For each existing store country, the generator sets an owned, directly purchasable starter of every available original game class (Highway, Heavy Duty, Offroad, Heavy, Scout) to rank 1; app-only Logging/Farming Tractor classes are ignored. The lowest-rated eligible candidates are preferred, with price breaking ties. Discovery/task-locked trucks and unowned DLC cannot satisfy starter coverage. Country availability remains read-only. If no eligible truck of a game class is sold in a country, the generator reports that country/class gap and proceeds with the achievable rank changes. It does not add country assignments or remove discovery/task locks. Staging, Apply, presets and reset handle numeric values only; legacy version-2 Country payloads are ignored so older pending files/presets cannot apply unintended country edits. Numeric-only pending arrays and version-1 presets remain readable. Selecting difficulty and generating do not edit game files or stage the preview.
+ 
+ The **Planning** tab contains **Truck tiers** and **Region difficulty**, alongside ownership and truck groups. **Region difficulty** ranks all regions found in the workspace in fixed S, A, B, C, and D tiers, from hardest to easiest: S red, A orange, B yellow, C green, and D blue. The same colors appear on Region progression tiles; truck tier colors are independent. It shares truck tier-list drag-and-drop, reordering, directional scrolling, palette colors, and search, with offline region thumbnails and season labels. Region rankings save automatically in their own file, independently of truck rankings.
+ 
+diff --git a/.checks/UnlockRanks/Program.cs b/.checks/UnlockRanks/Program.cs
+index b0bec47..6a93c3c 100644
+--- a/.checks/UnlockRanks/Program.cs
++++ b/.checks/UnlockRanks/Program.cs
+@@ -76,6 +76,7 @@ internal static class Program
+         var byFile = Items(rows).ToDictionary(row => (string)Property(row, "RelativeFile"));
+         Check(Items(rows).Single(row => Code(row) == "aramatsu_forester") is var logging && (string)Property(logging, "GameClass") == "HEAVY" && (string)Property(Property(logging, "Truck"), "Class") == "Logging", "generator keeps original game class independently of custom app class");
+         var samples = new Dictionary<string, List<int>>();
++        var hardScoutRanks = new HashSet<int>();
+         foreach (var mode in new[] { "Easy", "Normal", "Hard" })
+         {
+             samples[mode] = [];
+@@ -92,6 +93,7 @@ internal static class Program
+                     if (Code(row) == "unranked") { if (rank != 17) throw new Exception("Unranked changed"); continue; }
+                     var tier = tierByCode[Code(row)]; means[tier].Add(rank);
+                     if (tier == "SS") { samples[mode].Add(rank); if (rank > cap) exceeds = true; }
++                    if (mode == "Hard" && tier == "SS" && (string)Property(row, "GameClass") == "SCOUT") hardScoutRanks.Add(rank);
+                     if (choice.GetType().GetProperty("Countries") is not null) throw new Exception("Rank plan exposes country edits");
+                 }
+             }
+@@ -101,6 +103,13 @@ internal static class Program
+         }
+         Check(Variance(samples["Easy"]) > Variance(samples["Normal"]) && Variance(samples["Normal"]) > Variance(samples["Hard"])
+             && samples["Easy"].Any(rank => rank <= 11), "Easy has the widest variance and meaningful early SS unlocks; Hard is tightest");
++        Check(hardScoutRanks.Count >= 8 && hardScoutRanks.Min() <= 21 && hardScoutRanks.Max() >= 28,
++            "Hard now spreads same-tier scouts across a substantially wider range of ranks");
++        var sparse = (IList)ListOf("TruckPropertyRow");
++        foreach (var row in Items(rows).Where(row => Code(row).EndsWith("_fx_3") || Code(row) == "scout_ss_3")) sparse.Add(row);
++        var sparsePlan = Plan(sparse, tiers, owned, "Hard", 42);
++        Check(Enumerable.Range(2, 3).All(rank => !Items(Property(sparsePlan, "Choices")).Any(choice => (int)Property(choice, "Rank") == rank)),
++            "sparse catalogues retain empty-rank gaps rather than actively filling or spacing them");
+         Check(Items(rows).All(row => Draft(row)["UnlockByRank"] == (Code(row) == "unranked" ? 17 : 20)), "generation plans never mutate preview/game data before accepted by the UI");
+         Check(true, "rank-1 coverage is guaranteed where existing country/class availability allows it; impossible pairs are reported across all seeds");
+         var noOwnedPlan = Plan(rows, tiers, new HashSet<string>(), "Easy", 1);

@@ -1,0 +1,227 @@
+--- a/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
++++ b/src/SnowPakTool.Desktop/PendingTruckReplacements.cs
+@@ -201,15 +201,22 @@
+         && a.Engine == b.Engine && a.Gearbox == b.Gearbox && a.Winch == b.Winch && a.Suspension == b.Suspension
+         && (a.WheelScale ?? 0f) == (b.WheelScale ?? 0f);
+ 
+-    public static void Discard(string workspace, string key)
+-    {
+-        lock (Gate)
+-        {
+-            var state = Read(workspace);
+-            var placement = state.Pending.FirstOrDefault(item => item.Key == key)?.Original.StablePlacementKey;
+-            state.Pending.RemoveAll(item => item.Key == key);
+-            if (placement is not null) state.Assignments.RemoveAll(item => item.PlacementKey == placement);
+-            Write(workspace, state);
++    public static void Discard(string workspace, string key) => DiscardMany(workspace, [key]);
++
++    public static int DiscardMany(string workspace, IReadOnlyCollection<string> keys, bool stagedOnly = false)
++    {
++        lock (Gate)
++        {
++            var state = Read(workspace);
++            var selected = keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
++            var removed = state.Pending.Where(change => selected.Contains(change.Key) && (!stagedOnly || change.Staged)).ToArray();
++            if (removed.Length == 0) return 0;
++            var removedKeys = removed.Select(change => change.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            var placements = removed.Select(change => change.Original.StablePlacementKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            state.Pending.RemoveAll(change => removedKeys.Contains(change.Key));
++            state.Assignments.RemoveAll(change => placements.Contains(change.PlacementKey));
++            Write(workspace, state);
++            return removed.Length;
+         }
+     }
+ }
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,12 @@
+ * Packing/unpacking _initial.pak\initial.cache_block_ (various game data: UI layout, settings, translations, etc.)
+ 
+ ### SnowPakTool Desktop UI
++
++**Start → Map files** groups truck/equipment changes (obtainable, mission and manual) across maps into one summary per region and state. Applied and pending rows retain their distinct colors. Summaries show change/map counts without replacement identities; hover to see the contributing map IDs and counts. Map repair and other metadata warnings remain separate rows. **Discard selected pending changes** discards the staged changes represented by that region summary in one atomic update; other regions, applied assignments and unstaged drafts remain intact. Pending badges and Apply still count/use individual changes.
++
++In **Randomizer → Map trucks**, **Reset selected to original** resets every truck matching the selected regions and current column filters, regardless of the highlighted row or scroll position. Rows excluded by filters remain untouched. The existing region-wide and all-truck reset actions remain available. Reset updates the draft; Stage and Start → Apply are still required for map writes.
++
++The comparison/reset baseline is the first preserved input under `region-maps/backups/<map>/original.pak` (or `original.bin`), rather than a verified factory game archive. If the input was modified before its first backup, that modified input is the baseline. Without a backup, the loaded source is treated as the baseline; a placement that cannot be matched to an existing backup can fall back to its current model for display, with original equipment unavailable for reset. Backups are preserved across subsequent replacements, but their presence alone does not prove that they contain vanilla game data.
+ 
+ **Randomizer → Truck randomization → Missions** uses the same editable rule list, compact add/edit/remove glyphs, run button, Stage changes button, default-hidden detailed logs and region completion messages as Obtainable. Its saved **Easy / Moderate / Hard** selector controls vehicle weight only: Easy favors lighter models, Moderate gives equal model weights, and Hard favors heavier models. Vehicle weight is the sum of bare vehicle physics bodies, resolving shared/local body templates and inherited definitions; cargo, frame addons and truck tier/class labels do not determine weight. Equal masses share a weight percentile, with a broad, linear bias capped at 3:1 between the favored and opposite ends of the weight range (previously about 20:1). All weights retain substantial chances in every mode. The pool uses enabled trucks, including unranked models, across all classes. Original mission addon requirements are ignored and replacement default equipment is used.
+ 
+--- a/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
++++ b/src/SnowPakTool.Desktop/RegionsTrucksTab.cs
+@@ -11,7 +11,8 @@
+     private readonly TextBox _mapFolder = new() { Dock = DockStyle.Fill, PlaceholderText = "Folder containing level_*.pak or extracted map folders" };
+     private readonly Button _reload = new() { Text = "Reload maps", AutoSize = true };
+     private readonly Button _browse = new() { Text = "Browse…", AutoSize = true };
+-    private readonly Button _resetTruck = new() { Text = "Reset truck to original", AutoSize = true, Enabled = false };
++    private readonly ToolTip _resetTips = new();
++    private readonly Button _resetTruck = new() { Text = "Reset selected to original", AutoSize = true, Enabled = false };
+     private readonly Button _resetRegions = new() { Text = "Reset selected regions to original", AutoSize = true, Enabled = false };
+     private readonly Button _resetAll = new() { Text = "Reset all to original", AutoSize = true, Enabled = false };
+     private readonly Button _stageChanges = new() { Text = "Stage changes", AutoSize = true, Enabled = false };
+@@ -109,9 +110,10 @@
+         _reload.Click += async (_, _) => await LoadAsync(force: true);
+         _resetTruck.Click += async (_, _) =>
+         {
+-            if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
+-                await ResetOriginalAsync([entry]);
+-        };
++            await ResetOriginalAsync(CurrentFilteredEntries());
++        };
++        _resetTips.SetToolTip(_resetTruck, "Reset all trucks matching the selected regions and current table filters, including rows outside the visible scroll area.");
++        _resetTruck.AccessibleDescription = "Reset all currently filtered trucks to their preserved original, regardless of row selection.";
+         _resetRegions.Click += async (_, _) =>
+         {
+             if (_catalog is not null)
+@@ -146,7 +148,7 @@
+         };
+         _trucks.CellValueChanged += AvailabilityChanged;
+         AppColors.Changed += PaletteChanged;
+-        Disposed += (_, _) => AppColors.Changed -= PaletteChanged;
++        Disposed += (_, _) => { AppColors.Changed -= PaletteChanged; _resetTips.Dispose(); };
+         PaletteChanged(this, EventArgs.Empty);
+     }
+ 
+@@ -425,17 +427,24 @@
+         }
+     }
+ 
++    private RegionTruckEntry[] CurrentFilteredEntries()
++    {
++        // The filtered DataView is authoritative, even while the grid is rebinding after a header filter.
++        var view = _trucks.DataSource switch { DataTable table => table.DefaultView, DataView filtered => filtered, _ => null };
++        return view is null ? [] : view.Cast<DataRowView>().Select(row => row["Entry"]).OfType<RegionTruckEntry>().ToArray();
++    }
++
+     private void ShowDetails()
+     {
+-        _resetTruck.Enabled = !_loading && !_editingPlan && _trucks.CurrentRow?.DataBoundItem is DataRowView resetRow
+-            && resetRow["Entry"] is RegionTruckEntry { OriginalEquipment.Parsed: true };
++        var filtered = CurrentFilteredEntries();
++        _resetTruck.Enabled = !_loading && !_editingPlan && filtered.Any(entry => entry.OriginalEquipment is { Parsed: true });
+         _resetRegions.Enabled = !_loading && !_editingPlan && _catalog is not null && _selectedRegions.Count > 0;
+         _resetAll.Enabled = !_loading && !_editingPlan && _catalog?.Entries.Count > 0;
+         try { _stageChanges.Enabled = !_loading && !_editingPlan && _loadedWorkspace is not null && PendingTruckReplacements.HasUnstagedChanges(_loadedWorkspace); }
+         catch (Exception) { _stageChanges.Enabled = false; }
+         _details.Clear();
+-        if (_trucks.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is RegionTruckEntry entry)
+-            _details.Text = TruckDetailsFormatter.Format(entry);
++        if (_trucks.CurrentRow is { Index: >= 0 } current && current.Index < filtered.Length)
++            _details.Text = TruckDetailsFormatter.Format(filtered[current.Index]);
+         if (_catalog?.Warnings.Count > 0) _details.AppendText("\r\nRead warnings:\r\n" + string.Join("\r\n", _catalog.Warnings));
+     }
+ 
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -1,9 +1,12 @@
+ using System.Data;
++using System.Text.RegularExpressions;
+ 
+ namespace SnowPakTool.Desktop;
+ 
+ internal sealed class StartChangesPanel : UserControl
+ {
++    private sealed record MapChangeGroup(string RegionCode, IReadOnlyList<WorkspaceChange> Changes);
++
+     private readonly Func<string> _workspace;
+     private readonly Func<string, IReadOnlyList<WorkspaceChange>> _pendingPak;
+     private readonly Action _savePak;
+@@ -15,7 +18,7 @@
+     private readonly Button _refresh = new() { Text = "Refresh changes", AutoSize = true };
+     private readonly Button _savePakButton = new() { Text = "Apply pending PAK edits", AutoSize = true, Enabled = false };
+     private readonly Button _applyMapsButton = new() { Text = "Apply pending map changes", AutoSize = true, Enabled = false };
+-    private readonly Button _discardMap = new() { Text = "Discard selected pending change", AutoSize = true, Enabled = false };
++    private readonly Button _discardMap = new() { Text = "Discard selected pending changes", AutoSize = true, Enabled = false };
+     private readonly Button _repairMaps = new() { Text = "Repair saved maps", AutoSize = true, Enabled = false };
+     private readonly List<Label> _legend = [];
+     private int _request;
+@@ -65,10 +68,26 @@
+         };
+         _discardMap.Click += async (_, _) =>
+         {
+-            if (_maps.CurrentRow?.DataBoundItem is DataRowView row && row["Entry"] is WorkspaceChange { State: WorkspaceChange.Pending, Key.Length: > 0 } change)
+-            { PendingTruckReplacements.Discard(_workspace(), change.Key); await _reloadRegions(); await RefreshAsync(); }
++            if (_maps.CurrentRow?.DataBoundItem is not DataRowView row || row["Entry"] is not MapChangeGroup group) return;
++            var keys = group.Changes.Where(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0).Select(change => change.Key).ToArray();
++            if (keys.Length == 0) return;
++            _discardMap.Enabled = false;
++            try
++            {
++                var count = PendingTruckReplacements.DiscardMany(_workspace(), keys, stagedOnly: true);
++                await _reloadRegions(); await RefreshAsync();
++                _status.Text = $"Discarded {count} pending map change(s) from the selected row.";
++            }
++            catch (Exception ex) { await RefreshAsync(); _status.Text = "Could not discard map changes: " + ex.Message; }
+         };
+-        _maps.CurrentCellChanged += (_, _) => _discardMap.Enabled = _maps.CurrentRow?.DataBoundItem is DataRowView row && row["State"].ToString() == WorkspaceChange.Pending;
++        _maps.CurrentCellChanged += (_, _) => _discardMap.Enabled = _maps.CurrentRow?.DataBoundItem is DataRowView row
++            && row["Entry"] is MapChangeGroup group && group.Changes.Any(change => change.State == WorkspaceChange.Pending && change.Key.Length > 0);
++        _maps.CellToolTipTextNeeded += (_, e) =>
++        {
++            if (e.RowIndex < 0 || _maps.Rows[e.RowIndex].DataBoundItem is not DataRowView row || row["Entry"] is not MapChangeGroup group) return;
++            e.ToolTipText = string.Join(Environment.NewLine, group.Changes.GroupBy(change => change.Target)
++                .Select(map => $"{map.Key}: {map.Count()} change(s)"));
++        };
+         _maps.Sorted += (_, _) => PaintRows(_maps); _pak.Sorted += (_, _) => PaintRows(_pak);
+         AppColors.Changed += ColorsChanged; Disposed += (_, _) => AppColors.Changed -= ColorsChanged;
+     }
+@@ -79,9 +98,9 @@
+         if (InvokeRequired)
+         { await InvokeAsync(async (CancellationToken _) => { await RefreshAsync(); }); return; }
+         var request = ++_request; var workspace = _workspace().Trim();
+-        if (_displayedWorkspace != workspace) { Bind(_pak, []); Bind(_maps, []); _displayedWorkspace = workspace; }
++        if (_displayedWorkspace != workspace) { Bind(_pak, []); BindMaps([], new Dictionary<string, string>()); _displayedWorkspace = workspace; }
+         _savePakButton.Enabled = _applyMapsButton.Enabled = _discardMap.Enabled = _repairMaps.Enabled = false;
+-        if (!Directory.Exists(workspace)) { Bind(_pak, []); Bind(_maps, []); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
++        if (!Directory.Exists(workspace)) { Bind(_pak, []); BindMaps([], new Dictionary<string, string>()); _status.Text = "Choose a workspace."; PendingCountChanged?.Invoke(0); return; }
+         _status.Text = "Comparing files…"; _refresh.Enabled = false;
+         try
+         {
+@@ -91,7 +110,7 @@
+             await InvokeAsync(() =>
+             {
+                 if (request != _request || workspace != _workspace().Trim()) return;
+-                Bind(_pak, result.Pak.Concat(pending).ToArray()); Bind(_maps, result.Maps);
++                Bind(_pak, result.Pak.Concat(pending).ToArray()); BindMaps(result.Maps, WorkspaceDataCache.GetRegionMetadata(workspace).ToDictionary(pair => pair.Key, pair => pair.Value.Name, StringComparer.OrdinalIgnoreCase));
+                 _savePakButton.Enabled = pending.Count > 0;
+                 _applyMapsButton.Enabled = result.Maps.Any(change => change.State == WorkspaceChange.Pending);
+                 _repairMaps.Enabled = result.Maps.Any(change => change.Property == TruckReplacementStore.RepairRequired);
+@@ -126,6 +145,38 @@
+         PaintRows(grid);
+     }
+ 
++    private void BindMaps(IReadOnlyList<WorkspaceChange> changes, IReadOnlyDictionary<string, string> regionNames)
++    {
++        static string Region(WorkspaceChange change) => Regex.Match(change.Target, @"level_((?:us|ru)_\d{2})_", RegexOptions.IgnoreCase).Groups[1].Value.ToLowerInvariant();
++        static bool TruckChange(WorkspaceChange change) => Region(change).Length > 0 && (change.Property is "Truck randomization" or "Obtainable randomization" or "Reset to original"
++            || change.Property.EndsWith(" / Truck", StringComparison.Ordinal) || change.Property.EndsWith(" / Installed equipment", StringComparison.Ordinal));
++        var groups = changes.Where(TruckChange).GroupBy(change => (Region: Region(change), change.State))
++            .Select(group => new MapChangeGroup(group.Key.Region, group.ToArray()))
++            .Concat(changes.Where(change => !TruckChange(change)).Select(change => new MapChangeGroup(Region(change), [change])))
++            .OrderBy(group => regionNames.GetValueOrDefault(group.RegionCode, group.RegionCode), StringComparer.CurrentCultureIgnoreCase)
++            .ThenBy(group => group.Changes[0].State == WorkspaceChange.Pending ? 1 : 0).ToArray();
++        var data = new DataTable();
++        foreach (var column in new[] { "State", "Region", "Change", "Before", "After" }) data.Columns.Add(column);
++        data.Columns.Add("Entry", typeof(MapChangeGroup));
++        foreach (var group in groups)
++        {
++            var first = group.Changes[0];
++            var region = regionNames.GetValueOrDefault(group.RegionCode, group.RegionCode.Length > 0 ? group.RegionCode : first.Target);
++            if (TruckChange(first))
++            {
++                var maps = group.Changes.Select(change => change.Target).Distinct(StringComparer.OrdinalIgnoreCase).Count();
++                var resets = group.Changes.Count(change => change.Property == "Reset to original");
++                data.Rows.Add(first.State, region, resets == group.Changes.Count ? "Reset to original" : "Truck / equipment changes",
++                    first.State == WorkspaceChange.Pending ? "Current placements" : "Preserved originals",
++                    $"{group.Changes.Count} change(s) across {maps} map(s)" + (resets > 0 ? $"; {resets} reset(s)" : "") + ". Details in Map trucks.", group);
++            }
++            else data.Rows.Add(first.State, region, first.Target + " / " + first.Property, first.Before, first.After, group);
++        }
++        TableHeaderBehavior.Attach(_maps);
++        _maps.DataSource = data; _maps.Columns["Entry"]!.Visible = false; _maps.Columns["State"]!.FillWeight = 45;
++        PaintRows(_maps);
++    }
++
+     private static void PaintRows(DataGridView grid)
+     {
+         foreach (DataGridViewRow row in grid.Rows)

@@ -1,0 +1,363 @@
+diff --git "a/.checks\\FuelResetAuditBaseline\\README.md" b/README.md
+index b92b7de..d7c482c 100644
+--- "a/.checks\\FuelResetAuditBaseline\\README.md"
++++ b/README.md
+@@ -25,7 +25,7 @@ The same preset applied to matching originals produces the same initial and map
+ 
+ **Editors → Frame addons** lists frame attachments, roof racks and service equipment with the same table, description and source-property view as Addons and Cargo. The main table shows cargo slots, fuel/water capacity, repair points, spare wheels, price, unlock rank, exploration lock, install socket, content and ID, with shared column sorting/filtering. Selecting a row shows all XML properties and source files below. Explicit file parents supply inherited summary values; templates remain visible without expansion, so blanks are unresolved rather than assumed zero. Install sockets do not establish complete truck compatibility.
+ 
+-The **Fuel multiplier** slider uses Truck properties' shared calculations: 0.5×–3× in 0.5 steps. Moving it only selects the factor; **Multiply all fuel** multiplies the current preview of every frame addon with a locally explicit fuel capacity and category, rounds to the nearest 5 litres (ties upward), and clamps to 5–100,000 L. Repeated clicks multiply again; column filters do not restrict the operation. Blank/inherited capacities stay unchanged. Changed fuel cells show the preserved original in parentheses, with amber preview/staged and green applied highlights. **Stage changes** saves an explicit snapshot across restarts; only **Start → Apply pending changes** writes it to the updated overlay. Later previews do not change the staged snapshot. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews rounded baseline capacities. Reload discards unstaged previews. Apply validates every fuel target before writing, preserves unrelated XML/templates and original files, and retains staged edits if a capacity changed externally.
++The **Fuel multiplier** slider uses addon-specific bounds: 0.5×–3× in 0.5 steps. Moving it only selects the factor; **Multiply all fuel** multiplies the current preview of every frame addon with a locally explicit fuel capacity and category, rounds to the nearest 5 litres (ties upward), and clamps to 0–10,000 L, skipping zero capacities. Repeated clicks multiply again; column filters do not restrict the operation. Blank/inherited capacities stay unchanged. Changed fuel cells show the preserved original in parentheses, with amber preview/staged and green applied highlights. **Stage changes** saves an explicit snapshot across restarts; only **Start → Apply pending changes** writes it to the updated overlay. Later previews do not change the staged snapshot. **Revert unstaged edits** restores that snapshot, **Revert staged changes** clears it, and **Reset to original values** previews exact baseline capacities. Reload discards unstaged previews. Apply validates every fuel target before writing, preserves unrelated XML/templates and original files, and retains staged edits if a capacity changed externally.
+ 
+ A **slot-based upgrade randomizer** is available in **Randomizer â†’ Upgrades**. Randomize upgrades builds the full component catalog from the workspace, resolves composite tire IDs, uses current obtainable map-truck previews plus direct garage/contract rewards, and saves a draft under `workspace/upgrade-randomization/draft.json`. Region progression must be finalized. Only owned regions are generated; replacement eligibility uses enabled trucks and explicit tire-pack ownership. Each pickup retains its original type, and metal detectors stay fixed. Truck-specific slots prefer unused local-compatible parts; shared slots use all eligible shared parts without a purchase-only restriction, with an extra foreign preference in the first region. Fallbacks broaden the same-type pool before reuse. Stock/default-only and objective-locked replacements are excluded conservatively. There is no locality quota. See [the planner and input contract](upgrade-distribution-draft.md).
+ 
+@@ -125,3 +125,5 @@ Editors > Addons shows current (original) values for Price, Unlock rank and Expl
+ Editors > Addons follows Truck properties for Price, Unlock rank and Exploration unlock: editable cells, current (original) formatting, green applied/amber preview highlights, Reset selected to original, Reset to original values across both views and filters, Stage changes, Revert unstaged edits and Revert staged changes. Reset restores all three supported properties, including removing local attributes absent from the original. Price accepts whole numbers 0-100,000,000, rank 0-30, exploration true/false; blank restores inheritance. Each staged property identifies its source file, definition variant and attribute; legacy exploration-only snapshots remain readable. Other metadata and physical component parameters remain visible as source properties; engines and winches retain their specialized editors. Apply writes the workspace only, with original files preserved.
+ 
+ Truck properties, Addons and Frame addons each have a Show changed only toggle button. It includes preview/staged differences from current files and applied values differing from preserved originals. In Frame addons this includes fuel and tracked price/rank/exploration changes. It combines with header filters and stays enabled across reloads and addon-view switches; turning it off retains other filters. The toggle changes visibility only: Stage and global reset actions still include hidden rows.
++
++Frame addon fuel multiplication skips explicit zero capacities, rounds nonzero results to 5 L, and uses 0-10,000 L bounds. Restoring fuel keeps the exact original integer capacity without rounding it. Truck fuel bounds are unchanged. Truck properties reset also preserves original attribute absence: an introduced UnlockByExploration=false is staged as an attribute removal, so Start no longer retains Not present -> false after reset/apply. XML difference auditing compares parsed properties and ignores whitespace, line-ending and encoding-only differences; real added/removed/changed attributes remain listed.
+diff --git "a/.checks\\FuelResetAuditBaseline\\FrameAddonFuelStore.cs" b/src/SnowPakTool.Desktop/FrameAddonFuelStore.cs
+index c0e0e59..0fd8b34 100644
+--- "a/.checks\\FuelResetAuditBaseline\\FrameAddonFuelStore.cs"
++++ b/src/SnowPakTool.Desktop/FrameAddonFuelStore.cs
+@@ -16,6 +16,7 @@ internal sealed class FrameAddonFuelRow(string name, decimal original, decimal c
+ 
+ internal static class FrameAddonFuelStore
+ {
++    internal static decimal RoundFuel(decimal value) => Math.Clamp(decimal.Round(value / 5m, 0, MidpointRounding.AwayFromZero) * 5m, 0, 10000);
+     private static string PendingPath(string workspace) => WorkspaceOriginals.GetMetadataPath(workspace, "frame-addon-fuel", "pending-changes.json");
+     private static Match Root(string text) => Regex.Match(text, @"<TruckAddon(?=[\s>])[\s\S]*?</TruckAddon\s*>");
+     internal static decimal? Read(string text)
+@@ -46,7 +47,7 @@ internal static class FrameAddonFuelStore
+                 || path.Split('/').Any(part => part is ".." or "." or "")
+                 || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase)
+                 || !path.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+-                || !seen.Add(path) || edit.After < 5 || edit.After > 100000 || edit.After % 5 != 0)
++                || !seen.Add(path) || edit.After < 0 || edit.After > 10000 || decimal.Truncate(edit.After) != edit.After)
+                 throw new InvalidDataException("Invalid or duplicate frame addon fuel edit.");
+         }
+     }
+diff --git "a/.checks\\FuelResetAuditBaseline\\AddonsTab.cs" b/src/SnowPakTool.Desktop/AddonsTab.cs
+index 408cae2..57c4222 100644
+--- "a/.checks\\FuelResetAuditBaseline\\AddonsTab.cs"
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -68,7 +68,7 @@ internal sealed partial class AddonsTab : UserControl
+             Button("Revert staged changes", () => { FrameAddonFuelStore.Save(_loadedWorkspace!, []); RestoreStagedFuel(); UpdateFuelCells(); });
+             Button("Reset to original values", () =>
+             {
+-                foreach (var row in _fuelRows.Values) row.Draft = TruckPropertiesStore.RoundFuel(row.Original);
++                foreach (var row in _fuelRows.Values) row.Draft = row.Original;
+                 UpdateFuelCells();
+             });
+             layout.Controls.Add(_fuelTools, 0, 1);
+@@ -319,7 +319,7 @@ internal sealed partial class AddonsTab : UserControl
+     private void MultiplyFuel()
+     {
+         if (!FuelReady()) return;
+-        foreach (var row in _fuelRows.Values) row.Draft = TruckPropertiesStore.RoundFuel(row.Draft * (_fuelMultiplier.Value / 2m));
++        foreach (var row in _fuelRows.Values.Where(row => row.Draft != 0)) row.Draft = FrameAddonFuelStore.RoundFuel(row.Draft * (_fuelMultiplier.Value / 2m));
+         UpdateFuelCells();
+     }
+ 
+@@ -362,7 +362,7 @@ internal sealed partial class AddonsTab : UserControl
+             : row.Draft != row.Original ? Color.Honeydew : AppColors.Get("Surface");
+         e.Value = row.Draft != row.Original ? $"{row.Draft:N0} ({row.Original:N0})" : row.Draft.ToString("N0");
+         e.FormattingApplied = true;
+-        _addons.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = $"Original: {row.Original:N0} L\nIn files: {row.Current:N0} L\nPreview: {row.Draft:N0} L\nMultiplier: 0.5×–3×; round to 5 L; range 5–100,000 L.";
++        _addons.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = $"Original: {row.Original:N0} L\nIn files: {row.Current:N0} L\nPreview: {row.Draft:N0} L\nMultiplier: 0.5×–3×; zero capacities are skipped; round to 5 L; range 0–10,000 L. Reset restores the exact original capacity.";
+     }
+ 
+     private bool HasAddonChanges(AddonCatalogEntry entry) =>
+diff --git "a/.checks\\FuelResetAuditBaseline\\WorkspaceChangeAudit.cs" b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+index 4b822d6..4201d90 100644
+--- "a/.checks\\FuelResetAuditBaseline\\WorkspaceChangeAudit.cs"
++++ b/src/SnowPakTool.Desktop/WorkspaceChangeAudit.cs
+@@ -26,11 +26,11 @@ internal static class WorkspaceChangeAudit
+                     try
+                     {
+                         var a = XmlValues(File.ReadAllText(original)); var b = XmlValues(File.ReadAllText(path));
+-                        var count = rows.Count;
+                         foreach (var key in a.Keys.Concat(b.Keys).Distinct())
+                             if (a.GetValueOrDefault(key) != b.GetValueOrDefault(key))
+                                 rows.Add(new(WorkspaceChange.InFiles, relative, key, a.GetValueOrDefault(key, "Not present"), b.GetValueOrDefault(key, "Not present")));
+-                        if (rows.Count > count) continue;
++                        // Equal parsed values mean formatting/encoding differences only.
++                        continue;
+                     }
+                     catch (System.Xml.XmlException) { }
+                 }
+diff --git "a/.checks\\FuelResetAuditBaseline\\TruckPropertiesStore.cs" b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+index 367c6a1..43f3b67 100644
+--- "a/.checks\\FuelResetAuditBaseline\\TruckPropertiesStore.cs"
++++ b/src/SnowPakTool.Desktop/TruckPropertiesStore.cs
+@@ -5,11 +5,12 @@ using System.Text.RegularExpressions;
+ namespace SnowPakTool.Desktop;
+ 
+ internal sealed record TruckPropertySpec(string Element, string Attribute, string Label, decimal Step, decimal Minimum, decimal Maximum, bool IsBoolean = false);
+-internal sealed record TruckPropertyEdit(string RelativeFile, string TruckName, string Attribute, decimal Before, decimal After);
++internal sealed record TruckPropertyEdit(string RelativeFile, string TruckName, string Attribute, decimal Before, decimal After, bool RemoveAttribute = false);
+ internal sealed record TruckPropertyPreset(int Version, List<TruckPropertyEdit> Values);
+ internal sealed record TruckPropertyRow(string RelativeFile, CustomTruck Truck, string Country, string DiffLock,
+     Dictionary<string, decimal> Original, Dictionary<string, decimal> Current, Dictionary<string, decimal> Draft,
+-    string GameClass = "", bool RequiresExploration = false, string UnlockObjective = "", bool Locked = false);
++    string GameClass = "", bool RequiresExploration = false, string UnlockObjective = "", bool Locked = false,
++    bool OriginalExplorationExplicit = true, bool CurrentExplorationExplicit = true);
+ 
+ internal static class TruckPropertiesStore
+ {
+@@ -55,7 +56,9 @@ internal static class TruckPropertiesStore
+             result.Add(new(relative, new(code, names.GetValueOrDefault(key, code), TruckClasses.ForTruck(code, truckClass)),
+                 Read(text, "GameData", "Country"), Read(text, "TruckData", "DiffLockType"), original, current, new(current),
+                 truckClass, Read(text, "GameData", "UnlockByExploration").Equals("true", StringComparison.OrdinalIgnoreCase),
+-                Read(text, "GameData", "UnlockByObjective"), Read(text, "GameData", "LockedUnconditionally").Equals("true", StringComparison.OrdinalIgnoreCase)));
++                Read(text, "GameData", "UnlockByObjective"), Read(text, "GameData", "LockedUnconditionally").Equals("true", StringComparison.OrdinalIgnoreCase),
++                File.Exists(originalFile) ? Read(File.ReadAllText(originalFile), "GameData", "UnlockByExploration").Length > 0 : Read(text, "GameData", "UnlockByExploration").Length > 0,
++                Read(text, "GameData", "UnlockByExploration").Length > 0));
+         }
+         return result;
+     }
+@@ -84,6 +87,7 @@ internal static class TruckPropertiesStore
+             var spec = Specs.FirstOrDefault(spec => spec.Attribute == edit.Attribute);
+             var path = edit.RelativeFile.Replace('\\', '/');
+             if (spec is null || edit.After < spec.Minimum || edit.After > spec.Maximum || decimal.Truncate(edit.After) != edit.After
++                || edit.RemoveAttribute && (edit.Attribute != "UnlockByExploration" || edit.After != 0)
+                 || Path.IsPathRooted(path) || path.Split('/').Any(part => part is ".." or "" or ".")
+                 || !path.StartsWith("[media]/", StringComparison.OrdinalIgnoreCase)
+                 || !path.Contains("/classes/trucks/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+@@ -125,6 +129,14 @@ internal static class TruckPropertiesStore
+                 || current != edit.Before && current != edit.After)
+                 throw new InvalidDataException($"{edit.TruckName}: {spec.Label} changed since staging. Reload and stage again.");
+             var replacement = spec.IsBoolean ? (edit.After == 1 ? "true" : "false") : edit.After.ToString(CultureInfo.InvariantCulture);
++            if (edit.RemoveAttribute)
++            {
++                if (!attribute.Success) continue;
++                var remove = Regex.Match(tag.Value, @"\s+" + Regex.Escape(spec.Attribute) + "\\s*=\\s*\"[^\"]*\"", RegexOptions.IgnoreCase);
++                if (!remove.Success) throw new InvalidDataException("Cannot locate the introduced exploration attribute.");
++                text = text.Remove(root.Index + tag.Index + remove.Index, remove.Length);
++                continue;
++            }
+             if (!attribute.Success && spec.IsBoolean)
+             {
+                 var insert = root.Index + tag.Index + tag.Length - (tag.Value.EndsWith("/>") ? 2 : 1);
+diff --git "a/.checks\\FuelResetAuditBaseline\\TruckPropertiesTab.cs" b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+index 72ad88e..1570350 100644
+--- "a/.checks\\FuelResetAuditBaseline\\TruckPropertiesTab.cs"
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -37,6 +37,7 @@ internal sealed class TruckPropertiesTab : UserControl
+     private bool _loading;
+     private Form? _hover;
+     private string _regionStatus = "";
++    private readonly HashSet<string> _removeExploration = new(StringComparer.OrdinalIgnoreCase);
+ 
+     public TruckPropertiesTab(Func<string> getWorkspace, Func<Task<RegionTruckCatalog>> getRegions) : this(getWorkspace, getRegions, null) { }
+ 
+@@ -68,9 +69,13 @@ internal sealed class TruckPropertiesTab : UserControl
+         AddButton(toolbar, "Reset to original values", () =>
+         {
+             _grid.CancelEdit();
++            _removeExploration.Clear();
+             foreach (var row in _rows)
++            {
+                 foreach (var spec in TruckPropertiesStore.Specs)
+                     if (row.Draft.ContainsKey(spec.Attribute) && row.Original.TryGetValue(spec.Attribute, out var value)) row.Draft[spec.Attribute] = value;
++                if (!row.OriginalExplorationExplicit && row.CurrentExplorationExplicit) _removeExploration.Add(row.RelativeFile);
++            }
+             ShowRows();
+             var changes = DraftValues(true).Count;
+             _status.Text = changes == 0
+@@ -272,11 +277,16 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (!Ready()) return;
+         _grid.CancelEdit();
+         var pending = TruckPropertiesStore.LoadSnapshot(_loadedWorkspace!);
++        _removeExploration.Clear();
+         foreach (var row in _rows)
+         {
+             row.Draft.Clear(); foreach (var pair in row.Current) row.Draft.Add(pair.Key, pair.Value);
+             foreach (var edit in pending.Values.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
+-                if (row.Draft.ContainsKey(edit.Attribute)) row.Draft[edit.Attribute] = edit.After;
++                if (row.Draft.ContainsKey(edit.Attribute))
++                {
++                    row.Draft[edit.Attribute] = edit.After;
++                    if (edit.RemoveAttribute) _removeExploration.Add(row.RelativeFile);
++                }
+         }
+     }
+ 
+@@ -320,8 +330,8 @@ internal sealed class TruckPropertiesTab : UserControl
+     {
+         if (row.Tag is not TruckPropertyRow data || !data.Draft.TryGetValue(spec.Attribute, out var draft)) return;
+         var cell = row.Cells[spec.Attribute];
+-        cell.Style.BackColor = draft != data.Current[spec.Attribute] ? Color.LightGoldenrodYellow
+-            : data.Original.TryGetValue(spec.Attribute, out var original) && draft != original ? Color.Honeydew : AppColors.Get("Surface");
++        cell.Style.BackColor = draft != data.Current[spec.Attribute] || spec.IsBoolean && _removeExploration.Contains(data.RelativeFile) ? Color.LightGoldenrodYellow
++            : data.Original.TryGetValue(spec.Attribute, out var original) && (draft != original || spec.IsBoolean && data.OriginalExplorationExplicit != data.CurrentExplorationExplicit) ? Color.Honeydew : AppColors.Get("Surface");
+         cell.ToolTipText = $"Original: {(data.Original.TryGetValue(spec.Attribute, out var baseline) ? baseline.ToString("N0") : "undefined")}\nIn files: {data.Current[spec.Attribute]:N0}\nRange: {spec.Minimum:N0}–{spec.Maximum:N0}";
+         if (spec.IsBoolean) cell.ToolTipText = $"Original: {Flag(data.Original.GetValueOrDefault(spec.Attribute))}\nIn files: {Flag(data.Current[spec.Attribute])}\nPreview: {Flag(draft)}\nUpdated optionally when generating ranks. True requires discovery before purchase.";
+     }
+@@ -333,7 +343,10 @@ internal sealed class TruckPropertiesTab : UserControl
+         if (e.Value is not decimal value) return;
+         if (attribute == "UnlockByExploration")
+         {
++            if (_removeExploration.Contains(data.RelativeFile)) { e.Value = "Not present"; e.FormattingApplied = true; return; }
+             var flag = value == 1 ? "true" : "false";
++            if (!data.OriginalExplorationExplicit && data.CurrentExplorationExplicit)
++            { e.Value = flag + " (Not present)"; e.FormattingApplied = true; return; }
+             e.Value = data.Original.TryGetValue(attribute, out var baseline) && value != baseline
+                 ? $"{flag} ({(baseline == 1 ? "true" : "false")})" : flag;
+             e.FormattingApplied = true;
+@@ -390,7 +403,8 @@ internal sealed class TruckPropertiesTab : UserControl
+         foreach (var row in _rows)
+         {
+             if (byFile.TryGetValue(row.RelativeFile, out var choice)) row.Draft["UnlockByRank"] = choice.Rank;
+-            if (exploration is not null && exploration.Values.TryGetValue(row.RelativeFile, out var flag)) row.Draft["UnlockByExploration"] = flag;
++            if (exploration is not null && exploration.Values.TryGetValue(row.RelativeFile, out var flag))
++            { row.Draft["UnlockByExploration"] = flag; _removeExploration.Remove(row.RelativeFile); }
+         }
+         ShowRows();
+         var changed = plan.Report.Count(row => row.State == "Changed");
+@@ -457,7 +471,8 @@ internal sealed class TruckPropertiesTab : UserControl
+     }
+ 
+     private static decimal RoundFuel(decimal value) => TruckPropertiesStore.RoundFuel(value);
+-    private static bool HasChangedValues(TruckPropertyRow row) => row.Draft.Any(pair =>
++    private bool HasChangedValues(TruckPropertyRow row) => _removeExploration.Contains(row.RelativeFile)
++        || row.OriginalExplorationExplicit != row.CurrentExplorationExplicit || row.Draft.Any(pair =>
+         row.Current.TryGetValue(pair.Key, out var current) && pair.Value != current
+         || row.Original.TryGetValue(pair.Key, out var original) && pair.Value != original);
+ 
+@@ -473,8 +488,9 @@ internal sealed class TruckPropertiesTab : UserControl
+     }
+ 
+     private List<TruckPropertyEdit> DraftValues(bool changedOnly) => _rows.SelectMany(row => row.Draft
+-        .Where(pair => !changedOnly || pair.Value != row.Current[pair.Key])
+-        .Select(pair => new TruckPropertyEdit(row.RelativeFile, row.Truck.Name, pair.Key, row.Current[pair.Key], pair.Value))).ToList();
++        .Where(pair => !changedOnly || pair.Value != row.Current[pair.Key] || pair.Key == "UnlockByExploration" && _removeExploration.Contains(row.RelativeFile))
++        .Select(pair => new TruckPropertyEdit(row.RelativeFile, row.Truck.Name, pair.Key, row.Current[pair.Key], pair.Value,
++            pair.Key == "UnlockByExploration" && _removeExploration.Contains(row.RelativeFile)))).ToList();
+ 
+     private void Stage()
+     {
+@@ -513,7 +529,12 @@ internal sealed class TruckPropertiesTab : UserControl
+         var count = 0;
+         foreach (var row in _rows)
+             foreach (var edit in values.Where(edit => edit.RelativeFile.Equals(row.RelativeFile, StringComparison.OrdinalIgnoreCase)))
+-                if (row.Draft.ContainsKey(edit.Attribute)) { row.Draft[edit.Attribute] = edit.After; count++; }
++                if (row.Draft.ContainsKey(edit.Attribute))
++                {
++                    row.Draft[edit.Attribute] = edit.After; count++;
++                    if (edit.Attribute == "UnlockByExploration")
++                    { if (edit.RemoveAttribute) _removeExploration.Add(row.RelativeFile); else _removeExploration.Remove(row.RelativeFile); }
++                }
+         ShowRows(); _status.Text = $"Loaded {count} preset values; {values.Count - count} unavailable values skipped. Stage changes to keep them.";
+     }
+ 
+@@ -523,7 +544,7 @@ internal sealed class TruckPropertiesTab : UserControl
+         return pending.Values.Select(edit => new WorkspaceChange(WorkspaceChange.Pending, WorkspaceOriginals.GetCurrentPath(workspace, edit.RelativeFile),
+             edit.TruckName + ": " + TruckPropertiesStore.Specs.Single(spec => spec.Attribute == edit.Attribute).Label,
+             edit.Attribute == "UnlockByExploration" ? Flag(edit.Before) : edit.Before.ToString(CultureInfo.InvariantCulture),
+-            edit.Attribute == "UnlockByExploration" ? Flag(edit.After) : edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
++            edit.RemoveAttribute ? "Not present" : edit.Attribute == "UnlockByExploration" ? Flag(edit.After) : edit.After.ToString(CultureInfo.InvariantCulture), edit.RelativeFile));
+     }
+ 
+     private static string Flag(decimal value) => value == 1 ? "true" : "false";
+diff --git "a/.checks\\FuelResetAuditBaseline\\FrameFuel.Program.cs" b/.checks/FrameFuelRegression/Program.cs
+index 90b8fe4..2c208f0 100644
+--- "a/.checks\\FuelResetAuditBaseline\\FrameFuel.Program.cs"
++++ b/.checks/FrameFuelRegression/Program.cs
+@@ -15,6 +15,7 @@ static class Program
+  [STAThread]static void Main()
+  {
+   Check((decimal)Call("TruckPropertiesStore","RoundFuel",12.5m)! ==15m && (decimal)Call("TruckPropertiesStore","RoundFuel",1m)! ==5m && (decimal)Call("TruckPropertiesStore","RoundFuel",300000m)! ==100000m,"shared rounding, ties up and bounds");
++  Check((decimal)Call("FrameAddonFuelStore","RoundFuel",0m)! ==0m && (decimal)Call("FrameAddonFuelStore","RoundFuel",30000m)! ==10000m,"addon-specific zero and 10,000 litre bounds leave truck rules unchanged");
+   var workspace=Path.Combine(AppContext.BaseDirectory,"fixture-"+Guid.NewGuid().ToString("N"));
+   var relative="[media]/classes/trucks/addons/tank.xml";var original=Path.Combine(workspace,"original_files",relative);Directory.CreateDirectory(Path.GetDirectoryName(original)!);Directory.CreateDirectory(Path.Combine(workspace,"updated"));
+   var text="<_templates><TruckData><Example FuelCapacity=\"999\" /></TruckData></_templates>\n<TruckAddon><TruckData FuelCapacity=\"25\" RepairsCapacity=\"150\"/><GameData Category=\"frame_addons\" Price=\"100\" /></TruckAddon>";
+@@ -22,9 +23,10 @@ static class Program
+   var folder=Path.GetDirectoryName(original)!;
+   File.WriteAllText(Path.Combine(folder,"water.xml"),"<TruckAddon><TruckData WaterCapacity=\"1800\"/><GameData Category=\"frame_addons\"/></TruckAddon>");
+   File.WriteAllText(Path.Combine(folder,"child.xml"),"<_parent File=\"tank\"/><TruckAddon><GameData Category=\"frame_addons\"/></TruckAddon>");
++  File.WriteAllText(Path.Combine(folder,"zero.xml"),"<TruckAddon><TruckData FuelCapacity=\"0\"/><GameData Category=\"frame_addons\"/></TruckAddon>");
+   var catalog=Call("AddonCatalogService","Load",workspace,new Dictionary<string,string>())!;
+   var rows=Call("AddonsTab","LoadFuelRows",workspace,catalog)!;
+-  Check(((IDictionary)rows).Count==1,"skip inherited and undefined fuel capacities");
++  Check(((IDictionary)rows).Count==2,"skip inherited and undefined fuel capacities while retaining explicit zero");
+   using var tab=(Control)Activator.CreateInstance(T("AddonsTab"),new object[]{(Func<string>)(()=>workspace),true})!;
+   using var form=new Form { Size=new Size(1120,920) };tab.Dock=DockStyle.Fill;form.Controls.Add(tab);form.CreateControl();tab.CreateControl();
+   Set(tab,"_catalog",catalog);Set(tab,"_loadedWorkspace",workspace);Set(tab,"_fuelRows",rows);Invoke(tab,"ApplyFilter");
+@@ -34,8 +36,9 @@ static class Program
+   Check(grid.Rows.Count==0,"frame changed-only hides unchanged capacities");
+   multiplier.Value=1;Check(Fuel()==25m,"moving slider leaves fuel unchanged");Invoke(tab,"MultiplyFuel");Check(Fuel()==15m,"half multiplier rounds ties upward");
+   multiplier.Value=4;Invoke(tab,"MultiplyFuel");Invoke(tab,"MultiplyFuel");Check(Fuel()==60m,"repeated multiplications use current preview");
++  Check((decimal)((DataTable)grid.DataSource!).Rows.Cast<DataRow>().Single(r=>(string)r["ID"]=="zero")["Fuel (L)"]==0m,"multiplication leaves zero addon fuel capacities unchanged");
+   Application.DoEvents();Check(grid.Rows.Count==1&&grid.Rows[0].Cells["ID"].Value?.ToString()=="tank","frame changed-only updates after fuel previews change");
+-  changedOnly.Checked=false;Application.DoEvents();Check(grid.Rows.Count==3,"frame changed-only can restore all rows");
++  changedOnly.Checked=false;Application.DoEvents();Check(grid.Rows.Count==4,"frame changed-only can restore all rows");
+   Check(!((IEnumerable)Call("FrameAddonFuelStore","Pending",workspace)!).Cast<object>().Any() && File.ReadAllText(original)==text,"preview neither stages nor writes source");
+   void Layout(Control c){_=c.Handle;c.PerformLayout();foreach(Control child in c.Controls)Layout(child);}
+   Layout(form);
+@@ -52,6 +55,11 @@ static class Program
+   Check(((IEnumerable)Call("FrameAddonFuelStore","Pending",workspace)!).Cast<object>().Count()==2,"failed apply retains pending edits");
+   rejected=false;try{Call("FrameAddonFuelStore","Patch",text,Edit("../outside.xml",25,50));}catch(TargetInvocationException e)when(e.InnerException is InvalidDataException){rejected=true;}
+   Check(rejected,"unsafe staged path rejected");
++  var exact=(string)Call("FrameAddonFuelStore","Patch",text,Edit(relative,25,12))!;
++  Check((decimal)Call("FrameAddonFuelStore","Read",exact)! ==12m,"restoration accepts an exact original capacity that is not a multiple of five");
++  Check((decimal)Call("FrameAddonFuelStore","Read",(string)Call("FrameAddonFuelStore","Patch",text,Edit(relative,25,0))!)! ==0m,"zero is an allowed staged addon fuel capacity");
++  rejected=false;try{Call("FrameAddonFuelStore","Patch",text,Edit(relative,25,10001));}catch(TargetInvocationException e)when(e.InnerException is InvalidDataException){rejected=true;}
++  Check(rejected,"addon fuel above 10,000 litres is rejected");
+  }
+ }
+ 
+diff --git "a/.checks\\FuelResetAuditBaseline\\TruckProperties.Program.cs" b/.checks/truck-properties/Program.cs
+index dfaaead..d8072b6 100644
+--- "a/.checks\\FuelResetAuditBaseline\\TruckProperties.Program.cs"
++++ b/.checks/truck-properties/Program.cs
+@@ -7,7 +7,11 @@ internal static class Program
+ {
+     private static readonly Assembly App = Assembly.Load("SnowPakTool.Desktop");
+     private static Type T(string name) => App.GetType("SnowPakTool.Desktop." + name)!;
+-    private static object? Call(object obj, string name, params object?[] args) => obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(obj, args);
++    private static object? Call(object obj, string name, params object?[] args)
++    {
++        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
++        return obj.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(obj, args);
++    }
+     private static object? Store(string name, params object?[] args) => T("TruckPropertiesStore").GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
+     private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(obj)!;
+     private static void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
+@@ -27,6 +31,16 @@ internal static class Program
+     private static IEnumerable<Control> All(Control parent) => parent.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(All(child)));
+     [STAThread] private static void Main(string[] args)
+     {
++        if (args.Contains("--audit-readonly"))
++        {
++            var differences=((IEnumerable)T("WorkspaceChangeAudit").GetMethod("PakFiles")!.Invoke(null,new object[]{@"S:\snowrunner_Shenanigans\AI\workspace"})!).Cast<object>().ToArray();
++            foreach(var difference in differences)
++            {
++                var type=difference.GetType();var auditTarget=(string)type.GetProperty("Target")!.GetValue(difference)!;
++                Console.WriteLine(auditTarget+": "+type.GetProperty("Property")!.GetValue(difference)+" | "+type.GetProperty("Before")!.GetValue(difference)+" -> "+type.GetProperty("After")!.GetValue(difference));
++            }
++            Console.WriteLine($"Read-only audit: {differences.Length} actual property differences.");return;
++        }
+         var workspace = Path.Combine(AppContext.BaseDirectory, "fixtures", Guid.NewGuid().ToString("N"));
+         const string relative = "[media]/classes/trucks/chevrolet_ck1500.xml";
+         var original = Path.Combine(workspace, "initial.pak", "original_files", relative);
+@@ -165,6 +179,18 @@ internal static class Program
+         Check(((Label)Field(tab, "_status")).Text.Contains("Nothing to stage"), "reset explains when original values are already in files");
+         Call(tab, "Stage");
+         Check(((IList)Store("LoadPending", workspace)!).Count == 0 && ((Label)Field(tab, "_status")).Text.Contains("already matches the files"), "no-op staging explains why Start has no pending changes");
++        File.WriteAllText(updated, File.ReadAllText(updated).Replace("<GameData ", "<GameData UnlockByExploration=\"false\" "));
++        object[] Audit()=>((IEnumerable)T("WorkspaceChangeAudit").GetMethod("PakFiles")!.Invoke(null,new object[]{workspace})!).Cast<object>().ToArray();
++        Check(Audit().Any(),"audit still reports a genuinely introduced exploration attribute");
++        Wait((Task)Call(tab, "EnsureLoadedAsync", true)!);
++        All(tab).OfType<Button>().Single(button => button.Text == "Reset to original values").PerformClick(); Call(tab,"Stage");
++        var removal=((IEnumerable)Store("LoadPending",workspace)!).Cast<object>().Single();
++        Check((bool)removal.GetType().GetProperty("RemoveAttribute")!.GetValue(removal)!,"reset stages removal of an introduced false flag even when its numeric value is unchanged");
++        Call(tab,"SavePendingChanges");
++        Check(!File.ReadAllText(updated).Contains("UnlockByExploration="),"Apply restores absent original exploration attribute instead of writing false");
++        File.WriteAllText(updated,File.ReadAllText(updated).Replace("\r\n","\n")+"\n");
++        Check(Audit().Length==0,"audit ignores XML line endings and trailing whitespace after restoring original properties");
++        Wait((Task)Call(tab,"EnsureLoadedAsync",false)!);
+         row = grid.Rows.Cast<DataGridViewRow>().Single(row => Convert.ToString(row.Cells["Truck"].Value) == "chevrolet_ck1500");
+         row.Cells["FuelCapacity"].Value = 160m;
+         if (!args.Contains("--no-visual")) {

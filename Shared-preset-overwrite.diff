@@ -1,0 +1,273 @@
+--- a/src/SnowPakTool.Desktop/SharedPreset.cs
++++ b/src/SnowPakTool.Desktop/SharedPreset.cs
+@@ -12,7 +12,8 @@
+ internal sealed record PresetPatch(string Area, string Path, string Before, string After, int Length, List<PresetBlock> Blocks,
+     string ArchiveHash = "");
+ internal sealed record SharedPresetDocument(int Version, string Baseline, List<PresetPatch> Files,
+-    Dictionary<string, string?> Planning, Dictionary<string, string?> Metadata, List<WorkspaceChange>? Review = null);
++    Dictionary<string, string?> Planning, Dictionary<string, string?> Metadata, List<WorkspaceChange>? Review = null,
++    bool ReplaceLocalChanges = false);
+ 
+ internal static class SharedPreset
+ {
+@@ -186,7 +187,7 @@
+         foreach (var protectedRoot in new[] { WorkspaceOriginals.GetOriginalRoot(workspace), WorkspaceOriginals.GetUpdatedRoot(workspace), Path.Combine(WorkspaceOriginals.GetWorkspaceRoot(workspace), "region-maps") })
+             if (output.StartsWith(Path.TrimEndingDirectorySeparator(protectedRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                 throw new IOException("Save the shared preset outside the game data folders.");
+-        if (HasPending(workspace)) { var staged = Read(StagePath(workspace)); Write(path, staged); return; }
++        if (HasPending(workspace)) { var staged = Read(StagePath(workspace)); Write(path, staged with { ReplaceLocalChanges = false }); return; }
+         var baseline = Fingerprint(workspace);
+         var stamp = InputStamp(workspace, preferences ?? PreferencesRoot);
+         var temporary = Path.Combine(Path.GetTempPath(), "snowpreset-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temporary);
+@@ -267,12 +268,13 @@
+         return original;
+     }
+ 
+-    private static void ValidateWorkspace(string workspace, SharedPresetDocument document, string mapFolder)
++    private static void ValidateWorkspace(string workspace, SharedPresetDocument document, string mapFolder, bool replaceLocalChanges = false)
+     {
+         if (Fingerprint(workspace) != document.Baseline) throw new InvalidDataException("This preset requires the same initial PAK originals/game version as its sender.");
+         var initial = document.Files.Where(p => p.Area == "initial").ToDictionary(p => p.Path, StringComparer.OrdinalIgnoreCase);
+         foreach (var file in Files(WorkspaceOriginals.GetUpdatedRoot(workspace)))
+         {
++            if (replaceLocalChanges) break;
+             var relative = Relative(WorkspaceOriginals.GetUpdatedRoot(workspace), file);
+             var original = WorkspaceOriginals.GetOriginalReadPath(workspace, relative); var hash = FileHash(file);
+             if ((File.Exists(original) && hash == FileHash(original)) || initial.TryGetValue(relative, out var patch) && hash == patch.After) continue;
+@@ -286,6 +288,7 @@
+         var maps = document.Files.Where(p => p.Area == "map").ToDictionary(p => Path.GetFileNameWithoutExtension(p.Path), StringComparer.OrdinalIgnoreCase);
+         foreach (var (map, file) in TruckReplacementStore.SavedMaps(workspace))
+         {
++            if (replaceLocalChanges) break;
+             var bytes = RegionTruckCatalogService.ReadMapData(file)!; var original = RegionTruckCatalogService.OriginalMapPath(workspace, map);
+             if (original is not null && bytes.AsSpan().SequenceEqual(RegionTruckCatalogService.ReadMapData(original))) continue;
+             if (maps.TryGetValue(map, out var patch) && Hash(bytes) == patch.After) continue;
+@@ -295,8 +298,22 @@
+ 
+     public static void Stage(string workspace, string path, string mapFolder)
+     {
+-        var document = Read(path); ValidateWorkspace(workspace, document, mapFolder);
++        var document = Read(path) with { ReplaceLocalChanges = false }; ValidateWorkspace(workspace, document, mapFolder);
+         // Only the portable snapshot is staged. No planning or game output is written.
++        Write(StagePath(workspace), document);
++    }
++
++    // Called only after the user confirms replacing local work. Keep that permission
++    // in the local stage, never trust or export it as part of a portable preset.
++    public static void StageReplacing(string workspace, string path, string mapFolder)
++    {
++        var document = Read(path) with { ReplaceLocalChanges = true };
++        ValidateWorkspace(workspace, document, mapFolder, replaceLocalChanges: true);
++        if (HasPending(workspace))
++        {
++            var history = Path.Combine(WorkspaceOriginals.GetWorkspaceRoot(workspace), "preset-history", "replaced-stage-" + Guid.NewGuid().ToString("N"));
++            Directory.CreateDirectory(history); File.Copy(StagePath(workspace), Path.Combine(history, "shared-preset.staged.before"));
++        }
+         Write(StagePath(workspace), document);
+     }
+ 
+@@ -318,7 +335,7 @@
+ 
+     public static void Apply(string workspace, string mapFolder, string? preferences = null)
+     {
+-        var document = Read(StagePath(workspace)); ValidateWorkspace(workspace, document, mapFolder);
++        var document = Read(StagePath(workspace)); ValidateWorkspace(workspace, document, mapFolder, document.ReplaceLocalChanges);
+         var root = WorkspaceOriginals.GetWorkspaceRoot(workspace);
+         var transaction = Path.Combine(root, "preset-history", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fffffff") + "-" + Guid.NewGuid().ToString("N"));
+         Directory.CreateDirectory(transaction);
+@@ -365,6 +382,29 @@
+         }
+         foreach (var (relative, json) in document.Planning) Prepare(SafePath(preferences ?? PreferencesRoot, relative), json is null ? null : Encoding.UTF8.GetBytes(json));
+         foreach (var (relative, json) in document.Metadata) Prepare(SafePath(root, relative), json is null ? null : Encoding.UTF8.GetBytes(json));
++        if (document.ReplaceLocalChanges)
++        {
++            // This is a complete setup replacement: retaining extra local overlays
++            // would otherwise produce different packed files from the same preset.
++            var updated = WorkspaceOriginals.GetUpdatedRoot(workspace);
++            if (Path.GetFullPath(updated).Equals(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("Migrate to a separate updated-files folder before replacing a preset.");
++            var targets = outputs.Select(o => o.Target).ToHashSet(StringComparer.OrdinalIgnoreCase);
++            foreach (var file in Files(updated).Concat(TruckReplacementStore.SavedMaps(workspace).Select(m => m.Source)))
++            {
++                var safe = SafePath(root, Relative(root, file));
++                if (targets.Add(safe)) Prepare(safe, null);
++            }
++            foreach (var relative in new[] { "truck-properties/pending-changes.json", "frame-addon-fuel/pending-changes.json",
++                "winches/pending-changes.json", "upgrade-randomization/staged.json", "upgrade-randomization/draft.json",
++                "upgrade-randomization/addon-exploration.json" })
++            {
++                var path = WorkspaceOriginals.GetMetadataPath(workspace, relative.Replace('/', Path.DirectorySeparatorChar));
++                if (File.Exists(path)) Prepare(SafePath(root, Relative(root, path)), null);
++            }
++            var rankStage = new RankXpStageStore(Path.Combine(preferences ?? PreferencesRoot, "staged-rank-xp")).StatePath(workspace);
++            if (File.Exists(rankStage)) Prepare(rankStage, null);
++        }
+         File.WriteAllText(Path.Combine(transaction, "targets.json"), JsonSerializer.Serialize(outputs.Select(o => new { o.Target, o.Backup })));
+         var committed = new List<(string Target, string? Temporary, string? Backup)>();
+         try
+--- a/src/SnowPakTool.Desktop/MainForm.cs
++++ b/src/SnowPakTool.Desktop/MainForm.cs
+@@ -219,7 +219,8 @@
+         void RefreshPendingCount()
+         {
+             var workspace = _workspacePath.Text.Trim();
+-            try { ShowPendingCount(Directory.Exists(workspace) ? PendingPakChanges(workspace).Count + PendingTruckReplacements.LoadStaged(workspace).Count : 0); }
++            try { ShowPendingCount(Directory.Exists(workspace) ? PendingPakChanges(workspace).Count
++                + (SharedPreset.HasPending(workspace) ? 0 : PendingTruckReplacements.LoadStaged(workspace).Count) : 0); }
+             catch { /* Preserve the last known count; Start reports detailed read errors. */ }
+         }
+         _startChanges.PendingCountChanged += ShowPendingCount;
+@@ -447,11 +448,25 @@
+         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+         try
+         {
+-            if (!SharedPreset.HasPending(workspace) && (PendingPakChanges(workspace).Count > 0 || PendingTruckReplacements.Load(workspace).Count > 0
+-                || UpgradeTrialStore.Load(workspace) is not null))
+-                throw new InvalidOperationException("This workspace has pending edits or randomizer drafts. Use a separate clean workspace to load a shared preset.");
++            var replace = _truckPropertiesTab.HasPresetPreview || _truckEditTab.HasPresetPreview || _experienceTab.HasPresetPreview
++                || SharedPreset.HasPending(workspace) || PendingPakChanges(workspace).Count > 0
++                || PendingTruckReplacements.Load(workspace).Count > 0 || UpgradeTrialStore.Load(workspace) is not null
++                || Directory.Exists(WorkspaceOriginals.GetUpdatedRoot(workspace))
++                    && Directory.EnumerateFiles(WorkspaceOriginals.GetUpdatedRoot(workspace), "*", SearchOption.AllDirectories).Any()
++                || TruckReplacementStore.SavedMaps(workspace).Any();
++            if (replace && MessageBox.Show(this,
++                "This workspace has local edits, pending changes, randomizer drafts, or a staged shared preset.\n\n" +
++                "Replace them with the loaded preset? Existing pending work will be ignored while the preset is staged. " +
++                "Apply pending changes will replace local edits and drafts, including edits absent from the preset, and keep backups in preset-history. " +
++                "Discarding the shared preset before Apply keeps the existing work.\n\nContinue loading?",
++                "Replace local changes with shared preset?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
++                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+             var mapFolder = _regionsTrucksTab.PresetMapFolder;
+-            await RunBusyAsync("Checking preset baselines and staging shared changes…", () => SharedPreset.Stage(workspace, dialog.FileName, mapFolder));
++            await RunBusyAsync("Checking preset baselines and staging shared changes…", () =>
++            {
++                if (replace) SharedPreset.StageReplacing(workspace, dialog.FileName, mapFolder);
++                else SharedPreset.Stage(workspace, dialog.FileName, mapFolder);
++            });
+             if (SharedPreset.HasPending(workspace)) { RememberPaths(); ReloadRequested?.Invoke(); }
+         }
+         catch (Exception ex) { MessageBox.Show(this, "Could not load shared preset: " + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+--- a/src/SnowPakTool.Desktop/StartChangesPanel.cs
++++ b/src/SnowPakTool.Desktop/StartChangesPanel.cs
+@@ -98,10 +98,12 @@
+         {
+             // These remain separate stores. If the second operation fails, the first
+             // stays applied and refresh shows the remaining staged work for retry.
+-            if (_pendingPak(workspace).Count > 0) _savePak();
++            var pending = _pendingPak(workspace);
++            var sharedPreset = pending.Any(c => c.SummaryGroup == "shared:planning");
++            if (pending.Count > 0) _savePak();
+             if (!workspace.Equals(_workspace().Trim(), StringComparison.OrdinalIgnoreCase))
+                 throw new InvalidOperationException("Workspace changed during Apply. Review the remaining pending changes.");
+-            if (PendingTruckReplacements.LoadStaged(workspace).Count > 0) await _applyMaps();
++            if (!sharedPreset && PendingTruckReplacements.LoadStaged(workspace).Count > 0) await _applyMaps();
+             await _reloadRegions();
+             succeeded = true;
+             message = "Pending changes applied to the workspace. Pack the initial PAK as needed; install the resulting PAK and map files manually.";
+@@ -129,8 +131,10 @@
+         try
+         {
+             var pending = _pendingPak(workspace);
++            var sharedPreset = pending.Any(c => c.SummaryGroup == "shared:planning");
+             var result = await Task.Run(() => (Pak: WorkspaceChangeAudit.PakFiles(workspace), Maps: WorkspaceChangeAudit.MapFiles(workspace),
+                 Trucks: RegionTruckCatalogService.LoadTrucks(workspace, WorkspaceDataCache.GetLocalizedNames(workspace), [])));
++            if (sharedPreset) result.Maps = result.Maps.Where(c => c.State != WorkspaceChange.Pending).ToArray();
+             if (IsDisposed) return;
+             await InvokeAsync(() =>
+             {
+--- a/src/SnowPakTool.Desktop/RankXpStageStore.cs
++++ b/src/SnowPakTool.Desktop/RankXpStageStore.cs
+@@ -17,7 +17,7 @@
+     public RankXpStageStore(string? directory = null) => _directory = directory ?? Path.Combine(
+         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SnowPakTool.Desktop", "staged-rank-xp");
+ 
+-    private string StatePath(string workspace)
++    internal string StatePath(string workspace)
+     {
+         var key = WorkspaceOriginals.GetWorkspaceRoot(workspace).ToUpperInvariant();
+         return Path.Combine(_directory, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json");
+--- a/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
++++ b/src/SnowPakTool.Desktop/TruckPropertiesTab.cs
+@@ -503,6 +503,8 @@
+             : $"Staged {edits.Count} truck property changes. Apply pending changes from Start.";
+     }
+ 
++    internal bool HasPresetPreview => _loadedWorkspace == _getWorkspace().Trim() && DraftValues(true).Count > 0;
++
+     internal void ExportPreview(string destination)
+     {
+         if (_loadedWorkspace != _getWorkspace().Trim()) return;
+--- a/src/SnowPakTool.Desktop/TruckEditTab.cs
++++ b/src/SnowPakTool.Desktop/TruckEditTab.cs
+@@ -668,6 +668,8 @@
+                 }
+     }
+ 
++    internal bool HasPresetPreview => _addonsTab.HasPresetPreview || _frameAddonsTab.HasPresetPreview;
++
+     internal void ExportPreview(string destination)
+     {
+         _engineEditTab.ExportPreview(destination);
+--- a/src/SnowPakTool.Desktop/AddonsTab.cs
++++ b/src/SnowPakTool.Desktop/AddonsTab.cs
+@@ -323,6 +323,9 @@
+         UpdateFuelCells();
+     }
+ 
++    internal bool HasPresetPreview => _loadedWorkspace == _getWorkspacePath().Trim()
++        && (_fuelRows.Values.Any(r => r.Draft != r.Current) || _explorationRows.Values.Any(r => r.Draft != r.Current));
++
+     internal void ExportFuelPreview(string destination)
+     {
+         if (_loadedWorkspace != _getWorkspacePath().Trim() || !_frameAddonsOnly) return;
+--- a/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
++++ b/src/SnowPakTool.Desktop/ExperienceEditorTab.cs
+@@ -830,6 +830,8 @@
+         }
+     }
+ 
++    internal bool HasPresetPreview => _loadedWorkspace == _getWorkspacePath().Trim() && IsDirty;
++
+     internal void ExportPreview(string destination)
+     {
+         var workspace = _getWorkspacePath();
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@
+ 
+ **Start → Save shared preset… / Load shared preset…** shares the complete gameplay setup in a versioned `.snowpreset` file: current truck/engine/winch/frame-addon/XP previews, staged edits, map-truck drafts and applied map edits, upgrade results, ownership, truck groups/tiers, region difficulty/progression, randomizer rules and workspace planning settings. Export renders drafts in an isolated workspace without applying or clearing the sender's edits. Randomization choices are stored as concrete results; loading never rerolls. The file contains Brotli-compressed copy/literal differences against preserved originals, rather than full PAKs or unchanged assets. Machine paths, installed game archives, player saves, window settings and caches are excluded.
+ 
+-Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. Conflicting local edits or drafts require a separate clean workspace. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
++Loading checks the complete preserved initial-PAK content fingerprint and the exact original archive hash of every shared map. Use the same app build and game/original files; a matching game version alone does not prove that two modified baselines match. Select the installed map folder in Map trucks if needed. When local previews, pending edits, drafts, applied changes or another staged preset exist, Load warns and asks whether to replace them. No cancels loading. Yes stages the preset as a complete replacement; old pending edits are ignored while it is staged. Apply backs up and clears superseded pending stores and local outputs absent from the preset, so they cannot leak into the shared result. Discarding before Apply retains existing saved work. Original-file compatibility checks still apply. Load writes only a persistent staged snapshot, with before/after initial-file values visible on Start; planning settings remain unchanged until **Apply pending changes**. Editing tabs are locked while the snapshot is staged. **Discard shared preset** removes it without changing outputs. Apply verifies all baselines again, prepares every output, preserves old files/settings under `preset-history`, and rolls back completed replacements on failure. The app refreshes its planning and editor state after Apply. Pack a new initial PAK and install the separate map outputs manually.
+ 
+ The same preset applied to matching originals produces the same initial and map contents. Initial PAK packing uses ordinal cache-entry ordering and fixed ZIP timestamps/attributes, so the same app build also produces byte-identical archives across workspace paths, file modification times and system cultures. For the sender to reproduce the complete exported preview, stage and apply all included previews/drafts, or load that same preset into a clean workspace. Automated checks cover cross-workspace initial/map SHA-256 equality, compact deltas, preview capture, staging/restart reads, baseline conflicts, malformed presets and rollback after a locked-file failure. Runtime behavior still requires in-game verification.
+ 
+--- a/.checks/SharedPreset/Program.cs
++++ b/.checks/SharedPreset/Program.cs
+@@ -124,6 +124,26 @@
+   var draftReceiver=W("draft-receiver");Copy(Path.Combine(draftSender,"initial.pak/original_files"),Path.Combine(draftReceiver,"initial.pak/original_files"));Call("SharedPreset","Stage",draftReceiver,draftPreset,draftMaps);Call("SharedPreset","Apply",draftReceiver,draftMaps,W("draft-prefs"));
+   var draftOutput=Path.Combine(draftReceiver,"region-maps/updated/level_us_01_01.pak");var draftData=(byte[])Call("RegionTruckCatalogService","ReadMapData",draftOutput)!;
+   Check(Encoding.ASCII.GetString(draftData).Contains("new_truck")&&!Encoding.ASCII.GetString(draftData).Contains("old_truck"),"recipient applies concrete map draft from portable snapshot");
++  var replaceReceiver=W("replace-receiver");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(replaceReceiver,"initial.pak/original_files"));
++  Put(Updated(replaceReceiver,relative),xml.Replace("20","99"));Put(Updated(replaceReceiver,"[media]/local-only.xml"),"local extra");
++  var replacePrefs=W("replace-prefs");var pendingFiles=new[]{"truck-properties/pending-changes.json","frame-addon-fuel/pending-changes.json","winches/pending-changes.json","upgrade-randomization/staged.json","upgrade-randomization/draft.json","upgrade-randomization/addon-exploration.json"};
++  foreach(var path in pendingFiles)Put(Path.Combine(replaceReceiver,path),"[]");
++  var oldMap=Path.Combine(replaceReceiver,"region-maps/updated/level_us_01_02.pak");Directory.CreateDirectory(Path.GetDirectoryName(oldMap)!);File.Copy(mapOutput,oldMap);
++  var replaceRank=Activator.CreateInstance(T("RankXpStageStore"),new object?[]{Path.Combine(replacePrefs,"staged-rank-xp")})!;Invoke(replaceRank,"Stage",replaceReceiver,"rankExp = [0, 100, 200]",new[]{0,333,666});
++  Call("SharedPreset","StageReplacing",replaceReceiver,preset,maps);
++  Check(File.ReadAllText(Updated(replaceReceiver,relative)).Contains("99")&&File.Exists(oldMap)&&pendingFiles.All(p=>File.Exists(Path.Combine(replaceReceiver,p))),"confirmed replacement only stages; old outputs and pending stores remain until Apply");
++  Call("SharedPreset","Discard",replaceReceiver);Check(File.Exists(oldMap)&&Invoke(replaceRank,"Load",replaceReceiver) is not null,"discard replacement retains previous saved pending work and outputs");
++  Call("SharedPreset","StageReplacing",replaceReceiver,preset,maps);Call("SharedPreset","Apply",replaceReceiver,maps,replacePrefs);
++  Check(File.ReadAllText(Updated(replaceReceiver,relative))==xml.Replace("20","40")&&!File.Exists(Updated(replaceReceiver,"[media]/local-only.xml"))&&!File.Exists(oldMap),"Apply replaces conflicts and removes extra local initial/map outputs");
++  Check(pendingFiles.All(p=>!File.Exists(Path.Combine(replaceReceiver,p)))&&Invoke(replaceRank,"Load",replaceReceiver) is null,"Apply clears superseded truck, fuel, winch, addon, upgrade and rank XP pending stores");
++  Check(Directory.GetFiles(Path.Combine(replaceReceiver,"preset-history"),"*.before",SearchOption.AllDirectories).Any(f=>File.ReadAllText(f)=="local extra"),"replaced local edits preserved in backup history");
++  var replacementPacked=W("replacement.pak");Call("MainForm","PackWorkspace",replaceReceiver,replacementPacked);Check(Hash(replacementPacked)==Hash(packed1),"replacement still produces the exact shared initial PAK");
++  Reject(()=>Call("SharedPreset","StageReplacing",stale,preset,maps),"replacement cannot bypass original initial baseline checks");
++  var mismatchedMaps=W("replacement-bad-map");Copy(Path.Combine(sender,"initial.pak/original_files"),Path.Combine(mismatchedMaps,"initial.pak/original_files"));Reject(()=>Call("SharedPreset","StageReplacing",mismatchedMaps,preset,badMap),"replacement cannot bypass original map checks");
++  Call("SharedPreset","StageReplacing",replaceReceiver,preset,maps);Call("SharedPreset","StageReplacing",replaceReceiver,preset,maps);
++  Check(Directory.GetFiles(Path.Combine(replaceReceiver,"preset-history"),"shared-preset.staged.before",SearchOption.AllDirectories).Length==1,"replacing an earlier staged preset preserves a backup");
++  var portableReplacement=W("replacement-export.snowpreset");Call("SharedPreset","Export",replaceReceiver,portableReplacement,(Action<string>)(_=>{}),replacePrefs);
++  var portableDoc=Call("SharedPreset","Read",portableReplacement)!;Check(!(bool)portableDoc.GetType().GetProperty("ReplaceLocalChanges")!.GetValue(portableDoc)!,"local overwrite confirmation is not exported to other users");
+   File.WriteAllText(Path.Combine(AppContext.BaseDirectory,"results.json"),JsonSerializer.Serialize(new{PresetBytes=new FileInfo(preset).Length,InitialSha256=Hash(packed1),MapSha256=Hash(mapOutput),Scratch=scratch},new JsonSerializerOptions{WriteIndented=true}));
+  }
+ }

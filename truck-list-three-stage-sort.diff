@@ -1,0 +1,94 @@
+diff --git a/src/SnowPakTool.Desktop/OwnedContentTab.cs b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+index fe5418d..15b3dc8 100644
+--- a/src/SnowPakTool.Desktop/OwnedContentTab.cs
++++ b/src/SnowPakTool.Desktop/OwnedContentTab.cs
+@@ -211,6 +211,10 @@ internal sealed class OwnedContentTab : UserControl
+             var cellBounds = _truckGrid.GetCellDisplayRectangle(e.ColumnIndex, -1, true);
+             var filterBounds = TruckHeaderCell.FilterBounds(new Rectangle(0, 0, cellBounds.Width, cellBounds.Height), _truckGrid.DeviceDpi / 96f);
+             if (filterBounds.Contains(e.X, e.Y)) { ShowTruckFilter(column); return; }
++            if (_truckSortColumn == column.Name && _truckSortDirection == ListSortDirection.Descending)
++            {
++                ClearTruckSort(); return;
++            }
+             SortTrucks(column.Name, _truckSortColumn == column.Name && _truckSortDirection == ListSortDirection.Ascending
+                 ? ListSortDirection.Descending : ListSortDirection.Ascending);
+         };
+@@ -356,6 +360,7 @@ internal sealed class OwnedContentTab : UserControl
+             var menu = new ContextMenuStrip();
+             menu.Items.Add("Sort ascending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Ascending));
+             menu.Items.Add("Sort descending", null, (_, _) => SortTrucks(column.Name, ListSortDirection.Descending));
++            menu.Items.Add("Sort off (default order)", null, (_, _) => ClearTruckSort());
+             menu.Items.Add(new ToolStripSeparator());
+             menu.Items.Add("Filter " + column.HeaderText + "…", null, (_, _) => ShowTruckFilter(column));
+             menu.Items.Add("Clear filter", null, (_, _) => filter.Clear());
+@@ -387,7 +392,16 @@ internal sealed class OwnedContentTab : UserControl
+     {
+         foreach (var filter in _truckFilters)
+             _truckGrid.Columns[filter.ColumnName]!.HeaderCell.ToolTipText =
+-                "Click the heading to sort; click the funnel to filter. Right-click for commands. " + filter.Description;
++                "Click the heading to cycle ascending, descending, off; click the funnel to filter. Right-click for commands. " + filter.Description;
++    }
++
++    private void ClearTruckSort()
++    {
++        _truckSortColumn = null;
++        _truckSortDirection = ListSortDirection.Ascending;
++        _truckGrid.Sort(new TruckInitialComparer());
++        foreach (DataGridViewColumn column in _truckGrid.Columns) column.HeaderCell.SortGlyphDirection = SortOrder.None;
++        _truckGrid.Invalidate();
+     }
+     private void ApplyTruckFilters()
+     {
+diff --git a/.checks/TruckHeaderFilters/Program.cs b/.checks/TruckHeaderFilters/Program.cs
+index bc2bde8..704903a 100644
+--- a/.checks/TruckHeaderFilters/Program.cs
++++ b/.checks/TruckHeaderFilters/Program.cs
+@@ -15,6 +15,14 @@ internal static class Program
+         var grid = (DataGridView)Field(tab, "_truckGrid");
+         grid.Rows.Add("Zulu", "Season 2", "Scout"); grid.Rows.Add("Alpha", "Base game", "Offroad");
+         grid.Rows.Add("Bravo", "Season 2", "Offroad"); grid.Rows.Add("Delta", "Base game", "Scout");
++        var tagType = tab.GetType().GetNestedType("TruckRowTag", BindingFlags.NonPublic)!;
++        foreach (DataGridViewRow row in grid.Rows)
++        {
++            var baseGame = (string)row.Cells["DlcName"].Value! == "Base game";
++            row.Tag = Activator.CreateInstance(tagType, baseGame ? "base_game" : "season_2", row.Cells["DlcName"].Value,
++                row.Cells["TruckName"].Value, baseGame ? null : new DateOnly(2020, 11, 16), baseGame);
++        }
++        Call(tab, "ClearTruckSort");
+         Call(tab, "UpdateTruckFilterOptions");
+         void ClickHeader(string column)
+         {
+@@ -33,6 +41,11 @@ internal static class Program
+         ClickHeader("TruckName");
+         Check(Visible().SequenceEqual(new[] { "Zulu", "Delta", "Bravo", "Alpha" }) && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.Descending, "second header click reverses sorting and glyph");
+         Capture("descending");
++        ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Alpha", "Delta", "Bravo", "Zulu" }) && grid.Columns.Cast<DataGridViewColumn>().All(column => column.HeaderCell.SortGlyphDirection == SortOrder.None), "third click turns sorting off and restores base-game/release default order without arrows");
++        Capture("sort-off");
++        ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Alpha", "Bravo", "Delta", "Zulu" }) && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.Ascending, "click after off starts a new ascending cycle");
+         ClickHeader("TruckClass");
+         Check((string)grid.Rows[0].Cells["TruckClass"].Value! == "Offroad" && grid.Columns["TruckName"]!.HeaderCell.SortGlyphDirection == SortOrder.None, "another heading starts ascending and clears the previous sort arrow");
+         var filters = ((IEnumerable)Field(tab, "_truckFilters")).Cast<object>().ToArray();
+@@ -49,6 +62,8 @@ internal static class Program
+         Capture("filtered");
+         ClickHeader("TruckName");
+         Check(Visible().SequenceEqual(new[] { "Bravo" }), "sorting preserves filters");
++        ClickHeader("TruckName"); ClickHeader("TruckName");
++        Check(Visible().SequenceEqual(new[] { "Bravo" }) && grid.Columns.Cast<DataGridViewColumn>().All(column => column.HeaderCell.SortGlyphDirection == SortOrder.None), "sorting off preserves active filters");
+         foreach (var filter in filters) Call(filter, "Clear");
+         Check(Visible().Length == 4 && grid.Columns["DlcName"]!.HeaderCell.ToolTipText.Contains("2 of 2 selected"), "clear filter restores choices and refreshes header counts");
+         var clone = grid.Columns[0].HeaderCell.Clone(); Check(clone.GetType() == grid.Columns[0].HeaderCell.GetType(), "custom headers support grid cloning");
+diff --git a/README.md b/README.md
+index 6ce5fb8..a24ad00 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
+-On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to sort ascending, then descending; the active sort arrow appears at its right. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
++On **Planning -> Owned content**, the left side stacks **Region DLCs**, **Truck DLCs**, and **Other DLCs** vertically, beside the Truck list. Each DLC pane has an independent borderless chevron: down to collapse, right to expand. Collapsing hides that table and its Select all control while keeping the title and chevron visible; remaining expanded panes share the space. All three can be collapsed and reopened. The glyphs support keyboard activation and identify their action in tooltips and accessibility labels. Ownership selections remain intact. The Truck list filters live in the column headers: click a heading to cycle ascending, descending, then off. Off restores the original base-game/release order and removes the arrow; active filters stay in effect. The active sort arrow appears at the right of the heading. Click the adjacent funnel to open checked filter choices for that column. Filled blue funnels indicate active filters; hover for selected counts. Multiple column filters combine, and sorting keeps the filters. Right-click a header for sort, filter and clear-filter commands. Filter choices affect the displayed rows only.
+ 
+ Navigation uses five main tabs and at most one sub-tab row: **Start** (workspace, pending changes, Apply and packing); **Planning** (Owned content, Truck tiers, Region difficulty, Truck groups); **Randomizer** (Region progression, Truck randomization); **Editors** (Truck properties, Engines, Winches, Addons, Experience / Ranks); and **Game data** (Map trucks, Cargo). Each group remembers its selected sub-tab while the app is open. Both rows strongly mark the active tab with a solid system highlight, bold contrasting text, and an underline; native keyboard navigation remains available. Start shows the pending-change count when refreshed or navigating between pages. A Settings gear at the top right opens the color settings in a separate window, with no additional tab row. Settings supports the same double-Shift search. Map truck results stay separate from Randomizer to avoid spoilers.
+ 

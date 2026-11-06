@@ -1,0 +1,614 @@
+diff --git a/README.md b/README.md
+index 6df0c11..a2fa875 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,8 @@ but require a bit of special handling to create.
+ 
+ ### SnowPakTool Desktop UI
+ 
++A compiled **upgrade distribution planner draft** is available as `UpgradeDistributionPlanner.Generate(input, seed, options)`. It returns a deterministic plan and achieved-distribution report, preserves the exact reward/type pool, pins metal detectors, targets 82–91% local truck-specific rewards and applies the first-region foreign preference only to shared upgrades. No-home truck-specific parts are distributed separately. Regional type mixes and percentages are soft goals. It performs no file writes and is not connected to the Upgrades UI yet; verified compatibility/composite tire IDs and effective truck/contract-reward homes must be supplied by a future catalog adapter. See [the planner draft and input contract](upgrade-distribution-draft.md).
++
+ **Editors → Addons** provides a read-only addon/upgrade catalog using Cargo's main table, description and source-properties layout. Reload runs in the background. Shared column sorting/filtering covers names, type/category, IDs and ID scope, socket/component family, content, price, rank, exploration flag and map reward references. Selecting an item lists each level SSO's map, zone and reward index, plus XML properties and their source files. Explicit file parents are followed; templates remain visible source data without expansion, and full truck compatibility is not inferred. Tire names are local to their wheel family; unresolved map reward IDs remain clearly marked. This does not stage or edit game data. See [the upgrade investigation](upgrade-map-investigation.md) for the confirmed map-zone → level-settings → part-definition relationship and replacement limits.
+ 
+ **Randomizer → Upgrades** prepares the upgrade workflow with one full-width rule pane, matching Truck randomization's add/edit/remove glyphs, automatically saved notes, Randomize / Stage changes buttons, detailed-log toggle and message area. Rules start empty and save separately from truck rules; an intentionally empty list remains empty. **Randomizer → Map upgrades** matches Map trucks' region tiles, map-folder Browse / Reload controls, region selection buttons, reset/staging controls, sortable/filterable table and resizable details split. Region tiles load from workspace metadata. Upgrade placement reading, replacement, randomization, reset and staging are not implemented yet; their action buttons remain disabled. Browse selects a folder and Reload refreshes workspace region metadata; neither scans upgrade placements or writes game files. Redistribution rules will be defined separately.
+diff --git a/src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs b/src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs
+new file mode 100644
+index 0000000..502ace2
+--- /dev/null
++++ b/src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs
+@@ -0,0 +1,292 @@
++namespace SnowPakTool.Desktop;
++
++internal enum UpgradeKind { Engine, Suspension, Gearbox, DifferentialLock, Awd, Tire, MetalDetector }
++internal enum UpgradePlacementRelation { SpecificLocal, SpecificElsewhere, SpecificWithoutHome, SharedLocal, SharedForeign, Fixed }
++
++// Compatibility must describe the full truck catalog, not just trucks currently
++// present on maps. IDs are exact reward IDs (including composite tire IDs).
++internal sealed record UpgradeDistributionDefinition(string Id, UpgradeKind Kind,
++    IReadOnlyList<string> CompatibleTrucks, bool KeepInPlace = false);
++internal sealed record UpgradeDistributionSlot(string Source, string Map, string Region,
++    string Zone, int RewardIndex, string OriginalUpgradeId);
++// Include effective obtainable map placements and direct garage/contract awards.
++// Exclude mission-only and unverified trucks; repeated copies are harmless.
++internal sealed record UpgradeTruckHome(string Truck, string Region);
++internal sealed record UpgradeDistributionInput(IReadOnlyList<UpgradeDistributionSlot> Slots,
++    IReadOnlyList<UpgradeDistributionDefinition> Definitions, IReadOnlyList<UpgradeTruckHome> TruckHomes,
++    IReadOnlyList<string> RegionOrder);
++internal sealed record UpgradeDistributionOptions(
++    double LocalMinimum = .82, double LocalMaximum = .91,
++    double FirstRegionForeignSharedMinimum = .60, double FirstRegionForeignSharedMaximum = .75,
++    int Attempts = 12, int SwapsPerAttempt = 12000);
++internal sealed record UpgradeDistributionAssignment(UpgradeDistributionSlot Slot, string UpgradeId,
++    UpgradeKind Kind, UpgradePlacementRelation Relation);
++internal sealed record UpgradeRegionDistribution(string Region, int Total,
++    IReadOnlyDictionary<UpgradeKind, int> Types, int SpecificLocal, int SpecificElsewhere,
++    int SpecificWithoutHome, int SharedLocal, int SharedForeign, int Fixed);
++internal sealed record UpgradeDistributionReport(double LocalTarget, int LocalTargetCount,
++    int SpecificWithHome, int SpecificLocal, int SpecificElsewhere, int SpecificWithoutHome,
++    int Shared, int Fixed, string? FirstRegion, double FirstRegionForeignSharedTarget,
++    int FirstRegionShared, int FirstRegionForeignShared,
++    IReadOnlyDictionary<UpgradeKind, int> OriginalTypes, IReadOnlyDictionary<UpgradeKind, int> PlannedTypes,
++    IReadOnlyList<UpgradeRegionDistribution> Regions, IReadOnlyList<string> Notes);
++internal sealed record UpgradeDistributionPlan(int Seed, IReadOnlyList<UpgradeDistributionAssignment> Assignments,
++    UpgradeDistributionReport Report);
++
++/// <summary>
++/// Pure draft planner: permutes the supplied reward occurrences among their slots.
++/// No file access, saved-state mutation, staging or game writes. Locality, regional
++/// type mix and first-region shared-item bias are soft goals; pool and pins are exact.
++/// </summary>
++internal static class UpgradeDistributionPlanner
++{
++    private static readonly StringComparer Codes = StringComparer.OrdinalIgnoreCase;
++    private static readonly UpgradeKind[] Kinds = Enum.GetValues<UpgradeKind>();
++    private sealed record Item(string Id, UpgradeKind Kind, bool Specific, HashSet<string> Homes);
++
++    public static UpgradeDistributionPlan Generate(UpgradeDistributionInput input, int seed,
++        UpgradeDistributionOptions? options = null)
++    {
++        ArgumentNullException.ThrowIfNull(input);
++        ArgumentNullException.ThrowIfNull(input.Slots);
++        ArgumentNullException.ThrowIfNull(input.Definitions);
++        ArgumentNullException.ThrowIfNull(input.TruckHomes);
++        ArgumentNullException.ThrowIfNull(input.RegionOrder);
++        options ??= new();
++        ValidateOptions(options);
++        var slots = input.Slots.ToArray();
++        foreach (var slot in slots)
++            if (slot is null || Blank(slot.Source, slot.Map, slot.Region, slot.Zone, slot.OriginalUpgradeId) || slot.RewardIndex < 0)
++                throw new ArgumentException("Each pickup needs a source, map, region, zone, reward index and original upgrade ID.");
++        Array.Sort(slots, (a, b) => StringComparer.Ordinal.Compare(Key(a), Key(b)));
++        if (slots.Select(Key).Distinct(Codes).Count() != slots.Length)
++            throw new ArgumentException("Pickup identities must be unique, including the reward array index.");
++        var regions = input.RegionOrder.ToArray();
++        if (regions.Any(string.IsNullOrWhiteSpace) || regions.Distinct(Codes).Count() != regions.Length)
++            throw new ArgumentException("Region progression must contain unique, non-empty region codes.");
++        var regionIndex = regions.Select((code, index) => (code, index)).ToDictionary(p => p.code, p => p.index, Codes);
++        if (slots.Any(slot => !regionIndex.ContainsKey(slot.Region)))
++            throw new ArgumentException("Every pickup region must be present in the supplied region progression.");
++        var definitions = new Dictionary<string, UpgradeDistributionDefinition>(Codes);
++        foreach (var definition in input.Definitions)
++        {
++            if (definition is null || Blank(definition.Id) || !Enum.IsDefined(definition.Kind)
++                || definition.CompatibleTrucks is null || definition.CompatibleTrucks.Any(string.IsNullOrWhiteSpace))
++                throw new ArgumentException("Upgrade definitions require valid IDs, types and compatibility lists.");
++            if (!definitions.TryAdd(definition.Id, definition))
++                throw new ArgumentException($"Merge compatibility before planning: duplicate definition '{definition.Id}'.");
++        }
++        var homes = new Dictionary<string, HashSet<string>>(Codes);
++        foreach (var home in input.TruckHomes)
++        {
++            if (home is null || Blank(home.Truck, home.Region)) throw new ArgumentException("Truck home codes cannot be empty.");
++            if (!homes.TryGetValue(home.Truck, out var values)) homes[home.Truck] = values = new(Codes);
++            values.Add(home.Region);
++        }
++        var items = new Item[slots.Length];
++        var pinned = new bool[slots.Length];
++        for (var index = 0; index < slots.Length; index++)
++        {
++            if (!definitions.TryGetValue(slots[index].OriginalUpgradeId, out var definition))
++                throw new ArgumentException($"Unresolved pickup reward '{slots[index].OriginalUpgradeId}'. Supply a verified definition before planning.");
++            pinned[index] = definition.KeepInPlace || definition.Kind == UpgradeKind.MetalDetector;
++            var compatible = definition.CompatibleTrucks.Distinct(Codes).ToArray();
++            if (!pinned[index] && compatible.Length == 0)
++                throw new ArgumentException($"Upgrade '{definition.Id}' has no verified compatible trucks.");
++            var itemHomes = compatible.Where(homes.ContainsKey).SelectMany(code => homes[code]).ToHashSet(Codes);
++            items[index] = new(slots[index].OriginalUpgradeId, definition.Kind, compatible.Length == 1, itemHomes);
++        }
++        var random = new Random(seed);
++        var localTarget = Between(random, options.LocalMinimum, options.LocalMaximum);
++        var firstTarget = Between(random, options.FirstRegionForeignSharedMinimum, options.FirstRegionForeignSharedMaximum);
++        var movable = Enumerable.Range(0, slots.Length).Where(i => !pinned[i]).ToArray();
++        var eligible = movable.Count(i => items[i].Specific && items[i].Homes.Count > 0);
++        var desired = localTarget * eligible;
++        var localTargetCount = (int)Math.Floor(desired) + (random.NextDouble() < desired - Math.Floor(desired) ? 1 : 0);
++        var slotRegions = slots.Select(slot => regionIndex[slot.Region]).ToArray();
++        var originalTypes = TypeCounts(items.Select(item => item.Kind));
++        var targetTypes = new int[regions.Length, Kinds.Length];
++        var capacities = new int[regions.Length];
++        foreach (var slot in movable)
++        {
++            targetTypes[slotRegions[slot], (int)items[slot].Kind]++;
++            capacities[slotRegions[slot]]++;
++        }
++        // Fixed random tie-break costs plus canonical input ordering make the
++        // same snapshot/options/seed reproducible even if callers reorder lists.
++        var noise = new double[slots.Length, slots.Length];
++        foreach (var item in movable)
++            foreach (var slot in movable) noise[item, slot] = random.NextDouble() * .35;
++        var best = Enumerable.Range(0, slots.Length).ToArray();
++        var bestScore = double.PositiveInfinity;
++        for (var attempt = 0; attempt < (movable.Length < 2 ? 1 : options.Attempts); attempt++)
++        {
++            var order = movable.ToArray();
++            random.Shuffle(order);
++            var assignment = Enumerable.Range(0, slots.Length).ToArray();
++            for (var i = 0; i < movable.Length; i++) assignment[movable[i]] = order[i];
++            var state = new SearchState(assignment, items, movable, slotRegions, regions, targetTypes,
++                capacities, noise, localTargetCount, firstTarget);
++            var score = state.Score();
++            if (score < bestScore) { bestScore = score; best = assignment.ToArray(); }
++            if (movable.Length < 2) break;
++            for (var step = 0; step < options.SwapsPerAttempt; step++)
++            {
++                var a = random.Next(movable.Length);
++                var b = random.Next(movable.Length - 1);
++                if (b >= a) b++;
++                var first = movable[a]; var second = movable[b];
++                state.Swap(first, second);
++                var next = state.Score();
++                var temperature = 2.5 * Math.Pow(.004, (double)step / Math.Max(1, options.SwapsPerAttempt - 1));
++                if (next <= score || random.NextDouble() < Math.Exp((score - next) / temperature))
++                {
++                    score = next;
++                    if (score < bestScore) { bestScore = score; best = assignment.ToArray(); }
++                }
++                else state.Swap(first, second);
++            }
++        }
++        var planned = slots.Select((slot, index) =>
++        {
++            var item = items[best[index]];
++            return new UpgradeDistributionAssignment(slot, item.Id, item.Kind,
++                pinned[index] ? UpgradePlacementRelation.Fixed : Relation(item, slot.Region));
++        }).ToArray();
++        // Validate the exact multiset, not just the number of distinct IDs.
++        var before = slots.GroupBy(s => s.OriginalUpgradeId, Codes).ToDictionary(g => g.Key, g => g.Count(), Codes);
++        var after = planned.GroupBy(s => s.UpgradeId, Codes).ToDictionary(g => g.Key, g => g.Count(), Codes);
++        if (before.Count != after.Count || before.Any(p => after.GetValueOrDefault(p.Key) != p.Value)
++            || planned.Where((_, i) => pinned[i]).Any(a => a.UpgradeId != a.Slot.OriginalUpgradeId))
++            throw new InvalidOperationException("The upgrade plan did not preserve its pool or fixed pickups.");
++        int Count(UpgradePlacementRelation relation) => planned.Count(a => a.Relation == relation);
++        var local = Count(UpgradePlacementRelation.SpecificLocal);
++        var elsewhere = Count(UpgradePlacementRelation.SpecificElsewhere);
++        var firstCode = regions.FirstOrDefault();
++        var firstShared = planned.Where(a => Codes.Equals(a.Slot.Region, firstCode)
++            && a.Relation is UpgradePlacementRelation.SharedLocal or UpgradePlacementRelation.SharedForeign).ToArray();
++        var notes = new List<string>();
++        if (local != localTargetCount)
++            notes.Add($"Same-region target {localTargetCount}/{eligible}; best sampled plan achieved {local}/{eligible}. Locality is a soft target, not a guaranteed optimum.");
++        var noLocalSlot = movable.Count(i => items[i].Specific && items[i].Homes.Count > 0
++            && !movable.Any(slot => items[i].Homes.Contains(slots[slot].Region)));
++        if (noLocalSlot > 0) notes.Add($"{noLocalSlot} truck-specific rewards have truck homes but no movable pickup slot in those regions.");
++        if (firstShared.Length == 0 && movable.Any(i => !items[i].Specific))
++            notes.Add("The selected plan has no movable shared upgrades in the first progression region; its foreign-shared preference could not contribute.");
++        if (firstCode is not null && firstTarget > 0 && movable.Any(i => !items[i].Specific)
++            && !movable.Any(i => !items[i].Specific && !items[i].Homes.Contains(firstCode)))
++            notes.Add("Every movable shared upgrade supports a truck in the first region; no foreign shared candidate exists there.");
++        if (slots.Length == 0) notes.Add("No pickup slots were supplied.");
++        var regional = regions.Select(region =>
++        {
++            var group = planned.Where(a => Codes.Equals(a.Slot.Region, region)).ToArray();
++            int N(UpgradePlacementRelation relation) => group.Count(a => a.Relation == relation);
++            return new UpgradeRegionDistribution(region, group.Length, TypeCounts(group.Select(a => a.Kind)),
++                N(UpgradePlacementRelation.SpecificLocal), N(UpgradePlacementRelation.SpecificElsewhere), N(UpgradePlacementRelation.SpecificWithoutHome),
++                N(UpgradePlacementRelation.SharedLocal), N(UpgradePlacementRelation.SharedForeign), N(UpgradePlacementRelation.Fixed));
++        }).ToArray();
++        return new(seed, planned, new(localTarget, localTargetCount, eligible, local, elsewhere,
++            Count(UpgradePlacementRelation.SpecificWithoutHome), Count(UpgradePlacementRelation.SharedLocal) + Count(UpgradePlacementRelation.SharedForeign),
++            Count(UpgradePlacementRelation.Fixed), firstCode, firstTarget, firstShared.Length,
++            firstShared.Count(a => a.Relation == UpgradePlacementRelation.SharedForeign), originalTypes,
++            TypeCounts(planned.Select(a => a.Kind)), regional, notes));
++    }
++
++    private static UpgradePlacementRelation Relation(Item item, string region) => item.Specific
++        ? item.Homes.Count == 0 ? UpgradePlacementRelation.SpecificWithoutHome
++            : item.Homes.Contains(region) ? UpgradePlacementRelation.SpecificLocal : UpgradePlacementRelation.SpecificElsewhere
++        : item.Homes.Contains(region) ? UpgradePlacementRelation.SharedLocal : UpgradePlacementRelation.SharedForeign;
++    private static Dictionary<UpgradeKind, int> TypeCounts(IEnumerable<UpgradeKind> types)
++    {
++        var counts = types.GroupBy(kind => kind).ToDictionary(group => group.Key, group => group.Count());
++        return Kinds.ToDictionary(kind => kind, kind => counts.GetValueOrDefault(kind));
++    }
++    private static string Key(UpgradeDistributionSlot slot) => string.Join('\u001f', slot.Source, slot.Map, slot.Zone, slot.RewardIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
++    private static bool Blank(params string[] values) => values.Any(string.IsNullOrWhiteSpace);
++    private static double Between(Random random, double min, double max) => min + random.NextDouble() * (max - min);
++    private static void ValidateOptions(UpgradeDistributionOptions options)
++    {
++        static bool Range(double min, double max) => double.IsFinite(min) && double.IsFinite(max) && min >= 0 && min <= max && max <= 1;
++        if (!Range(options.LocalMinimum, options.LocalMaximum)
++            || !Range(options.FirstRegionForeignSharedMinimum, options.FirstRegionForeignSharedMaximum)
++            || options.Attempts is < 1 or > 64 || options.SwapsPerAttempt is < 0 or > 200000)
++            throw new ArgumentOutOfRangeException(nameof(options), "Use probability ranges within 0–1, 1–64 attempts and 0–200000 swaps per attempt.");
++    }
++
++    private sealed class SearchState
++    {
++        private readonly int[] _assignment;
++        private readonly Item[] _items;
++        private readonly int[] _slotRegions;
++        private readonly string[] _regions;
++        private readonly int[,] _types;
++        private readonly int[,] _typeTargets;
++        private readonly int[] _shared;
++        private readonly int[] _sharedForeign;
++        private readonly int[] _withoutHome;
++        private readonly double[] _sharedTargets;
++        private readonly double[] _withoutHomeTargets;
++        private readonly double[,] _noise;
++        private readonly int _localTarget;
++        private readonly double _firstTarget;
++        private int _local;
++        private double _tieBreak;
++
++        public SearchState(int[] assignment, Item[] items, int[] movable, int[] slotRegions,
++            string[] regions, int[,] typeTargets, int[] capacities, double[,] noise, int localTarget, double firstTarget)
++        {
++            _assignment = assignment; _items = items; _slotRegions = slotRegions; _regions = regions;
++            _typeTargets = typeTargets; _noise = noise; _localTarget = localTarget; _firstTarget = firstTarget;
++            _types = new int[regions.Length, Kinds.Length];
++            _shared = new int[regions.Length]; _sharedForeign = new int[regions.Length]; _withoutHome = new int[regions.Length];
++            var shared = movable.Count(i => !items[i].Specific);
++            var withoutHome = movable.Count(i => items[i].Specific && items[i].Homes.Count == 0);
++            _sharedTargets = capacities.Select(n => movable.Length == 0 ? 0d : (double)shared * n / movable.Length).ToArray();
++            _withoutHomeTargets = capacities.Select(n => movable.Length == 0 ? 0d : (double)withoutHome * n / movable.Length).ToArray();
++            foreach (var slot in movable) Change(slot, assignment[slot], 1);
++        }
++
++        private void Change(int slot, int itemIndex, int direction)
++        {
++            var region = _slotRegions[slot]; var item = _items[itemIndex];
++            _types[region, (int)item.Kind] += direction;
++            _tieBreak += direction * _noise[itemIndex, slot];
++            switch (Relation(item, _regions[region]))
++            {
++                case UpgradePlacementRelation.SpecificLocal: _local += direction; break;
++                case UpgradePlacementRelation.SpecificWithoutHome: _withoutHome[region] += direction; break;
++                case UpgradePlacementRelation.SharedLocal: _shared[region] += direction; break;
++                case UpgradePlacementRelation.SharedForeign: _shared[region] += direction; _sharedForeign[region] += direction; break;
++            }
++        }
++
++        public void Swap(int first, int second)
++        {
++            var a = _assignment[first]; var b = _assignment[second];
++            Change(first, a, -1); Change(second, b, -1);
++            _assignment[first] = b; _assignment[second] = a;
++            Change(first, b, 1); Change(second, a, 1);
++        }
++
++        public double Score()
++        {
++            static double Square(double value) => value * value;
++            var score = 80 * Square(_local - _localTarget) + _tieBreak;
++            for (var region = 0; region < _regions.Length; region++)
++            {
++                for (var kind = 0; kind < Kinds.Length; kind++)
++                    score += 5 * Square(_types[region, kind] - _typeTargets[region, kind]) / (_typeTargets[region, kind] + 1);
++                // Prevent unrestricted/purchase-only parts and shared items from
++                // accumulating in one region simply because they are easy to place.
++                score += 2 * Square(_shared[region] - _sharedTargets[region]) / (_sharedTargets[region] + 1);
++                score += Square(_withoutHome[region] - _withoutHomeTargets[region]) / (_withoutHomeTargets[region] + 1);
++                if (region == 0)
++                    // This term has no truck-specific component: extra foreign
++                    // preference in the first region is exclusively for shared items.
++                    score += 18 * Square(_sharedForeign[region] - _firstTarget * _shared[region]) / Math.Max(1, _shared[region]);
++                else score += .15 * _sharedForeign[region];
++            }
++            return score;
++        }
++    }
++}
+diff --git a/upgrade-distribution-draft.md b/upgrade-distribution-draft.md
+new file mode 100644
+index 0000000..304e425
+--- /dev/null
++++ b/upgrade-distribution-draft.md
+@@ -0,0 +1,97 @@
++# Upgrade distribution planner draft
++
++The implemented entry point is `UpgradeDistributionPlanner.Generate(input, seed, options)` in `src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs`. It returns a complete assignment list and a report. It reads no files, mutates no saved state, stages nothing and writes no game data. It is deliberately not wired to the Upgrades tab yet.
++
++```csharp
++var input = new UpgradeDistributionInput(
++    originalPickupSlots,
++    verifiedUpgradeDefinitions,
++    effectiveObtainableTruckHomes,
++    finalizedRegionOrder);
++
++var draft = UpgradeDistributionPlanner.Generate(
++    input,
++    seed: 20261104,
++    options: new UpgradeDistributionOptions(
++        LocalMinimum: .82,
++        LocalMaximum: .91,
++        FirstRegionForeignSharedMinimum: .60,
++        FirstRegionForeignSharedMaximum: .75));
++
++// draft.Assignments: source/map/zone/array index, original ID, new ID, type, relation
++// draft.Report: targets, achieved counts, regional type totals and shortfall notes
++```
++
++## Input contract
++
++| Input | Required meaning |
++| --- | --- |
++| `Slots` | One occurrence per original pickup reward array entry. Includes source SSO, map, region, zone, reward index and original exact reward ID. The supplied slots define the shuffle scope. |
++| `Definitions` | One verified definition per reward ID, with its type and **all compatible models in the full truck catalog**. Merge repeated component IDs across definition files first. A shared part stays shared even when only one compatible model currently appears on maps. |
++| `TruckHomes` | The effective current obtainable truck placements, including randomized/draft replacements, plus direct garage/contract rewards. Mission-only and unverified placements must be excluded by the caller. Supply known homes outside the selected shuffle scope too. |
++| `RegionOrder` | The finalized progression, with every supplied pickup region represented. Its first region receives the shared-item foreign preference. |
++
++For example, Tayga 6455B has a Maine home because its contract awards a truck directly to the Garage. The caller must supply that home even though no physical obtainable scene truck exists for that reward.
++
++The confirmed Kirovets tire reward must be supplied under its exact composite ID `wheels_extend_kirovets_k7m_tire_1`, type `Tire`, compatibility `["kirovets_k7m"]`. The existing Addons catalog still exposes raw local tire names; it is not yet a complete ready-to-pass definition source. A catalog adapter must resolve composite IDs and full compatibility before the UI can invoke this planner.
++
++## Exact constraints
++
++- Every supplied pickup slot receives exactly one reward occurrence.
++- Every reward ID keeps its original occurrence count, including repeated IDs.
++- Global counts by type remain identical, including the single tire upgrade.
++- Every metal detector remains at its original source/map/zone/array index.
++- Definitions can additionally set `KeepInPlace` for any reward that should remain fixed.
++- Unresolved IDs, missing compatibility, duplicate pickup identities, duplicate definition IDs, missing region-order entries and invalid settings are rejected before a draft is returned.
++- Identical inputs/options and seed reproduce the plan. Reordering the slot, definition or home collections does not change it; changing progression order intentionally can.
++
++## Soft distribution goals
++
++The function draws one global same-region target uniformly between 82% and 91%. It uses stochastic rounding to turn that fraction into a pickup count. Only movable truck-specific rewards whose model has a known acquisition region enter that denominator. A part is local if any obtainable copy or direct award of its model exists in the pickup's region. Multiple truck copies do not multiply rewards.
++
++Truck-specific rewards with no current acquisition region form a separate unrestricted group. This includes purchase-only trucks and models absent from the current randomized acquisition snapshot. Their distribution favors spreading them in proportion to regional pickup capacity, without a home-region requirement. Adding a home automatically reclassifies the part on the next explicit generation.
++
++Shared rewards also receive a spread preference. In the first progression region only, a sampled 60–75% foreign-shared target favors shared parts with **no compatible obtainable truck in that region**. No first-region-specific foreign bonus applies to truck-specific parts. Elsewhere, shared parts receive a modest preference for local usefulness. All these terms remain soft, so a small number of slots need not achieve an exact percentage.
++
++Regional upgrade-type counts favor their original values, with deviations permitted when locality and available capacity need them. Overall type totals remain exact regardless of those regional deviations. A fixed detector occupies its original slot and is excluded from movable quotas.
++
++## Search and limits
++
++The planner tries 12 seeded starting shuffles and 12,000 pair swaps per attempt by default. A cooling acceptance rule allows temporary worse moves; it retains the best sampled assignment. Its score combines:
++
++- Global truck-specific locality count error (strongest preference).
++- Deviation from original regional type counts.
++- Regional concentration of shared and no-home truck-specific rewards.
++- First-region foreign-shared error.
++- A small random tie-break cost for variety.
++
++This is a bounded heuristic, not a proof of an optimal assignment. The report records the achieved distribution and notes any locality shortfall, including models whose home regions have no movable pickup slots. It also reports when the first-region shared preference has no candidates or receives no shared slots. It never repairs a shortfall by deleting, duplicating or inventing rewards.
++
++Nothing automatically rerolls when truck assignments change. The caller supplies a fresh snapshot on the next requested generation. Persistence, source/hash conflict checks, staging, PAK/cache-block edits and the UI action remain separate integration work.
++
++## Verification
++
++`.checks/UpgradePlannerRegression` checks exact ID/type counts, fixed detectors and explicit pins, deterministic seeds and input order, first-region shared-only bias, infeasible targets, purchase-only-to-regional transitions, multiple home regions, repeated reward IDs, unresolved inputs and empty scopes. It independently joins every reported relation to a synthetic randomized truck-home snapshot.
++
++A 166-slot example using the preserved original acquisition baseline, including the Tayga contract reward and confirmed tire, with seed `20261104` produced:
++
++| Group | Count |
++| --- | ---: |
++| Truck-specific, same region | 95 |
++| Truck-specific, elsewhere | 16 |
++| Truck-specific, no home | 16 |
++| Movable shared | 38 |
++| Fixed metal detector | 1 |
++| Total | 166 |
++
++The sampled local target was 85.14%, rounded to 95 of 111, and the plan achieved that count. Michigan was the example's first region and received five shared parts, four foreign. Its sampled foreign-shared target was 74.16%; 4/5 is an allowed soft deviation at that small sample size. This is an example fixture, not a claim to reflect the user's current randomized truck snapshot.
++
++The same reward pool with a synthetic randomized home snapshot reclassified the parts automatically: 65 truck-specific rewards had homes (56 local, nine elsewhere), 62 had no home, 38 remained movable shared and one detector stayed fixed. This demonstrates why original counts such as 96/15/16 should not be hardcoded after trucks are randomized.
++
++Run the checks with:
++
++```powershell
++dotnet run --project .checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj -c Release
++```
++
++Generated example plans are under `.checks/UpgradePlannerRegression/results/` and are analysis artifacts only.
+diff --git a/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj b/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj
+new file mode 100644
+index 0000000..bc7dc36
+--- /dev/null
++++ b/.checks/UpgradePlannerRegression/UpgradePlannerRegression.csproj
+@@ -0,0 +1,12 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net10.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <NuGetAudit>false</NuGetAudit>
++  </PropertyGroup>
++  <ItemGroup>
++    <Compile Include="../../src/SnowPakTool.Desktop/UpgradeDistributionPlanner.cs" Link="UpgradeDistributionPlanner.cs" />
++  </ItemGroup>
++</Project>
+diff --git a/.checks/UpgradePlannerRegression/Program.cs b/.checks/UpgradePlannerRegression/Program.cs
+new file mode 100644
+index 0000000..1287fe2
+--- /dev/null
++++ b/.checks/UpgradePlannerRegression/Program.cs
+@@ -0,0 +1,176 @@
++using System.Text.Json;
++using SnowPakTool.Desktop;
++
++static class Program
++{
++    static void Check(bool value, string message) { if (!value) throw new Exception(message); }
++    static string Signature(UpgradeDistributionPlan plan) => string.Join("\n", plan.Assignments.Select(a => $"{a.Slot.Source}|{a.Slot.Zone}|{a.Slot.RewardIndex}|{a.UpgradeId}|{a.Relation}"));
++    static UpgradeDistributionSlot Slot(int index, string region, string id) => new($"[ps]/level_{region}_01.sso", $"level_{region}_01", region, $"ZONE_{index}", 0, id);
++    static void Reject(Action action, string message)
++    {
++        try { action(); }
++        catch (ArgumentException) { return; }
++        throw new Exception(message);
++    }
++
++    static void CheckPool(UpgradeDistributionInput input, UpgradeDistributionPlan plan)
++    {
++        var before = input.Slots.GroupBy(s => s.OriginalUpgradeId).ToDictionary(g => g.Key, g => g.Count());
++        var after = plan.Assignments.GroupBy(a => a.UpgradeId).ToDictionary(g => g.Key, g => g.Count());
++        Check(before.Count == after.Count && before.All(p => after.GetValueOrDefault(p.Key) == p.Value), "Exact reward multiset");
++        Check(plan.Assignments.Count == input.Slots.Count, "All pickup slots filled");
++        Check(plan.Report.OriginalTypes.All(p => plan.Report.PlannedTypes[p.Key] == p.Value), "All type counts preserved");
++        foreach (var assignment in plan.Assignments.Where(a => a.Kind == UpgradeKind.MetalDetector))
++            Check(assignment.UpgradeId == assignment.Slot.OriginalUpgradeId && assignment.Relation == UpgradePlacementRelation.Fixed, "Detector slot pinned");
++        Check(plan.Report.SpecificLocal + plan.Report.SpecificElsewhere == plan.Report.SpecificWithHome, "Locality denominator excludes absent trucks and generic items");
++    }
++
++    static UpgradeDistributionInput Fixture()
++    {
++        var definitions = new List<UpgradeDistributionDefinition>();
++        var homes = new List<UpgradeTruckHome>();
++        var slots = new List<UpgradeDistributionSlot>();
++        var regions = new[] { "aa", "bb", "cc", "dd" };
++        for (var index = 0; index < 40; index++)
++        {
++            var truck = "truck_" + index;
++            var id = "specific_" + index;
++            definitions.Add(new(id, index % 2 == 0 ? UpgradeKind.Engine : UpgradeKind.Suspension, [truck]));
++            homes.Add(new(truck, regions[index % regions.Length]));
++            slots.Add(Slot(index, regions[index % regions.Length], id));
++        }
++        // Half the shared items are useful in the first region; half serve only
++        // trucks elsewhere. All remain shared even if one compatible model is absent.
++        homes.Add(new("local_shared_a", "aa")); homes.Add(new("local_shared_b", "bb"));
++        homes.Add(new("foreign_shared_a", "cc")); homes.Add(new("foreign_shared_b", "dd"));
++        for (var index = 0; index < 16; index++)
++        {
++            var id = "shared_" + index;
++            definitions.Add(new(id, UpgradeKind.Gearbox, index < 8 ? ["local_shared_a", "local_shared_b"] : ["foreign_shared_a", "foreign_shared_b"]));
++            slots.Add(Slot(40 + index, regions[index % regions.Length], id));
++        }
++        for (var index = 0; index < 4; index++)
++        {
++            var id = "buyable_" + index;
++            definitions.Add(new(id, UpgradeKind.DifferentialLock, ["buyable_truck_" + index]));
++            slots.Add(Slot(56 + index, regions[index], id));
++        }
++        definitions.Add(new("metal_detector", UpgradeKind.MetalDetector, []));
++        slots.Add(Slot(60, "aa", "metal_detector"));
++        return new(slots, definitions, homes, regions);
++    }
++
++    static UpgradeDistributionInput RealFixture(string project)
++    {
++        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(project, ".checks/UpgradeRegionAnalysis/results/original-trucks-upgrades.json")));
++        var root = document.RootElement;
++        var models = root.GetProperty("Models").EnumerateArray().ToArray();
++        var references = root.GetProperty("References").EnumerateArray().ToArray();
++        var info = root.GetProperty("RewardInfo");
++        var definitions = new List<UpgradeDistributionDefinition>();
++        foreach (var reference in references.DistinctBy(r => r.GetProperty("UpgradeId").GetString()))
++        {
++            var id = reference.GetProperty("UpgradeId").GetString()!;
++            var compatible = models.Where(m => m.GetProperty("CompatibleRewardIds").EnumerateArray().Any(v => v.GetString() == id))
++                .Select(m => m.GetProperty("Truck").GetString()!).ToArray();
++            UpgradeKind kind;
++            if (id == "wheels_extend_kirovets_k7m_tire_1") { kind = UpgradeKind.Tire; compatible = ["kirovets_k7m"]; }
++            else kind = info.GetProperty(id).GetProperty("Type").GetString() switch
++            {
++                "Engine" => UpgradeKind.Engine, "Suspension" => UpgradeKind.Suspension,
++                "Gearbox" => UpgradeKind.Gearbox, "awd" => UpgradeKind.Awd,
++                "diff_lock" => UpgradeKind.DifferentialLock,
++                "frame_addons" when id == "frame_addon_metal_detector" => UpgradeKind.MetalDetector,
++                _ => throw new Exception("Unresolved fixture item " + id)
++            };
++            definitions.Add(new(id, kind, compatible));
++        }
++        var homes = models.SelectMany(m => m.GetProperty("Regions").EnumerateArray()
++            .Select(region => new UpgradeTruckHome(m.GetProperty("Truck").GetString()!, region.GetString()!))).ToList();
++        // Verified direct garage reward: Starting The Plank Production, Maine.
++        homes.Add(new("tayga_6455b", "us_06"));
++        var slots = references.Select(r => new UpgradeDistributionSlot(r.GetProperty("Source").GetString()!, r.GetProperty("Map").GetString()!,
++            r.GetProperty("Region").GetString()!, r.GetProperty("Zone").GetString()!, r.GetProperty("Index").GetInt32(), r.GetProperty("UpgradeId").GetString()!)).ToArray();
++        var regions = slots.Select(s => s.Region).Distinct().OrderBy(code => code == "us_01" ? 0 : 1).ThenBy(code => code, StringComparer.Ordinal).ToArray();
++        return new(slots, definitions, homes, regions);
++    }
++
++    static void Main()
++    {
++        var input = Fixture();
++        var options = new UpgradeDistributionOptions(Attempts: 6, SwapsPerAttempt: 8000);
++        var first = UpgradeDistributionPlanner.Generate(input, 2345, options);
++        CheckPool(input, first);
++        Check(first.Report.SpecificWithHome == 40 && first.Report.SpecificWithoutHome == 4 && first.Report.Shared == 16, "Correct fixture categories");
++        Check(first.Report.SpecificLocal == first.Report.LocalTargetCount, "Feasible fixture reaches sampled locality target");
++        Check(Signature(first) == Signature(UpgradeDistributionPlanner.Generate(input, 2345, options)), "Repeatable seed");
++        Check(Signature(first) != Signature(UpgradeDistributionPlanner.Generate(input, 2346, options)), "Different seeds produce different plans");
++        var reordered = new UpgradeDistributionInput(input.Slots.Reverse().ToArray(), input.Definitions.Reverse().ToArray(), input.TruckHomes.Reverse().ToArray(), input.RegionOrder);
++        Check(Signature(first) == Signature(UpgradeDistributionPlanner.Generate(reordered, 2345, options)), "Order-independent caller snapshots");
++
++        var low = UpgradeDistributionPlanner.Generate(input, 333, options with { FirstRegionForeignSharedMinimum = 0, FirstRegionForeignSharedMaximum = 0 });
++        var high = UpgradeDistributionPlanner.Generate(input, 333, options with { FirstRegionForeignSharedMinimum = 1, FirstRegionForeignSharedMaximum = 1 });
++        CheckPool(input, low); CheckPool(input, high);
++        Check(high.Report.FirstRegionForeignShared > low.Report.FirstRegionForeignShared, "First-region bias changes shared foreign selection");
++        Check(high.Report.LocalTargetCount == low.Report.LocalTargetCount && high.Report.SpecificLocal == low.Report.SpecificLocal, "First-region foreign preference does not change the truck-specific locality target/result in feasible fixture");
++
++        var singleRegion = input with { Slots = input.Slots.Select(s => s with { Region = "aa" }).ToArray(), RegionOrder = ["aa"] };
++        var impossible = UpgradeDistributionPlanner.Generate(singleRegion, 5, options);
++        CheckPool(singleRegion, impossible);
++        Check(impossible.Report.SpecificLocal == 10 && impossible.Report.Notes.Any(n => n.Contains("no movable pickup slot")), "Impossible local target returns intact plan and honest shortfall");
++
++        var duplicateSlots = new[] { Slot(0,"aa","repeat"), Slot(1,"bb","repeat"), Slot(2,"bb","other") };
++        var repeated = new UpgradeDistributionInput(duplicateSlots, [new("repeat",UpgradeKind.Engine,["one"]),new("other",UpgradeKind.Gearbox,["one","two"])], [new("one","aa")], ["aa","bb"]);
++        CheckPool(repeated, UpgradeDistributionPlanner.Generate(repeated, 2, options));
++        var withNewTruckHome = input with { TruckHomes = input.TruckHomes.Concat(new[] { new UpgradeTruckHome("buyable_truck_0","aa") }).ToArray() };
++        var moved = UpgradeDistributionPlanner.Generate(withNewTruckHome, 4, options);
++        Check(moved.Report.SpecificWithHome == 41 && moved.Report.SpecificWithoutHome == 3, "Buyable part reclassified when its model becomes obtainable");
++        var multiHome = input with { TruckHomes = input.TruckHomes.Concat(new[] { new UpgradeTruckHome("truck_0","bb"), new UpgradeTruckHome("truck_0","aa") }).ToArray() };
++        Check(UpgradeDistributionPlanner.Generate(multiHome, 4, options).Report.SpecificWithHome == 40, "Multiple truck copies/regions do not multiply rewards");
++        var extraPin = input with { Definitions = input.Definitions.Select(d => d.Id == "buyable_0" ? d with { KeepInPlace = true } : d).ToArray() };
++        var pinned = UpgradeDistributionPlanner.Generate(extraPin, 4, options);
++        CheckPool(extraPin, pinned);
++        Check(pinned.Report.Fixed == 2 && pinned.Assignments.Single(a => a.Slot.OriginalUpgradeId == "buyable_0").UpgradeId == "buyable_0", "Additional explicit pins preserved");
++        var noForeign = input with { TruckHomes = input.TruckHomes.Concat(new[] { new UpgradeTruckHome("foreign_shared_a","aa") }).ToArray() };
++        var noForeignPlan = UpgradeDistributionPlanner.Generate(noForeign, 4, options);
++        Check(noForeignPlan.Report.FirstRegionForeignShared == 0 && noForeignPlan.Report.Notes.Any(n => n.Contains("no foreign shared candidate")), "Unavailable first-region generic target is reported without fabricating candidates");
++
++        Reject(() => UpgradeDistributionPlanner.Generate(input with { Definitions = input.Definitions.Skip(1).ToArray() },1), "Unknown rewards must fail");
++        Reject(() => UpgradeDistributionPlanner.Generate(input with { Slots = input.Slots.Concat(new[] { input.Slots[0] }).ToArray() },1), "Duplicate slot identity must fail");
++        Reject(() => UpgradeDistributionPlanner.Generate(input,1,options with { LocalMinimum = double.NaN }), "Invalid probability must fail");
++        Reject(() => UpgradeDistributionPlanner.Generate(input with { RegionOrder = ["aa"] },1), "Missing progression region must fail");
++        var empty = UpgradeDistributionPlanner.Generate(new([],[],[],[]),1);
++        Check(empty.Assignments.Count == 0 && empty.Report.Notes.Count > 0,"Empty scope supported");
++
++        var project = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,"../../../../.."));
++        var realInput = RealFixture(project);
++        var timer = System.Diagnostics.Stopwatch.StartNew();
++        var real = UpgradeDistributionPlanner.Generate(realInput, 20261104);
++        CheckPool(realInput, real);
++        Check(real.Assignments.Count == 166 && real.Report.Fixed == 1 && real.Report.SpecificWithoutHome == 16
++            && real.Report.SpecificWithHome == 111 && real.Report.Shared == 38, "166-item baseline including tire, contract reward and fixed detector");
++        var output = Path.Combine(project,".checks/UpgradePlannerRegression/results"); Directory.CreateDirectory(output);
++        File.WriteAllText(Path.Combine(output,"example-plan.json"),JsonSerializer.Serialize(real,new JsonSerializerOptions { WriteIndented = true }));
++        var models = realInput.Definitions.SelectMany(d => d.CompatibleTrucks).Distinct().Order(StringComparer.Ordinal).ToArray();
++        var random = new Random(4567);
++        var randomizedInput = realInput with { TruckHomes = realInput.TruckHomes.Select(home => home.Truck == "tayga_6455b"
++            ? home : home with { Truck = models[random.Next(models.Length)] }).ToArray() };
++        var randomized = UpgradeDistributionPlanner.Generate(randomizedInput, 20261104);
++        CheckPool(randomizedInput, randomized);
++        Check(randomized.Report.SpecificWithHome != real.Report.SpecificWithHome, "Uses supplied randomized truck homes instead of original fixed quotas");
++        var definitionMap = randomizedInput.Definitions.ToDictionary(d => d.Id);
++        foreach (var assignment in randomized.Assignments.Where(a => a.Relation != UpgradePlacementRelation.Fixed))
++        {
++            var compatible = definitionMap[assignment.UpgradeId].CompatibleTrucks;
++            var homes = randomizedInput.TruckHomes.Where(h => compatible.Contains(h.Truck)).Select(h => h.Region).Distinct().ToArray();
++            var expected = compatible.Count == 1
++                ? homes.Length == 0 ? UpgradePlacementRelation.SpecificWithoutHome : homes.Contains(assignment.Slot.Region) ? UpgradePlacementRelation.SpecificLocal : UpgradePlacementRelation.SpecificElsewhere
++                : homes.Contains(assignment.Slot.Region) ? UpgradePlacementRelation.SharedLocal : UpgradePlacementRelation.SharedForeign;
++            Check(assignment.Relation == expected, "Reported relation agrees with independently joined randomized homes");
++        }
++        File.WriteAllText(Path.Combine(output,"randomized-homes-plan.json"),JsonSerializer.Serialize(randomized,new JsonSerializerOptions { WriteIndented = true }));
++        Console.WriteLine($"PASS planner invariants, deterministic seeds/order, bias isolation, impossible targets, buyable transitions, multi-region copies, duplicate rewards and validation.");
++        Console.WriteLine($"Original 166-slot example: local {real.Report.SpecificLocal}/{real.Report.SpecificWithHome} (target {real.Report.LocalTargetCount}), elsewhere {real.Report.SpecificElsewhere}, no-home {real.Report.SpecificWithoutHome}, movable shared {real.Report.Shared}, fixed {real.Report.Fixed}; first-region foreign shared {real.Report.FirstRegionForeignShared}/{real.Report.FirstRegionShared}; {timer.Elapsed.TotalSeconds:F2}s.");
++        foreach (var note in real.Report.Notes) Console.WriteLine(note);
++    }
++}
