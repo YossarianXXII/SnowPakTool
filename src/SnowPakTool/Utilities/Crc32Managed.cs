@@ -1,4 +1,5 @@
-﻿using System.Security.Cryptography;
+﻿using System;
+using System.Security.Cryptography;
 
 namespace SnowPakTool {
 
@@ -32,14 +33,19 @@ namespace SnowPakTool {
 			m_CrcValue = 0;
 		}
 
+		/// <summary>Returns the CRC-32 value. The caller chooses the byte order when writing it.</summary>
+		public static uint HashToUInt32 ( ReadOnlySpan<byte> data ) =>
+			~Update ( DefaultSeed , data );
+
 		protected override void HashCore ( byte[] array , int ibStart , int cbSize ) {
-			unchecked {
-				m_CrcValue ^= DefaultSeed;
-				while ( --cbSize >= 0 ) {
-					m_CrcValue = __CrcTable[( m_CrcValue ^ array[ibStart++] ) & 0xFF] ^ ( m_CrcValue >> 8 );
-				}
-				m_CrcValue ^= DefaultSeed;
+			m_CrcValue = ~Update ( ~m_CrcValue , array.AsSpan ( ibStart , cbSize ) );
+		}
+
+		private static uint Update ( uint crc , ReadOnlySpan<byte> data ) {
+			foreach ( var value in data ) {
+				crc = __CrcTable[( crc ^ value ) & 0xFF] ^ ( crc >> 8 );
 			}
+			return crc;
 		}
 
 		protected override byte[] HashFinal () {

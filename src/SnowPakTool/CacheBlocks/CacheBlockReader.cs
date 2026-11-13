@@ -12,6 +12,10 @@ namespace SnowPakTool {
 			FileEntries = new CacheBlockFileFileEntry[count];
 			ReadFileEntries ();
 			BaseOffset = stream.Position;
+			var dataLength = GetDataLength ();
+			foreach ( var entry in FileEntries ) {
+				GetPayloadOffset ( entry , dataLength );
+			}
 		}
 
 
@@ -20,15 +24,27 @@ namespace SnowPakTool {
 		}
 
 		public void Unpack ( string targetDirectory , IReadOnlyCollection<CacheBlockFileFileEntry> entries ) {
+			if ( targetDirectory is null ) throw new ArgumentNullException ( nameof ( targetDirectory ) );
+			if ( entries is null ) throw new ArgumentNullException ( nameof ( entries ) );
+			var root = Path.GetFullPath ( targetDirectory );
+			var dataLength = GetDataLength ();
+			// Validate the complete selection before creating any output.
+			var targets = entries.Select ( item => new {
+				Path = ExtractionPath.GetDestination ( root , item.ExternalName ) ,
+				Offset = GetPayloadOffset ( item , dataLength ) ,
+				item.Size
+			} ).ToArray ();
 			var i = 0;
-			foreach ( var item in entries ) {
+			foreach ( var targetFile in targets ) {
 				i++;
 				Console.Write ( $"\rUnpacking: {i}/{entries.Count}" );
-				var targetLocation = Path.Combine ( targetDirectory , item.ExternalName );
-				Stream.Position = BaseOffset + item.RelativeOffset;
+				var targetLocation = targetFile.Path;
+				Stream.Position = targetFile.Offset;
+				ExtractionPath.RejectReparsePoints ( targetLocation );
 				Directory.CreateDirectory ( Path.GetDirectoryName ( targetLocation ) );
+				ExtractionPath.RejectReparsePoints ( targetLocation );
 				using ( var target = File.Open ( targetLocation , FileMode.CreateNew , FileAccess.Write ) ) {
-					Stream.CopyBytesTo ( target , item.Size );
+					Stream.CopyBytesTo ( target , targetFile.Size );
 				}
 			}
 			Console.WriteLine ();
@@ -36,15 +52,36 @@ namespace SnowPakTool {
 
 
 		private int ReadHeader () {
-			var bytes = new byte[Signature.Length];
-			var read = Stream.Read ( bytes , 0 , Signature.Length );
-			if ( read < Signature.Length || !bytes.SequenceEqual ( Signature ) ) throw new InvalidDataException ( "Unknown file header format." );
+			byte[] bytes;
+			try {
+				bytes = Stream.ReadByteArray ( Signature.Length );
+			}
+			catch ( EndOfStreamException error ) {
+				throw new InvalidDataException ( "Unknown file header format." , error );
+			}
+			if ( !bytes.SequenceEqual ( Signature ) ) throw new InvalidDataException ( "Unknown file header format." );
 			Stream.ReadMagicInt32 ( 1 );
 			Stream.ReadMagicByte ( 1 );
 			var count = Stream.ReadInt32 ();
 			Stream.ReadMagicInt32 ( 4 );
 			Stream.ReadMagicByte ( 1 );
+			if ( count < 0 ) throw new InvalidDataException ( $"Invalid cache-block entry count ({count})." );
+			// Three table markers and at least a name prefix, offset, size and zero per entry.
+			Stream.RequireRemainingBytes ( 3 + 20L * count , "cache-block entry tables" );
 			return count;
+		}
+
+		private long GetDataLength () {
+			return ( Stream.CanSeek ? Stream.Length : long.MaxValue ) - BaseOffset;
+		}
+
+		private long GetPayloadOffset ( CacheBlockFileFileEntry entry , long dataLength ) {
+			var offset = entry.RelativeOffset;
+			var size = entry.Size;
+			if ( offset < 0 || size < 0 || offset > dataLength || size > dataLength - offset ) {
+				throw new InvalidDataException ( $"Invalid cache-block payload range for '{entry.InternalName}' (offset {offset}, size {size})." );
+			}
+			return BaseOffset + offset;
 		}
 
 		private void ReadFileEntries () {
