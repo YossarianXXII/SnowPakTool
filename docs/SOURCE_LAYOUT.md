@@ -23,10 +23,6 @@ The winch editor's existing `TruckEditTab.cs` name is retained. The folder ident
 
 `Program.cs` remains the command-line entry point. `Archives` handles PAK operations, `CacheBlocks` handles cache-block formats, `Containers` abstracts file sources, `Lists` handles load/sound lists, `Utilities` contains shared helpers, and the existing `Zip` folder contains ZIP records.
 
-## Truck configuration tool (`src/SnowTruckConfig`)
-
-`Program.cs` remains the entry point. `Trucks` contains truck transformations, `Localization` contains language/string handling, and `Utilities` contains XML and pair helpers.
-
 ## Repository layout and maintenance
 
 The repository root contains `SnowRunnerTools.sln`, `global.json`, the shared
@@ -36,7 +32,6 @@ identities are unchanged.
 
 | Folder | Purpose |
 | --- | --- |
-| `tests/SnowTruckConfig.Tests` | Original MSTest string-parser tests |
 | `tests/Regression` | Maintained executable regression checks, included in the solution |
 | `tests/Legacy` | Historical linked/copied-source checks, excluded from the solution |
 | `tools` | Build, test and publish entry points |

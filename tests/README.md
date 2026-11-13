@@ -28,8 +28,6 @@ workspace-dependent executable.
 
 ## Original unit tests
 
-`SnowTruckConfig.Tests` retains the original MSTest suite and target framework.
-Run `dotnet test tests/SnowTruckConfig.Tests/SnowTruckConfig.Tests.csproj -c Release`.
 A compatible .NET Core 3.1 runtime or an explicitly selected compatible runtime
 roll-forward policy is required for these legacy-targeted unit tests. Framework
 modernization is a separate change from repository organization.
