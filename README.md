@@ -1,4 +1,4 @@
-- **SnowPakTool Desktop** is a Windows app for editing and repacking SnowRunner game data.
+- **SnowDeskTool** is a Windows app for editing and repacking SnowRunner game data. My main focus was on randomization of trucks/upgrades and doing it with few clicks and with reasonable difficulty options.
   - **Start** — Unpack an initial PAK, review staged changes, apply them to your workspace, and pack a new PAK.
   - **Editors** — Edit truck properties, engines, winches, addons, trailers, cargo mass, rank XP, and tire ice behavior.
   - **Planning** — Set DLC ownership, truck groups and tiers, region difficulty, and progression order.
